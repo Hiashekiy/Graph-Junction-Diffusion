@@ -53,6 +53,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--bootstrap", type=int, default=5000)
+    parser.add_argument(
+        "--bucket-data", default=None,
+        help="给了就按该 split 的难度 / 决策数 / 结构模式**分组**做多种子配对检验"
+             "（用于检验'收益是否集中在长决策链上'这类假设）",
+    )
+    parser.add_argument(
+        "--save-records", default=None,
+        help="把逐 seed 的 0/1 命中矩阵存成 json（便于事后换分组/换指标重算）",
+    )
     parser.add_argument("--out", default=None)
     return parser.parse_args()
 
@@ -196,6 +205,79 @@ def main() -> int:
     )
     print(f"verdict: {verdict}")
 
+    def paired_stats(mask) -> Dict[str, Any]:
+        """在给定 query 子集上做多种子配对检验。"""
+        mean_a = hits_a[:, mask].mean(axis=0)
+        mean_b = hits_b[:, mask].mean(axis=0)
+        subset = mean_b - mean_a
+        n = int(mask.sum())
+        if n == 0:
+            return {"n": 0}
+        t, p = stats.ttest_rel(mean_b, mean_a)
+        try:
+            _, wp = stats.wilcoxon(subset)
+        except ValueError:
+            wp = 1.0
+        lo, hi = bootstrap_ci(subset, args.bootstrap)
+        return {
+            "n": n,
+            "rate_a": float(hits_a[:, mask].mean()),
+            "rate_b": float(hits_b[:, mask].mean()),
+            "delta": float(subset.mean()),
+            "p_value": float(p),
+            "wilcoxon_p": float(wp),
+            "bootstrap_ci": [lo, hi],
+        }
+
+    buckets: Dict[str, Any] = {}
+    if args.bucket_data:
+        from src.data.dataset import GraphQueryDataset
+        from src.evaluation.buckets import bucket_indices
+
+        dataset = GraphQueryDataset.load(args.bucket_data)
+        if len(dataset) != hits_a.shape[1]:
+            raise SystemExit(
+                f"bucket data has {len(dataset)} queries but eval used {hits_a.shape[1]}"
+            )
+        print(f"\nper-bucket multi-seed paired test (metric={args.metric}):")
+        header = (
+            f"{'bucket':<28}{'n':>5}  {'A':>7}{'B':>7}{'delta':>8}{'p':>9}  verdict"
+        )
+        print(header)
+        print("-" * len(header))
+        for name, indices in sorted(
+            bucket_indices(dataset).items(), key=lambda kv: (kv[0] != "ALL", kv[0])
+        ):
+            mask = np.zeros(hits_a.shape[1], dtype=bool)
+            mask[list(indices)] = True
+            stats_row = paired_stats(mask)
+            buckets[name] = stats_row
+            significant = stats_row["p_value"] < 0.05 and (
+                stats_row["bootstrap_ci"][0] > 0 or stats_row["bootstrap_ci"][1] < 0
+            )
+            print(
+                f"{name:<28}{stats_row['n']:>5}  {stats_row['rate_a']:>7.3f}"
+                f"{stats_row['rate_b']:>7.3f}{stats_row['delta']:>+8.3f}"
+                f"{stats_row['p_value']:>9.4f}  "
+                + ("显著" if significant else "-")
+            )
+
+    if args.save_records:
+        with open(args.save_records, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "metric": args.metric,
+                    "seeds": seeds,
+                    "a": hits_a.tolist(),
+                    "b": hits_b.tolist(),
+                    "run_a": str(run_a),
+                    "run_b": str(run_b),
+                },
+                handle,
+                indent=1,
+            )
+        print(f"\nper-seed hit matrices written: {args.save_records}")
+
     if args.out:
         payload: Dict[str, Any] = {
             "a": str(run_a),
@@ -211,6 +293,7 @@ def main() -> int:
             "wilcoxon_p": float(w_p),
             "bootstrap_ci": [low, high],
             "verdict": verdict,
+            "buckets": buckets,
         }
         with open(args.out, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=1, ensure_ascii=False)

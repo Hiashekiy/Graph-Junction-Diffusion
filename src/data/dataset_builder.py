@@ -145,6 +145,7 @@ def build_dataset(
     component_fallback: bool = True,
     max_rejects: int = 5000,
     progress_every: int = 0,
+    min_decisions: int = 0,
 ) -> GraphQueryDataset:
     """生成 ``num_samples`` 个 (G, s, g) 样本。
 
@@ -155,6 +156,9 @@ def build_dataset(
 
     ``queries_per_graph`` > 1 时同一张图上抽多个 OD 对；这些样本共享同一个
     ``graph_id``，所以按 graph 划分时它们会一起进同一个 split。
+
+    ``min_decisions`` > 0 时只保留 GT 路径决策数 >= 该值的样本（用于造"长决策链"
+    专项评测集；对随机图生成器无意义，会被忽略）。
     """
     if weighted:
         # P1-1：模型边输入只有 selected/unselected，看不到 edge cost。
@@ -177,6 +181,7 @@ def build_dataset(
             ),
             branch_cfg=(generator_cfg or {}).get("branch"),
             progress_every=progress_every,
+            min_decisions=int(min_decisions),
         )
 
     rng = np.random.default_rng(seed)
@@ -244,15 +249,21 @@ def build_controlled_dataset(
     branch_cfg: Optional[Dict[str, Any]] = None,
     progress_every: int = 0,
     max_attempts_per_sample: int = 300,
+    min_decisions: int = 0,
 ) -> GraphQueryDataset:
     """用 Controlled Junction Graph 生成样本。
 
     每张合格图产生一个 OD query（start/goal 由生成器决定），并把难度 / 结构模式 /
     干扰分支统计写进 ``sample.meta``，供 :func:`dataset_statistics` 汇总。
+
+    ``min_decisions`` > 0 时只保留 GT 决策数 >= 该值的样本。这一条是给**长决策链
+    专项评测集**用的：正常采样下 decisions >= 9 的样本只占 ~3.7%（hard 档接受率
+    只有 4.1%），所以长链桶在 300 条测试集里只有 11 条，统计上什么都说明不了。
     """
     rng = np.random.default_rng(seed)
     samples: List[GraphSample] = []
     attempts = 0
+    rejected_by_min_decisions = 0
     t0 = time.time()
     branch_kwargs: Dict[str, Any] = {}
     if branch_cfg:
@@ -302,6 +313,10 @@ def build_controlled_dataset(
             validate_sample(sample)
         except (ValueError, RuntimeError, AssertionError, nx.NetworkXError):
             continue
+        if min_decisions and int(sample.num_decisions) < int(min_decisions):
+            # 长链专项：难度过滤通过、但决策数不够的样本直接丢掉（记数便于报接受率）
+            rejected_by_min_decisions += 1
+            continue
         samples.append(sample)
 
         if progress_every and len(samples) % progress_every == 0:
@@ -314,6 +329,11 @@ def build_controlled_dataset(
 
     dataset = GraphQueryDataset(samples, name=f"controlled_{num_samples}")
     dataset.attempts = attempts
+    # 记下过滤条件，便于 generate_dataset.py 写进 summary（长链专项评测集要能自证）
+    dataset.filter_info = {
+        "min_decisions": int(min_decisions),
+        "rejected_by_min_decisions": int(rejected_by_min_decisions),
+    }
     del rng, attempts, t0, branch_kwargs
     return dataset
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import yaml
 
@@ -137,6 +137,28 @@ def set_inplace(data: Dict[str, Any], dotted_key: str, value: Any) -> None:
             node[part] = nxt
         node = nxt
     node[parts[-1]] = value
+
+
+def flatten_overrides(overrides: Optional[Iterable[Any]]) -> List[str]:
+    """把 argparse 的 ``--set`` 值摊平成一维 ``key=value`` 字符串列表。
+
+    两种写法都会遇到：
+
+    * ``action="append"`` -> ``["a.b=1", "c.d=2"]``（已经是扁平的字符串）；
+    * ``nargs="*"``       -> ``[["a.b=1"], ["c.d=2"]]``（嵌套列表）。
+
+    不区分就会出事：对扁平字符串列表做 ``for group in overrides for item in group``
+    会**按字符拆开**（``"data.num_samples=400"`` 变成 ``'d','a','t','a',...``），
+    报错信息是 ``override 'd' is not in key=value form``。这个坑踩过两次
+    （scripts/train.py、scripts/generate_dataset.py），所以统一走这个函数。
+    """
+    flat: List[str] = []
+    for item in overrides or []:
+        if isinstance(item, str):
+            flat.append(item)
+        else:
+            flat.extend(str(part) for part in item)
+    return flat
 
 
 def apply_overrides(cfg: Dict[str, Any], overrides: Iterable[str]) -> Dict[str, Any]:

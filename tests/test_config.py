@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.utils.config import Config, apply_overrides, load_config
+from src.utils.config import (
+    Config,
+    apply_overrides,
+    flatten_overrides,
+    load_config,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = REPO_ROOT / "configs" / "graph_flow.yaml"
@@ -122,3 +127,26 @@ def test_real_config_matches_guide_defaults():
 def test_bad_override_is_rejected():
     with pytest.raises(ValueError):
         apply_overrides({}, ["not_a_pair"])
+
+
+def test_flatten_overrides_handles_both_argparse_shapes():
+    """`--set` 的两种 argparse 写法都要能摊平。
+
+    真实踩过两次：`action="append"` 给的是扁平字符串列表，再做
+    `for group in overrides for item in group` 会**按字符拆开**，
+    `"data.num_samples=400"` 变成 `'d','a','t','a',...`，报
+    `override 'd' is not in key=value form`。
+    """
+    assert flatten_overrides(["a.b=1", "c.d=2"]) == ["a.b=1", "c.d=2"]
+    assert flatten_overrides([["a.b=1"], ["c.d=2"]]) == ["a.b=1", "c.d=2"]
+    assert flatten_overrides([]) == []
+    assert flatten_overrides(None) == []
+
+
+def test_overrides_reach_the_config_after_flattening():
+    """摊平后的字符串要真的写进配置（apply_overrides 端到端过一遍）。"""
+    overrides = flatten_overrides(["data.num_samples=400", "seed=7"])
+    data = Config({"data": {"num_samples": 3000}}).to_dict()
+    apply_overrides(data, overrides)
+    assert data["data"]["num_samples"] == 400
+    assert data["seed"] == 7

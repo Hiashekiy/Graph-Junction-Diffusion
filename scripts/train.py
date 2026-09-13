@@ -36,7 +36,7 @@ from src.training.setup import (  # noqa: E402
     run_directory,
 )
 from src.training.trainer import Trainer  # noqa: E402
-from src.utils.config import load_config  # noqa: E402
+from src.utils.config import flatten_overrides, load_config  # noqa: E402
 from src.utils.seed import make_generator, set_seed  # noqa: E402
 
 
@@ -69,7 +69,7 @@ def main() -> int:
     args = parse_args()
     # --set 可以重复出现；nargs='*' 版本的 argparse 会丢掉前面几次的值，
     # 所以这里显式摊平（action='append' 给的是 [[...], [...]]）
-    overrides = [item for group in args.overrides for item in group]
+    overrides = flatten_overrides(args.overrides)
     if args.name:
         overrides.append(f"paths.run_name={args.name}")
     if args.epochs is not None:

@@ -37,7 +37,7 @@ from src.data.dataset_builder import (  # noqa: E402
 )
 from src.data.dataset_builder import CONTROLLED_JUNCTION  # noqa: E402
 from src.training.setup import generator_config  # noqa: E402
-from src.utils.config import load_config  # noqa: E402
+from src.utils.config import flatten_overrides, load_config  # noqa: E402
 from src.utils.seed import set_seed  # noqa: E402
 
 
@@ -46,6 +46,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/graph_flow.yaml")
     parser.add_argument("--name", default=None, help="dataset name (default: <graph_type>_<n>)")
     parser.add_argument("--data-dir", default=None)
+    parser.add_argument(
+        "--min-decisions",
+        type=int,
+        default=0,
+        help="只保留 GT 决策数 >= N 的样本（造长决策链专项评测集用；默认 0 = 不过滤）",
+    )
+    parser.add_argument(
+        "--no-split",
+        action="store_true",
+        help="不划分 train/val/test，整份存成 data/<name>.pkl（专项评测集用）",
+    )
     parser.add_argument(
         "--set",
         dest="overrides",
@@ -59,8 +70,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    # --set 可以重复出现，每次一个值；这里统一摊平（nargs="*" 会丢掉前面的值）
-    overrides = [item for group in args.overrides for item in group]
+    # --set 可重复出现，每次一个值；用 flatten_overrides 兼容 append / nargs='*' 两种写法
+    overrides = flatten_overrides(args.overrides)
     config = load_config(args.config, overrides)
     seed = int(config.get("seed", 0))
     set_seed(seed)
@@ -91,6 +102,7 @@ def main() -> int:
         weighted=bool(data_cfg.get("weighted", False)),
         component_fallback=bool(data_cfg.get("component_fallback", True)),
         progress_every=max(200, num_samples // 10),
+        min_decisions=int(args.min_decisions),
     )
     elapsed = time.time() - start
     print(
@@ -102,6 +114,28 @@ def main() -> int:
     stats = dataset_statistics(dataset)
     print("=== dataset statistics（指南第 16 节）===", flush=True)
     print(json.dumps(stats, indent=1, ensure_ascii=False))
+
+    data_dir = Path(args.data_dir or str(config.get("paths.data_dir", "data")))
+    name = args.name or f"{graph_type}_{num_samples}"
+
+    if args.no_split:
+        # 专项评测集：整份一个文件，不做划分（先于 split 计算，避免白算一遍）
+        path = dataset.save(data_dir / f"{name}.pkl")
+        filter_info = getattr(dataset, "filter_info", {})
+        payload = {
+            "dataset": stats,
+            "seed": seed,
+            "split": "none (dedicated evaluation set)",
+            "filter": filter_info,
+            "graph_ids": len(graph_ids_of(dataset)),
+        }
+        summary_path = data_dir / f"{name}_summary.json"
+        with open(summary_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=1, ensure_ascii=False)
+        print(f"dataset -> {path} ({len(dataset)} queries, no split)")
+        print(f"filter  -> {filter_info}")
+        print(f"summary -> {summary_path}")
+        return 0
 
     split_cfg = config.get("split", {})
     split_by_graph = bool(split_cfg.get("split_by_graph", True))

@@ -26,7 +26,7 @@ from src.evaluation.baselines import baseline_summary  # noqa: E402
 from src.evaluation.evaluator import evaluate_dataset, records_to_dicts  # noqa: E402
 from src.training.checkpoint import load_checkpoint  # noqa: E402
 from src.training.setup import build_diffusion, build_model, get_device  # noqa: E402
-from src.utils.config import load_config  # noqa: E402
+from src.utils.config import flatten_overrides, load_config  # noqa: E402
 from src.utils.seed import make_generator, set_seed  # noqa: E402
 
 
@@ -63,9 +63,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    # --set 可重复出现，argparse 的 action='append' 给的已经是扁平字符串列表
-    # （train.py 里那句展开是为了兼容 nargs='*' 的写法，这里不需要）
-    overrides = list(args.overrides)
+    overrides = flatten_overrides(args.overrides)
     if args.device:
         overrides.append(f"training.device={args.device}")
     config = load_config(args.config, overrides)

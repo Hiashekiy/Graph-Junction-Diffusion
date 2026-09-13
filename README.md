@@ -330,8 +330,23 @@ python scripts/generate_dataset.py --config configs/graph_flow.yaml
 ```
 
 输出 `data/controlled_{train,val,test}.pkl` + `data/controlled_summary.json`，后者包含
-指南第 16 节要求的全部指标（hops / decisions / branch factor 的 mean-std-min-max、
-NULL 比例、source-as-decision 比例、三类干扰分支占比、难度与模式配比）。
+指南第 16 节要求的全部指标（hops / decisions / branch factor 的 mean-std-min-max、NULL 比例、source-as-decision 比例、三类干扰分支占比、难度与模式配比）。
+
+两个为**专项评测集**加的参数（见第 16 节的长链实验）：
+
+```bash
+# 只保留 GT 决策数 >= 9 的样本，且不划分 train/val/test（整份存成一个文件）
+python scripts/generate_dataset.py --config configs/graph_flow.yaml \
+    --name controlled_long --no-split --min-decisions 9 \
+    --set data.num_samples=400 --set seed=7 \
+    --set data.difficulty_mix.hard=1.0 \
+    --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
+```
+
+`--min-decisions N` 走 `build_controlled_dataset(min_decisions=N)`：难度过滤通过但决策数
+不够的样本会被丢掉，并在 summary 的 `filter.rejected_by_min_decisions` 里记数（长链集的
+接受率只有 0.39%，这个数说明"长链样本为什么稀少"）。`--no-split` 只写
+`data/<name>.pkl` + `_summary.json`，不碰现有的 train/val/test。
 
 ### 与指南表格的两处必要偏离
 
@@ -750,41 +765,58 @@ print(result.status, result.path, result.reason)        # 结局 / 节点序列 
 `flow_steps=5`，总传播量相近但推理更省），以及给多轮配置配套的正则/学习率调整
 （多轮增加了有效容量，训练 loss 更低而测试集没有变好，有轻微过拟合的迹象）。
 
-### 关于"多轮交流能缓解长链决策"——目前只能记为**假设**
+### "多轮交流缓解长链决策"——**已用专门的长链测试集证实**
 
-直觉（也常被直接当成结论）是：多轮交流让信息在一个扩散步内多传几跳，所以对**决策链
-长**的样本更有用。实测数据**方向一致但不足以证实**：
+之前 300 条标准测试集里决策数 ≥9 的只有 **11 条**（±1 条 = ±9 个点），什么都测不出来。
+于是专门造了一个长链评测集：
 
-| 分组 | n | flow1 | flow3 | Δ | 5 种子配对 t 检验 p |
+```bash
+python scripts/generate_dataset.py --config configs/graph_flow.yaml \
+    --name controlled_long --no-split --min-decisions 9 \
+    --set data.num_samples=400 --set seed=7 \
+    --set data.difficulty_mix.hard=1.0 \
+    --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
+```
+
+生成结果（`data/controlled_long.pkl` + `_summary.json`）：**400 条 query / 400 张图**、
+决策数 9–10（均值 9.20）、GT hops 21–33（均值 26.0）、全部 hard 档；总共
+**102,678 次 attempt** 才凑出这 400 条（约 0.39% 的接受率——这就是长链样本稀少的根源）。
+用**图结构指纹**（排序后的边集合哈希）核对过：与 train / val / test 的交集都是 **0**，无泄漏。
+
+用现有的两个 checkpoint 在这个长链集上各跑 5 个随机种子、逐 query 配对检验：
+
+| 指标 | flow1（1 轮） | flow3（3 轮） | Δ | 配对 t 检验 | bootstrap 95% CI |
 |---|---|---|---|---|---|
-| ALL | 300 | 0.895 | 0.887 | −0.008 | 0.44 |
-| gt_decisions=3–5 | 37 | 0.978 | 0.930 | **−0.049** | **0.037（唯一显著，方向相反）** |
-| gt_decisions=6–8 | 252 | 0.892 | 0.886 | −0.006 | 0.58 |
-| gt_decisions=9–11 | 11 | 0.691 | 0.782 | **+0.091** | 0.21（不显著） |
+| **goal_hit** | 0.6010 | **0.6685** | **+0.0675** | **p < 0.0001** | **[+0.042, +0.093]** |
+| **optimal** | 0.4530 | **0.5335** | **+0.0805** | **p < 0.0001** | **[+0.057, +0.105]** |
 
-（多种子口径：每个 query 取 5 个采样种子的成功均值，再做配对 t 检验；
-`tools/multiseed_eval.py --bucket-data data/controlled_test.pkl`。）
+**5 个种子全部偏向 flow3**（逐种子 Δ = +0.0425 / +0.0650 / +0.0700 / +0.0950 / +0.0650），
+不像标准测试集那样有个别种子反向。所以结论是：
 
-单次评测（seed 0）下长链档是 `0.545 → 0.909`（配对 McNemar p=0.125），反推单步决策
-准确率 `0.937 → 0.990`——**基线随链长衰减，多轮模型基本不衰减**，这正是该假设的证据来源。
+> **多轮图信息交流确实能缓解长决策链上的误差**：在 400 条长链 query 上 goal_hit
+> +6.8 个点（相对 +11%）、optimal +8.1 个点，p<1e-4。这个收益在标准混合测试集上
+> **测不出来**（Δ=−0.008，p=0.44），因为那种测试集里 84% 的样本只有 6–8 个决策。
 
-但有三个必须写在旁边的事实：
+必须写在旁边的三条限制：
 
-1. **长链档只有 11 条 query**（全数据集 `num_decisions` 最大值是 10，test 里 ≥9 的只有
-   11 条；根因是 hard 档接受率只有 4.1%）。±1 条 query ≈ ±9 个点，置信区间宽到无法判定。
-2. **多种子平均后这个差异变成 +0.091、p=0.21，不显著**；而那 11 条里 flow3 的
-   0.782 与 flow1 的 0.691 之差，完全可能是采样波动。
-3. **唯一统计显著的分组方向相反**：最短的 3–5 决策档（n=37）flow3 反而低 4.9 个点
-   （p=0.037）。注意这是 3 个分组的比较，Bonferroni 阈值约 0.017，所以它本身也属边缘。
+1. **这是"罕见但合法"的区间，不是完全分布外**。训练集里决策数 ≥9 的样本只占 ~3.7%，
+   模型见过这类图但很少；长链集用的是同一套生成器与验收契约（hops 15–35、决策 5–12）。
+2. **长链集的难度/模式构成偏**：全部 hard 档（构造使然），模式上 **96% 是 branch_heavy**
+   （`long_chain` 只有 3 条、`loop_detour` 13 条——这两行没有统计意义，别引用）。
+   这是各模式接受率差异造成的（branch_heavy 0.202 vs long_chain 0.036）。
+3. **只测了两个 checkpoint 的推理表现**，没有重训。所以"训练时也用长链偏重的数据会不会
+   更好"仍未回答；那是下一步（需要新数据 + 新 run）。
 
-**术语也要纠正**：这**不是"加层数"**。参数量只从 348,162 变成 348,546（+384，+0.11%），
-网络结构没动；变的是**同一个 Cell 在一个 reverse step 内被展开的次数**（`flow_steps`，
-有效计算深度 ×3，参数不变）。真要"加层数"得改 `ffn_layers` 或堆多个 Cell，那是另一件事，
-**没做过、也没有数据**。
+复现：
 
-**怎么才能把它从假设变成结论**：需要专门构造决策数 ≥9 的测试集（或把训练/测试的难度分布
-整体移向长链），再看 Δ 的置信区间能否排除 0。现在这个 11 条的桶做不到，任何"多轮缓解了
-长链决策"的说法都只能是**待检验的假设**。
+```bash
+python tools/multiseed_eval.py \
+    --a outputs/runs/v2_controlled_100ep \
+    --b outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_long.pkl --seeds 0,1,2,3,4 \
+    --metric goal_hit --bucket-data data/controlled_long.pkl \
+    --out outputs/runs/v2_controlled_100ep_flow3/multiseed_long_goal_hit.json
+```
 
 复现全部结论：
 
