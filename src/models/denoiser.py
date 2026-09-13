@@ -117,22 +117,30 @@ class GraphFlowDenoiser(nn.Module):
             return 1
         return int(self.flow_slot_embedding.num_embeddings)
 
-    def set_inference_flow_steps(self, flow_steps: int) -> int:
-        """推理阶段的**提前退出**：用比训练更少的轮数跑，返回原来的值。
+    def set_inference_flow_steps(
+        self, flow_steps: int, allow_extrapolation: bool = False
+    ) -> int:
+        """推理阶段的轮数覆盖，返回原来的值。
 
         多轮交流的代价在推理时是线性的（实测 flow_steps=3 时 0.063 s/query，
         单轮 0.022 s/query），而"训练时见识过多轮、推理时只跑一轮"是完全合法的
         —— 第 0 轮用的 slot embedding 就是训练时第 0 轮那个。所以留一个口子，
         方便做"多少轮才够"的 ablation，而不是硬编码训练时的轮数。
+
+        ``allow_extrapolation=True`` 时允许**超过训练轮数**：多出来的轮次会复用
+        最后一行的 slot embedding（``forward_multi`` 里有 clamp）。这是一个
+        分布外外推实验，用来回答"继续多跑几轮还会不会涨"，调用方应当在结果里
+        标注清楚。
         """
         steps = int(flow_steps)
         if steps < 1:
             raise ValueError(f"flow_steps must be >= 1, got {steps}")
-        if steps > self.max_flow_steps:
+        if steps > self.max_flow_steps and not allow_extrapolation:
             raise ValueError(
                 f"flow_steps={steps} exceeds the trained slot embedding rows "
                 f"({self.max_flow_steps}); this model was trained with "
-                f"flow_steps={self.flow_steps}, inference can only use fewer rounds"
+                f"flow_steps={self.flow_steps}, inference can only use fewer rounds "
+                "(pass allow_extrapolation=True to reuse the last slot embedding)"
             )
         previous = int(self.flow_steps)
         self.flow_steps = steps

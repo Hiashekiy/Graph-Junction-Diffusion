@@ -38,6 +38,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--steps", type=int, nargs="*", default=None,
                         help="要评的轮数，默认 1..训练时的轮数")
+    parser.add_argument(
+        "--allow-extrapolation", action="store_true",
+        help="允许评测**超过**训练轮数的轮数（多出来的轮复用最后一行 slot embedding）。"
+             "这是分布外外推，用来回答'继续多跑几轮还会不会涨'",
+    )
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--skip-existing", action="store_true")
     parser.add_argument("--no-progress", action="store_true")
@@ -73,10 +78,13 @@ def main() -> int:
     del probe, torch
     steps_list = args.steps or list(range(1, trained_steps + 1))
     for steps in steps_list:
-        if steps < 1 or steps > trained_steps:
+        if steps < 1:
+            raise SystemExit(f"flow_steps must be >= 1, got {steps}")
+        if steps > trained_steps and not args.allow_extrapolation:
             raise SystemExit(
                 f"requested flow_steps={steps} but the checkpoint was trained with "
-                f"{trained_steps} round(s); inference can only use fewer rounds"
+                f"{trained_steps} round(s); inference can only use fewer rounds "
+                "(pass --allow-extrapolation to reuse the last slot embedding)"
             )
 
     print(f"run        : {run_dir}")
@@ -97,7 +105,9 @@ def main() -> int:
             model = build_model(config, device)
             payload = load_checkpoint(checkpoint, model=model, map_location=device)
             model = model.to(device)
-            model.set_inference_flow_steps(steps)
+            model.set_inference_flow_steps(
+                steps, allow_extrapolation=args.allow_extrapolation
+            )
             diffusion = build_diffusion(config)
             batch_size = args.batch_size or int(config.get("evaluation.batch_size", 16))
             report = evaluate_dataset(
@@ -119,6 +129,7 @@ def main() -> int:
                 "inference": {
                     "flow_steps": int(steps),
                     "trained_flow_steps": int(model.max_flow_steps),
+                    "extrapolated": bool(steps > trained_steps),
                     "checkpoint_epoch": payload.get("epoch"),
                     "label": model.flow_steps_label,
                 },
