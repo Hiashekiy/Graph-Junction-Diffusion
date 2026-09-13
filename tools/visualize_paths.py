@@ -71,6 +71,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--deterministic", action="store_true", help="用 posterior argmax 采样")
+    parser.add_argument(
+        "--layout",
+        default="spring",
+        choices=["spring", "forceatlas2", "kamada_kawai", "spine"],
+        help="图布局。默认 spring（正常图结构，等比例不拉伸）；spine 会把 GT 压成一条"
+             "直线，只适合盯着单条路径看，会扭曲真实结构",
+    )
     parser.add_argument("--labels", action="store_true", help="在 GT 路径节点上标顺序号")
     parser.add_argument(
         "--only-difficulty", default=None,
@@ -240,19 +247,35 @@ def select_indices(results: Sequence[Dict[str, Any]], args) -> List[int]:
 # ---------------------------------------------------------------------------
 # 画图
 # ---------------------------------------------------------------------------
-def layout_graph(graph, gt_path: Sequence[int], seed: int = 0):
-    """把图摊成"脊柱 + 梳子"：GT 路径是一条水平脊柱，干扰分支从挂点垂直伸出去。
+def layout_graph(graph, gt_path: Sequence[int], seed: int = 0, method: str = "spring"):
+    """给整张图算坐标（**正常图布局**，不把 GT 压成一条线）。
 
-    为什么不用 spring 布局：Controlled Junction Graph 本身就是"骨架 + 挂在骨架上的
-    干扰链"，spring 会把 60~120 个节点摊成一团毛线，路径根本看不出来。这里按结构
-    直接算坐标，而且**确定性**（同一张图每次画出来一样）：
+    ``method``：
 
-    * 脊柱节点 ``gt_path[i]`` -> ``(i, 0)``；
-    * 每个 junction 的干扰分支左右交错排开（同一 junction 的分支在 x 上有偏移，
-      互不重叠），分支内部沿 y 方向逐跳延伸。
+    * ``spring``（默认）：经典 Fruchterman-Reingold，正常图结构、各向同性，
+      面板里用等比例坐标画，不会拉伸变形；
+    * ``forceatlas2``：networkx 的 ForceAtlas2，链状分支多的图会被拉成长条；
+    * ``kamada_kawai``：距离保持布局，形状最"正"，节点多时稍慢；
+    * ``spine``：把 GT 路径摊成一条水平脊柱、干扰分支垂直伸出。**只用于"盯一条具体
+      路径怎么走"**，会严重扭曲图的真实结构，所以不是默认值。
 
-    返回 ``{node: (x, y)}``。
+    所有力导向布局都用 ``seed`` 固定，保证同一张图每次画出来一样。
     """
+    import networkx as nx
+
+    if method == "spine":
+        return _spine_layout(graph, gt_path, seed)
+    if method == "spring":
+        return nx.spring_layout(graph, seed=seed, iterations=300, k=1.1)
+    if method == "kamada_kawai":
+        return nx.kamada_kawai_layout(graph)
+    if method == "forceatlas2":
+        return nx.forceatlas2_layout(graph, seed=seed, max_iter=400)
+    raise SystemExit(f"unknown --layout {method!r}")
+
+
+def _spine_layout(graph, gt_path: Sequence[int], seed: int = 0):
+    """（非默认）把 GT 路径摊成水平脊柱，干扰分支垂直伸出。会扭曲真实结构。"""
     from collections import deque
 
     spine = list(dict.fromkeys(int(node) for node in gt_path))
@@ -297,7 +320,7 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
     import networkx as nx
 
     graph = sample.graph
-    pos = layout_graph(graph, sample.gt_path, seed=seed + row["index"])
+    pos = layout_graph(graph, sample.gt_path, seed=seed + row["index"], method=args.layout)
 
     def edge_list(path: Sequence[int]) -> List[Tuple[int, int]]:
         return [(int(u), int(v)) for u, v in zip(path[:-1], path[1:]) if graph.has_edge(u, v)]
@@ -379,6 +402,8 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
         f"预测 {int(row['pred_hops'])} 跳 · {status_text}{extra}",
         fontsize=9,
     )
+    # 等比例：布局坐标是各向同性的，拉成椭圆会让人误判"哪条路更近"
+    ax.set_aspect("equal")
     ax.set_axis_off()
     if show_legend:
         from matplotlib.lines import Line2D
