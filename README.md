@@ -204,21 +204,29 @@ python -m pytest tests -q
 
 | 检查 | 命令 | 结果 |
 |---|---|---|
-| 单元测试 | `python -m pytest tests -q` | **129 passed** |
-| 数据生成 | `python scripts/generate_dataset.py ...` | 通过，含逐样本语义校验 |
-| tiny overfit | `python scripts/train.py --tiny --set training.lr=3e-3 ...` | 见下 |
-| 完整链路 | `python scripts/evaluate.py --checkpoint .../best.pt --data ...` | goal_hit **1.0000** |
+| 单元测试 | `python -m pytest tests -q` | **215 passed**（含 flow_steps / 分桶口径 / checkpoint 不匹配 / epoch 校准） |
+| 静态检查 | `python tools/semantic_check.py --strict` | checked 48 modules, **0 problems** |
+| 数据生成 | `python scripts/generate_dataset.py ...` | 通过，含逐样本语义校验；同 seed 重跑 attempts/accepted 逐位一致 |
+| tiny overfit | `python tools/smoke_tiny_overfit.py 200 4` | 4/4 goal、optimal **1.0000**、broken 0 |
+| 完整链路 | `python scripts/evaluate.py --checkpoint .../best.pt --data ...` | goal_hit **0.8933**（300 条 test、flow_steps=1 基线） |
 
-tiny overfit（16 个固定 query、T=10、d_model=32，300 epochs）的真实轨迹：
+训练语料与两个 run 的对照见第 13、14 节；`outputs/runs/*/run_config.json` 记录了
+每个 run 真正用的配置（`model.flow_steps`、`T`、`batch_size`）。
+
+tiny overfit（`flow_steps=3`，4 个固定 query，本次实测）：
 
 ```text
-epoch 100: train_loss=0.176  train_x0_acc=1.000  goal_hit=0.250
-epoch 200: train_loss=0.120  train_x0_acc=0.978  goal_hit=0.875
-epoch 300: train_loss=0.047  train_x0_acc=1.000  goal_hit=1.000  loop=0, broken=0
+epoch  30: train_loss=0.589  train_x0_acc=0.803  full-chain goal_hit=0.000（4 条全部 broken）
+epoch 200: train_loss=0.068  train_x0_acc=1.000  full-chain goal_hit=1.000（optimal 1.000、broken 0）
 ```
 
 也就是说：**loss 下降 → teacher-forced 单步学会 → 完整 reverse chain 的 Goal Hit 上升**
-这条链路是通的。注意默认 `training.lr=1e-4` 在 tiny 集上偏小，验链路时可以先调大。
+这条链路是通的。注意两点：默认 `training.lr=1e-4` 在 tiny 集上偏小，验链路时可以先调大；
+`flow_steps=3` 比单轮更难早期过拟合（30 epoch 时整链还是全 broken，200 epoch 才 4/4），
+与正式训练里"前 20 个 epoch 学得比单轮慢"是同一个现象。
+
+历史参考（`flow_steps=1`、16 个 query、T=10、d_model=32、lr=3e-3、300 epochs）：
+`epoch 100 goal_hit=0.250 → epoch 200 = 0.875 → epoch 300 = 1.000（loop=0, broken=0）`。
 
 ## 9. 实现过程中踩到的坑（改代码前先读）
 
@@ -283,8 +291,8 @@ epoch 300: train_loss=0.047  train_x0_acc=1.000  goal_hit=1.000  loop=0, broken=
 | P2-2 | `d_time` / `encoding` / `conditioning` / `amp` 真正生效 | `time_encoder.TimeEncoder(d_time=...)`、`trainer._autocast` + `GradScaler` |
 | P2-3 | sampler 只能跑完整链 | `sample_reverse_chain` 只接受 `max_steps in (None, T)` |
 
-验收（GGMPC 环境，torch 2.9.1+cu126）：`pytest` 171 passed、
-`semantic_check` 0 problems、tiny overfit 的 full-chain `goal_hit=1.0000`、
+验收（GGMPC 环境，torch 2.9.1+cu126）：`pytest` **215 passed**、
+`semantic_check --strict` **0 problems**、tiny overfit 的 full-chain `goal_hit=1.0000`、
 按图划分实测 `train ∩ val = train ∩ test = val ∩ test = ∅`。
 
 ## 11. 数据集生成（《V2 数据集生成指南》）
