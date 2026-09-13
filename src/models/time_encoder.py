@@ -24,6 +24,13 @@ def sinusoidal_encoding(t: Tensor, dim: int, max_period: float = 10000.0) -> Ten
 
 
 class TimeEncoder(nn.Module):
+    """``t -> tau_t``：正弦编码 + MLP。
+
+    ``d_time`` 是正弦编码的维度，``d_model`` 是输出维度（AdaLN 需要 d_model）。
+    两者相等时就是一条普通的两层 MLP；不等时先 Linear(d_time, d_model) 再走 MLP
+    （修改清单 P2-2：让 ``time.d_time`` 真正生效，而不是只读不用的假配置）。
+    """
+
     def __init__(
         self,
         d_model: int = 128,
@@ -31,9 +38,20 @@ class TimeEncoder(nn.Module):
         activation: str = "silu",
         normalization: str = "layernorm",
         dropout: float = 0.0,
+        d_time: int | None = None,
     ):
         super().__init__()
         self.d_model = int(d_model)
+        self.d_time = int(d_time or d_model)
+        if self.d_time % 2 != 0:
+            raise ValueError(
+                f"d_time must be even for sinusoidal encoding, got {self.d_time}"
+            )
+        self.input_proj = (
+            nn.Identity()
+            if self.d_time == self.d_model
+            else nn.Linear(self.d_time, self.d_model)
+        )
         self.mlp = build_mlp(
             d_model,
             d_model,
@@ -51,8 +69,9 @@ class TimeEncoder(nn.Module):
         scalar = t.dim() == 0
         if scalar:
             t = t.unsqueeze(0)
-        encoding = sinusoidal_encoding(t.long(), self.d_model)
-        out = self.mlp(encoding.to(next(self.parameters()).dtype))
+        encoding = sinusoidal_encoding(t.long(), self.d_time)
+        hidden = self.input_proj(encoding.to(next(self.parameters()).dtype))
+        out = self.mlp(hidden)
         return out.squeeze(0) if scalar else out
 
 

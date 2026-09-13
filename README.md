@@ -222,3 +222,30 @@ epoch 300: train_loss=0.047  train_x0_acc=1.000  goal_hit=1.000  loop=0, broken=
    批量解码还要同时用 `decision_offset` 与 `candidate_offset`。
 7. **`set_rng_state` 要求 CPU ByteTensor**；`torch.load(map_location='cuda')`
    会把 RNG state 搬到 GPU，需要显式搬回 CPU。
+8. **`scatter_reduce(..., reduce="amin", include_self=True)` 的初值要给够大的哨兵**。
+   用 `-1` 当初值的话 `amin` 永远取到 `-1`，`first` 对每个 decision 都变成 -1
+   （source decision 会拿到非法候选）。见 `heuristic_prior_deterministic`。
+9. **小数据集的按图划分会出现空 split**。4 张图按 0.8/0.1/0.1 取整时 val/test
+   都会是 0 张图，于是 `validate()` 什么都不返回、best-checkpoint 静默失效。
+   现在 splitter 会强制每个 split 非空，`build_datasets` 也会对空 split 直接报错。
+10. **AMP 下 `masked_scatter` 要求 self 与 source 同 dtype**。fp16 的 `H.new_zeros`
+    配上 fp32 的 Linear 输出会报 "expected self and source to have same dtypes"。
+
+## 10. 第二轮修订（《当前实现修改清单》P0/P1/P2）
+
+按清单完成并逐条验证，详细语义见 `docs/ARCHITECTURE_V2.md` 第 8 节：
+
+| 项 | 内容 | 关键落点 |
+|---|---|---|
+| P0-1 | 单出口 Source 的被迫段**永久 selected** | `branch_segments.build_source_forced_segment`、`Batch.source_forced_edge_ids`、`edge_state.expand_to_edge_state` |
+| P0-2 | train/val/test **按 graph 划分**（无 topology leakage） | `dataset_builder.split_dataset` + `_allocate_group_shares` |
+| P1-1 | `weighted=true` 暂时禁用 | `build_dataset` 抛 `NotImplementedError` |
+| P1-2 | 统一 node 编号空间 | `relabel_to_contiguous` + `extract_segments(relabel=False)` |
+| P1-3 | 两个 residual 子层 LayerNorm 分离 | `graph_flow.attn_out_norm` / `ffn_out_norm` |
+| P2-1 | deterministic prior 改名与语义澄清 | `heuristic_prior_deterministic` |
+| P2-2 | `d_time` / `encoding` / `conditioning` / `amp` 真正生效 | `time_encoder.TimeEncoder(d_time=...)`、`trainer._autocast` + `GradScaler` |
+| P2-3 | sampler 只能跑完整链 | `sample_reverse_chain` 只接受 `max_steps in (None, T)` |
+
+验收（GGMPC 环境，torch 2.9.1+cu126）：`pytest` 171 passed、
+`semantic_check` 0 problems、tiny overfit 的 full-chain `goal_hit=1.0000`、
+按图划分实测 `train ∩ val = train ∩ test = val ∩ test = ∅`。

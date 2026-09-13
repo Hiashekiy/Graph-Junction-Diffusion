@@ -65,24 +65,37 @@ def sample_prior(
     )
 
 
-def prior_deterministic(
+def heuristic_prior_deterministic(
     candidate_owner: Tensor,
     candidate_is_null: Tensor,
     num_decisions: int,
 ) -> Tensor:
-    """确定性的"初始状态"：普通 Junction 取 NULL，Source 取第一条 branch。
+    """**启发式**初始状态，不是 ``z_T ~ pi`` 的确定性等价物。
 
-    这样 ``stochastic=False`` 时整条 reverse chain 完全可复现（采样先验本身
-    是随机的，否则评测结果依赖 RNG。
+    规则：普通 Junction 取 NULL，Source 取第一条 branch。
+
+    修改清单 P2-1 明确要求把语义写清楚：``z_T ~ pi`` 的定义是"每个 decision
+    在自己的 candidate 组里均匀随机取一个"，而这里是一个明显偏向 NULL 的人造
+    初值，因此：
+
+    * 想复现实验（要的是"同样输入给同样输出"）→ 仍然用 ``z_T ~ pi``，但传入
+      固定 seed 的 ``torch.Generator``，数学定义不变；
+    * ``stochastic=False`` 时的这个函数只用于"绕开随机性的确定性对照"，
+      不要把它当成 diffusion 的 deterministic 版本。
     """
     first = torch.full(
-        (num_decisions,), -1, dtype=torch.long, device=candidate_owner.device
+        (num_decisions,), candidate_owner.numel(), dtype=torch.long,
+        device=candidate_owner.device,
     )
     first = first.scatter_reduce(
         0, candidate_owner, torch.arange(
             candidate_owner.numel(), device=candidate_owner.device, dtype=torch.long
         ), reduce="amin", include_self=True,
     )
+    # 注意初值必须是"比任何真实候选编号都大"的哨兵：用 -1 的话 amin 会永远取 -1，
+    # first 会全部变成 -1（这是个真实踩过的 bug，source decision 会拿到非法候选）。
+    if bool((first >= candidate_owner.numel()).any()):
+        raise RuntimeError("some decision node has no candidate; the table is corrupt")
     null_index = torch.full_like(first, -1)
     is_null = candidate_is_null
     if bool(is_null.any()):
@@ -90,6 +103,10 @@ def prior_deterministic(
         null_flat = torch.nonzero(is_null, as_tuple=False).squeeze(1)
         null_index = null_index.scatter(0, null_owner, null_flat)
     return torch.where(null_index >= 0, null_index, first)
+
+
+# 旧名字保留为别名，避免外部脚本立刻失效；新代码请用 heuristic_prior_deterministic
+prior_deterministic = heuristic_prior_deterministic
 
 
 # ---------------------------------------------------------------------------
@@ -159,10 +176,23 @@ def sample_reverse_chain(
     max_steps: Optional[int] = None,
     record: bool = False,
 ) -> Dict[str, Any]:
-    """跑完整条 reverse chain，返回最终的 z_0 与（可选）整条轨迹。"""
-    steps = int(diffusion.T if max_steps is None else max_steps)
-    if steps > diffusion.T:
-        raise ValueError(f"max_steps={steps} exceeds the schedule T={diffusion.T}")
+    """跑完整条 reverse chain，返回最终的 z_0 与（可选）整条轨迹。
+
+    ``max_steps`` 只能等于 ``diffusion.T``（或 None）—— 修改清单 P2-3：
+
+        z_T ~ pi 只在 t = T 成立，一般 q(z_k) != pi。
+
+    所以"从 t=k 开始跑 k 步"并不等价于一条更短的扩散链。第一版正式 sampler 只
+    支持完整链；将来要做 accelerated sampling 必须单独设计 timestep skipping。
+    """
+    if max_steps is not None and int(max_steps) != int(diffusion.T):
+        raise ValueError(
+            f"max_steps={max_steps} is not allowed: the reverse chain must start from "
+            f"z_T ~ pi, i.e. from t = T = {diffusion.T}. Truncating the loop would "
+            "treat z_T as z_k, but q(z_k) != pi in general. Implement explicit "
+            "timestep skipping if you need accelerated sampling."
+        )
+    steps = int(diffusion.T)
 
     H_t = model.init_nodes(batch)
     if stochastic:
@@ -170,7 +200,7 @@ def sample_reverse_chain(
             diffusion, batch.candidate_owner, batch.num_decisions, generator
         )
     else:
-        z_t = prior_deterministic(
+        z_t = heuristic_prior_deterministic(
             batch.candidate_owner, batch.candidate_is_null, batch.num_decisions
         )
     trace = ReverseTrace()

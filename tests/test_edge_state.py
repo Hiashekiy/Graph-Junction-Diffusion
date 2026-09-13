@@ -31,6 +31,7 @@ def _state_of_physical_edges(batch, z_t):
         branch_edge_lengths=batch.branch_edge_lengths,
         msg_to_phys_edge=batch.msg_to_phys_edge,
         num_physical_edges=batch.num_physical_edges,
+        source_forced_edge_ids=getattr(batch, "source_forced_edge_ids", None),
     )
     physical = torch.full((batch.num_physical_edges,), -1, dtype=torch.long)
     physical.scatter_(0, batch.msg_to_phys_edge, state)
@@ -39,7 +40,7 @@ def _state_of_physical_edges(batch, z_t):
 
 def _selected_physical_edges(sample, z):
     candidates = sample.field.candidates
-    edges = set()
+    edges = set(sample.segments.source_forced_edge_ids)   # 被迫段永久 selected
     for decision_index, target in enumerate(z):
         branch = candidates.candidate_branch[int(target)]
         if branch is not None:
@@ -73,8 +74,12 @@ def test_selected_branch_marks_all_its_physical_edges(manual_sample, manual_batc
     for edge in [(J1, A), (A, B), (B, X), (X, J2), (J2, G)]:
         assert int(physical[lookup[edge]]) == SELECTED, f"edge {edge}"
     # 没被选中的绕行支路与 dead-end 支路必须 unselected
-    for edge in [(J1, D), (D, E), (J1, H), (H, I), (S, C), (C, J1)]:
+    for edge in [(J1, D), (D, E), (J1, H), (H, I)]:
         assert int(physical[lookup[edge]]) == UNSELECTED, f"edge {edge}"
+    # 单出口 source 的被迫段 (s-c, c-J1) 永远 selected（P0-1）
+    assert manual_sample.segments.source_forced_edge_ids, "手工图的 source 应该是单出口"
+    for edge in [(S, C), (C, J1)]:
+        assert int(physical[lookup[edge]]) == SELECTED, f"forced edge {edge}"
 
 
 def test_both_message_directions_share_the_state(manual_sample, manual_batch):
@@ -95,10 +100,12 @@ def test_null_writes_no_selected_edge(manual_sample, manual_batch):
 
     _, physical = _state_of_physical_edges(batch, z)
     lookup = physical_edge_lookup(manual_sample.graph)
-    for edge in [(J1, A), (A, B), (J1, H), (H, I), (J1, D), (D, E), (C, J1)]:
+    for edge in [(J1, A), (A, B), (J1, H), (H, I), (J1, D), (D, E)]:
         assert int(physical[lookup[edge]]) == UNSELECTED, f"edge {edge}"
     # J2 仍然是 active（选中 [J2, g]）
     assert int(physical[lookup[(J2, G)]]) == SELECTED
+    # 单出口 source 的被迫段与 z 无关，仍然 selected（P0-1）
+    assert int(physical[lookup[(C, J1)]]) == SELECTED
 
 
 def test_all_junctions_null_leaves_only_the_source_active():

@@ -70,11 +70,32 @@ class Batch:
     branch_edge_owner: Tensor         # [C, Le]
     branch_edge_lengths: Tensor       # [C]
 
+    # -- 单出口 Source 的被迫段（P0-1，物理边永久 selected）-----------------
+    source_forced_edge_ids: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.long)
+    )                                  # [F] batch 级物理边 ID
+    num_source_forced_edges: int = 0
+
     # -- misc -------------------------------------------------------------
     sizes: Dict[str, Any] = field(default_factory=dict)
     device: torch.device = torch.device("cpu")
 
     # -- derived helpers --------------------------------------------------
+    @property
+    def source_decision_mask(self) -> Tensor:
+        """哪些 decision 属于 Source（即 deg(s) > 1 的那些 start 节点）。
+
+        Source 没有 NULL 候选；判断"是不是 source decision"必须逐 decision 比较
+        它在本图内的局部节点编号与 start，不能拿全局编号去比。
+        """
+        if not self.num_decisions:
+            return torch.zeros(0, dtype=torch.bool, device=self.decision_node.device)
+        local = self.decision_node - self.graph_node_ptr[:-1][self.decision_graph_id]
+        local_start = self.starts[self.decision_graph_id] - self.graph_node_ptr[:-1][
+            self.decision_graph_id
+        ]
+        return local == local_start
+
     @property
     def start_goal_mask(self) -> Tensor:
         """Start / Goal 只出不进，Graph Flow 需要它们的 node mask。"""
@@ -107,6 +128,7 @@ class Batch:
             "num_null_candidates": int(self.candidate_is_null.sum().item()),
             "branch_node_slots": int(self.branch_node_ids.numel()),
             "branch_edge_slots": int(self.branch_edge_ids.numel()),
+            "num_source_forced_edges": self.num_source_forced_edges,
         }
 
 
@@ -151,6 +173,7 @@ def collate_samples(
 
     branch_node_ids: List[List[int]] = []
     branch_edge_ids: List[List[int]] = []
+    source_forced_edges: List[int] = []
 
     # 物理边 ID 在 segments 里是**每图局部**的（0..E_phys(g)-1），batch 里必须整体
     # 平移到 batch 级编号空间，否则第二张图起会写进/读到别的图的物理边槽位。
@@ -173,6 +196,11 @@ def collate_samples(
             edge_index[1].append(node_offset + dst)
         msg_to_phys.extend(
             physical_edge_offset + int(phys) for phys in segments.msg_to_phys_edge
+        )
+        # 单出口 Source 的被迫段：这些物理边永久 selected（P0-1）
+        source_forced_edges.extend(
+            physical_edge_offset + int(edge)
+            for edge in segments.source_forced_edge_ids
         )
 
         decision_offset = len(decision_node)
@@ -238,6 +266,10 @@ def collate_samples(
         branch_edge_ids=edge_ids,
         branch_edge_owner=edge_owner,
         branch_edge_lengths=edge_lengths,
+        source_forced_edge_ids=torch.tensor(
+            source_forced_edges, dtype=torch.long, device=device
+        ),
+        num_source_forced_edges=len(source_forced_edges),
         sizes={
             "num_node_types": NUM_NODE_TYPES,
             "num_edge_states": NUM_EDGE_STATES,

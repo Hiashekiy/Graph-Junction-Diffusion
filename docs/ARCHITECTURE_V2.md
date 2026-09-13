@@ -165,14 +165,83 @@ L   = (1/T) * sum_t L_t
 ## 7. 第一版明确不实现
 
 LapPE、RWSE、DegreeEmbedding、Node-ID Embedding、Global Pool、Static Encoder、
-旧 Routing-State Encoder、multi-head attention（第一版固定单头，`full_attention=True`
-时才用 `d_head=d_model`）、scheduled sampling、hard-junction / path-level loss、
-多卡/AMP 调优。
+旧 Routing-State Encoder、multi-head attention（`d_head == d_model` 单头）、
+scheduled sampling、hard-junction / path-level loss、edge cost encoder（因此
+`data.weighted` 暂时禁用）、accelerated sampling（timestep skipping）。
 
-这些都留给后续阶段；当前第一版的目标是先把
+---
+
+## 8. 第二轮修订（修改清单 P0/P1/P2）
+
+### P0-1 单出口 Source 的被迫段永久 selected
+
+`deg(s) == 1` 时 Source 没有 decision variable，但 `s -> 第一个 endpoint` 这段
+是必经之路。现在它在**每个 timestep**都是 selected：
 
 ```
-tiny overfit -> denoising works -> full chain Goal Hit 上升
+E_t = E_source-forced  ∪  Psi(z_t)
 ```
 
-这条链路跑通。
+- `GraphSegments.source_forced_edge_ids` / `source_forced_nodes` 保存这段；
+- `Batch.source_forced_edge_ids` 是 batch 级（已加 physical edge offset）；
+- `expand_to_edge_state` 先把这些边置 SELECTED，再用 `scatter_reduce(amax)`
+  叠加 `z_t` 选中的 branch。
+
+注意 `deg(s) > 1` 时 Source 自己是 decision node，此时 `source_forced_edge_ids`
+为空列表 —— 不要和"source 的 branch"混为一谈。
+
+### P0-2 按 graph 划分 train/val/test
+
+同一张底层图的所有 OD query 共享 `meta["graph_id"]`，`split_dataset` 按 graph
+分组后再切分，保证：
+
+```
+G_train ∩ G_val = G_train ∩ G_test = G_val ∩ G_test = ∅
+```
+
+另外 `_allocate_group_shares` 会在"图的数量够"时强制每个 split 至少 1 张图 ——
+否则 4 张图按 0.8/0.1/0.1 取整会让 val 为空、`validate()` 静默什么都不返回
+（这是真实踩到过的坑）。`build_datasets` 现在还会对空 split 直接报错。
+
+### P1-1 weighted 模式禁用
+
+模型只能看到 selected/unselected，看不到 `w_uv`。拓扑/OD/edge-state 相同但 cost
+不同的样本模型输入完全一样，最优路径却可能不同 —— 信息上不可辨识。所以
+`build_dataset(weighted=True)` 直接抛 `NotImplementedError`，等 Edge Cost Encoder
+落地再打开。
+
+### P1-2 统一 node 编号空间
+
+`build_sample` 一进来就 `relabel_to_contiguous(graph, s, g)`，之后 graph /
+start / goal / gt_path / segments 全部使用同一套 `0..N-1` 编号；
+`extract_segments` 以 `relabel=False` 调用，不再偷偷产生第二套映射。
+
+### P1-3 两个 residual 子层的 LayerNorm 分离
+
+```
+h~      = LN_1(h + W_O m)          attn_out_norm
+h^{t-1} = LN_2(h~ + FFN(h~))       ffn_out_norm
+```
+
+### P2-1 deterministic prior 语义
+
+`prior_deterministic` 更名为 `heuristic_prior_deterministic`：它（junction 取 NULL、
+source 取第一条 branch）**不是** `z_T ~ pi` 的确定性等价物，而是一个明显偏向 NULL
+的人造初值。想复现实验请保持 `z_T ~ pi` 但传入固定 seed 的 `torch.Generator`。
+
+### P2-2 配置项真正生效
+
+- `time.d_time`：真正传给 `TimeEncoder`（`d_time != d_model` 时插入
+  `Linear(d_time, d_model)`）；奇数维度直接报错。
+- `time.encoding` / `time.conditioning`：只支持 `sinusoidal` / `adaln`，
+  其它取值构造时就 `NotImplementedError`，而不是被静默忽略。
+- `training.amp`：真正用 `torch.amp.autocast` + `GradScaler`；只在 cuda 上启用，
+  CPU 上传 true 也不会崩（明确忽略）。
+
+### P2-3 sampler 只能跑完整链
+
+`z_T ~ pi` 只在 `t = T` 成立，一般 `q(z_k) != pi`，所以"从 t=k 起跑 k 步"并不
+等价于一条更短的扩散链。`sample_reverse_chain` 现在只接受
+`max_steps is None or max_steps == diffusion.T`，其它值直接 `ValueError`。
+训练侧的 `recurrent_reverse_loss(max_steps=k)` 是**另一件事**（截断 BPTT 的那条
+前向轨迹长度），不受这条限制。

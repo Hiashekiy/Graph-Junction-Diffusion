@@ -56,6 +56,11 @@ def model_kwargs(config: Config) -> Dict[str, Any]:
         "num_edge_states": int(model_cfg.get("edge_states", 2)),
         "ffn_hidden": int(model_cfg.get("ffn_hidden", 256)),
         "dropout": float(model_cfg.get("dropout", 0.0)),
+        # P2-2：time 配置项现在真正传进模型；取值未实现会在构造时报错，
+        # 而不是被静默忽略。
+        "d_time": int(time_cfg.get("d_time", model_cfg.get("d_model", 128))),
+        "time_encoding": str(time_cfg.get("encoding", "sinusoidal")),
+        "time_conditioning": str(time_cfg.get("conditioning", "adaln")),
     }
 
 
@@ -101,7 +106,16 @@ def build_datasets(config: Config) -> Dict[str, GraphQueryDataset]:
         weighted=bool(data_cfg.get("weighted", False)),
         component_fallback=bool(data_cfg.get("component_fallback", True)),
     )
-    return split_dataset(dataset, fractions, seed=int(config.get("seed", 0)))
+    splits = split_dataset(dataset, fractions, seed=int(config.get("seed", 0)))
+    empty = [name for name, split in splits.items() if len(split) == 0]
+    if empty:
+        raise RuntimeError(
+            f"empty dataset split(s): {empty}. With {len(dataset)} queries the "
+            "fractions cannot populate every split; increase data.num_samples or "
+            "reduce the number of splits (an empty val split would silently disable "
+            "validation)."
+        )
+    return splits
 
 
 def _auto_num_samples(config: Config) -> int:

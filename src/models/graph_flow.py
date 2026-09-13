@@ -61,7 +61,12 @@ class GraphFlowBlock(nn.Module):
         self.v_proj = nn.Linear(self.d_model, self.d_head)
         self.o_proj = nn.Linear(self.d_head, self.d_model)
 
-        self.ffn_norm = nn.LayerNorm(self.d_model)
+        # 两个 residual 子层各用一套 LayerNorm 参数（修改清单 P1-3）：
+        #   h~      = LN_1(h + W_O m)
+        #   h^{t-1} = LN_2(h~ + FFN(h~))
+        # 之前两处共用同一个 ffn_norm，等于强制两个 stage 共享仿射参数。
+        self.attn_out_norm = nn.LayerNorm(self.d_model)
+        self.ffn_out_norm = nn.LayerNorm(self.d_model)
         self.ffn = build_mlp(
             self.d_model,
             self.ffn_hidden,
@@ -123,8 +128,8 @@ class GraphFlowBlock(nn.Module):
             message.index_add_(0, dst, weighted)
 
         # ---- residual update（绝不 H_next = m） -----------------------
-        H_mid = self.ffn_norm(H_t + self.o_proj(message))
-        H_new = self.ffn_norm(H_mid + self.ffn(H_mid))
+        H_mid = self.attn_out_norm(H_t + self.o_proj(message))
+        H_new = self.ffn_out_norm(H_mid + self.ffn(H_mid))
 
         # ---- clamp Start / Goal --------------------------------------
         H_next = torch.where(fixed_mask[:, None], H_t, H_new)

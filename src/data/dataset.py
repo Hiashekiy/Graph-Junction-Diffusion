@@ -38,6 +38,15 @@ class GraphSample:
     meta: Dict[str, Any] = field(default_factory=dict)
 
     @property
+    def graph_id(self) -> Any:
+        """底层图实例的 ID（用于按 graph 划分 train/val/test，P0-2）。
+
+        没有显式设置时退化成 -1，此时 :func:`split_dataset` 会把每个样本当作
+        独立的一张图（安全但会牺牲一点统计效率）。
+        """
+        return self.meta.get("graph_id", -1)
+
+    @property
     def num_nodes(self) -> int:
         return self.segments.num_nodes
 

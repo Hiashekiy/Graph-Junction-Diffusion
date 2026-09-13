@@ -45,6 +45,18 @@ samples = [dataset[i] for i in range(len(dataset))]
 first_batch = collate_samples(samples[:4], device=DEVICE)
 print("batch:", json.dumps(first_batch.describe()), flush=True)
 
+# 清单第 11 节验收项之一：multi-graph batch 的 forced physical edge offset 正确。
+# （"每个 timestep 都 selected" 的完整性质由 tests/test_source_forced.py 覆盖。）
+if first_batch.num_source_forced_edges:
+    ids = first_batch.source_forced_edge_ids
+    assert int(ids.min()) >= 0
+    assert int(ids.max()) < first_batch.num_physical_edges, "physical edge offset 越界"
+    print(
+        f"source forced edges: {ids.numel()} 条，全部落在 "
+        f"[0, {first_batch.num_physical_edges}) 内",
+        flush=True,
+    )
+
 model = GraphFlowDenoiser(d_model=32, ffn_hidden=64).to(DEVICE)
 diffusion = CategoricalDiffusion(
     NoiseSchedule(T=T, schedule="linear", beta_start=0.05, beta_end=0.5)

@@ -110,9 +110,7 @@ def test_reverse_chain_state_sequence(tiny_batches):
     model = GraphFlowDenoiser(d_model=16, ffn_hidden=32)
     diffusion = make_diffusion(T=5)
 
-    chain = sample_reverse_chain(
-        diffusion, model, batch, stochastic=True, max_steps=5, record=True
-    )
+    chain = sample_reverse_chain(diffusion, model, batch, stochastic=True, record=True)
     trace = chain["trace"]
     assert trace is not None
     assert len(trace.H_path) == 6      # H_5 ... H_0
@@ -132,30 +130,83 @@ def test_reverse_chain_returns_final_state(tiny_batches):
     samples, batch = tiny_batches
     model = GraphFlowDenoiser(d_model=16, ffn_hidden=32)
     diffusion = make_diffusion(T=4)
-    chain = sample_reverse_chain(diffusion, model, batch, stochastic=True, max_steps=4)
+    chain = sample_reverse_chain(diffusion, model, batch, stochastic=True)
     assert chain["z0"].shape == (batch.num_decisions,)
     assert chain["H0"].shape == (batch.num_nodes, 16)
 
 
 def test_deterministic_sampling_is_reproducible(tiny_batches):
-    """stochastic=False 时整条链（含初始状态）完全可复现。"""
+    """stochastic=False 时整条链完全可复现（用的是启发式初值，见 P2-1）。"""
     samples, batch = tiny_batches
     model = GraphFlowDenoiser(d_model=16, ffn_hidden=32)
     diffusion = make_diffusion(T=4)
-    first = sample_reverse_chain(diffusion, model, batch, stochastic=False, max_steps=4)
-    second = sample_reverse_chain(diffusion, model, batch, stochastic=False, max_steps=4)
+    first = sample_reverse_chain(diffusion, model, batch, stochastic=False)
+    second = sample_reverse_chain(diffusion, model, batch, stochastic=False)
     assert torch.equal(first["z0"], second["z0"])
     assert torch.equal(first["H0"], second["H0"])
 
 
+def test_stochastic_prior_with_fixed_seed_is_reproducible(tiny_batches):
+    """P2-1 推荐的复现方式：仍然 z_T ~ pi，但用固定 seed 的 generator。"""
+    from src.utils.seed import make_generator
+
+    samples, batch = tiny_batches
+    model = GraphFlowDenoiser(d_model=16, ffn_hidden=32)
+    diffusion = make_diffusion(T=4)
+
+    first = sample_reverse_chain(
+        diffusion, model, batch, stochastic=True, generator=make_generator(7)
+    )
+    second = sample_reverse_chain(
+        diffusion, model, batch, stochastic=True, generator=make_generator(7)
+    )
+    third = sample_reverse_chain(
+        diffusion, model, batch, stochastic=True, generator=make_generator(8)
+    )
+    assert torch.equal(first["z0"], second["z0"])
+    assert not torch.equal(first["z0"], third["z0"])
+
+
+def test_heuristic_prior_is_not_the_uniform_prior(tiny_batches):
+    """P2-1：启发式初值不是 z_T ~ pi 的确定性等价物（两者取值明显不同）。"""
+    from src.diffusion.sampler import (
+        heuristic_prior_deterministic,
+        sample_prior,
+    )
+
+    samples, batch = tiny_batches
+    diffusion = make_diffusion(T=4)
+    heuristic = heuristic_prior_deterministic(
+        batch.candidate_owner, batch.candidate_is_null, batch.num_decisions
+    )
+
+    # 启发式规则：普通 Junction 取 NULL；source 是 decision 时取第一条 branch
+    source_mask = batch.source_decision_mask
+    assert bool(source_mask.any()), "这个 batch 里应该有 source decision"
+    for decision_index in range(batch.num_decisions):
+        pick = int(heuristic[decision_index])
+        if bool(source_mask[decision_index]):
+            assert not bool(batch.candidate_is_null[pick]), "source 应取第一条 branch"
+        else:
+            assert bool(batch.candidate_is_null[pick]), "普通 junction 应取 NULL"
+
+    # 均匀先验 z_T ~ pi 会以正概率取到非 NULL 的 branch；启发式初值几乎全是 NULL
+    uniform_null_fraction = []
+    for _ in range(5):
+        z = sample_prior(diffusion, batch.candidate_owner, batch.num_decisions)
+        uniform_null_fraction.append(float(batch.candidate_is_null[z].float().mean()))
+    heuristic_null_fraction = float(batch.candidate_is_null[heuristic].float().mean())
+    assert heuristic_null_fraction > max(uniform_null_fraction)
+
+
 def test_deterministic_prior_uses_null_for_junctions():
     """确定性初始状态：普通 Junction 取 NULL，source 取第一条 branch。"""
-    from src.diffusion.sampler import prior_deterministic
+    from src.diffusion.sampler import heuristic_prior_deterministic
 
     torch.manual_seed(0)
     candidates = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1])
     is_null = torch.tensor(
         [True, False, False, False, False, True, False, False, False]
     )
-    z = prior_deterministic(candidates, is_null, 2)
+    z = heuristic_prior_deterministic(candidates, is_null, 2)
     assert z.tolist() == [0, 5]

@@ -10,8 +10,10 @@ data:
   num_nodes: [20, 40]       # 每个样本随机取的节点数区间
   num_samples: 256          # 总样本数（再按 split 切分）
   min_od_distance: 5        # d_G(s,g) 的下界
-  num_queries_per_graph: 4  # 每张图采多少对 OD（V2 每个 OD 是一个样本）
-  weighted: false           # 是否给边加随机 cost（Dijkstra 任务）
+  num_queries_per_graph: 4  # 每张图采多少对 OD；同一张图的 query 共享 graph_id，
+                            # split 时按 graph 整体划分（无 topology leakage）
+  weighted: false           # 只能填 false：V2 目前不编码 edge cost，
+                            # true 会直接抛 NotImplementedError（信息不可辨识）
   component_fallback: true  # 生成不连通图时退回到最大连通分量
   generator: {}
 

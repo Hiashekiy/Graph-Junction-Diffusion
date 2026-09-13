@@ -117,18 +117,29 @@ def test_full_chain_runs_for_T_steps(tiny_batches):
     diffusion = make_diffusion(T=5)
     model = make_model()
     chain = sample_reverse_chain(
-        diffusion, model, batch, stochastic=True, max_steps=5, record=True
+        diffusion, model, batch, stochastic=True, record=True
     )
     assert chain["z0"].shape == (batch.num_decisions,)
     assert len(chain["trace"].H_path) == 6
 
 
-def test_chain_matches_schedule_length(tiny_batches):
+def test_max_steps_must_equal_T(tiny_batches):
+    """P2-3：reverse chain 只能从 z_T ~ pi 起跑，不允许缩短循环。"""
     _, batch = tiny_batches
     diffusion = make_diffusion(T=5)
     model = make_model()
+    # 长于 T：拒绝
     with pytest.raises(ValueError):
         sample_reverse_chain(diffusion, model, batch, max_steps=99)
+    # 短于 T：也拒绝（q(z_k) != pi，把 z_T 当 z_k 在数学上不成立）
+    with pytest.raises(ValueError):
+        sample_reverse_chain(diffusion, model, batch, max_steps=3)
+    # 等于 T：允许
+    chain = sample_reverse_chain(diffusion, model, batch, max_steps=5)
+    assert chain["z0"].shape == (batch.num_decisions,)
+    # None：允许（默认跑满 T）
+    chain = sample_reverse_chain(diffusion, model, batch, max_steps=None)
+    assert chain["z0"].shape == (batch.num_decisions,)
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +270,13 @@ def test_recurrent_loss_backward_reaches_every_timestep(manual_batch):
     assert model.graph_flow.q_proj.weight.grad is not None
     assert model.branch_scorer.branch_mlp[0].weight.grad is not None
     assert model.edge_state_encoder.embedding.weight.grad is not None
+    # 两个 residual 子层的 LayerNorm 必须是**不同的**参数张量（P1-3）
+    assert (
+        model.graph_flow.attn_out_norm.weight.data_ptr()
+        != model.graph_flow.ffn_out_norm.weight.data_ptr()
+    )
+    assert model.graph_flow.attn_out_norm.weight.grad is not None
+    assert model.graph_flow.ffn_out_norm.weight.grad is not None
 
 
 def test_accuracy_is_computed_per_decision_group(manual_batch):

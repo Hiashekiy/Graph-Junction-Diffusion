@@ -21,6 +21,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 from torch import Tensor, nn
 
@@ -35,8 +37,17 @@ def expand_to_edge_state(
     branch_edge_lengths: Tensor,       # [C]
     msg_to_phys_edge: Tensor,          # [E_msg]
     num_physical_edges: int,
+    source_forced_edge_ids: Optional[Tensor] = None,   # [F] 永久 selected
 ) -> Tensor:
-    """z_t -> edge_state_id [E_msg]，取值 0/1。"""
+    """z_t -> edge_state_id [E_msg]，取值 0/1。
+
+    最终语义（修改清单 P0-1 第 2.6 节）：
+
+        E_t = E_source-forced ∪ Psi(z_t)
+
+    单出口 Source 的被迫段不是 decision，z_t 里没有它的位置，因此它的物理边在
+    **每一个 timestep 都保持 selected**，先写进去，再叠加 z_t 选中的 branch。
+    """
     device = z_t.device
     selected_candidate = torch.zeros(
         candidate_is_null.numel(), dtype=torch.bool, device=device
@@ -52,6 +63,17 @@ def expand_to_edge_state(
         device=device,
     )
 
+    # 1) 被迫段：与 z_t 无关，永久 selected
+    if source_forced_edge_ids is not None and source_forced_edge_ids.numel():
+        forced = source_forced_edge_ids.to(device=device, dtype=torch.long)
+        if int(forced.max()) >= num_physical_edges or int(forced.min()) < 0:
+            raise IndexError(
+                f"source_forced_edge_ids out of range for "
+                f"num_physical_edges={num_physical_edges}"
+            )
+        physical_state[forced] = SELECTED
+
+    # 2) 再叠加 z_t 选中的 branch
     if branch_edge_ids.numel() and selected_candidate.any():
         member_active = selected_candidate[branch_edge_owner]           # [C, Le]
         if branch_edge_lengths.numel():
@@ -92,6 +114,7 @@ class EdgeStateEncoder(nn.Module):
             branch_edge_lengths=batch.branch_edge_lengths,
             msg_to_phys_edge=batch.msg_to_phys_edge,
             num_physical_edges=batch.num_physical_edges,
+            source_forced_edge_ids=getattr(batch, "source_forced_edge_ids", None),
         )
 
     def forward(self, batch, z_t: Tensor) -> Tensor:

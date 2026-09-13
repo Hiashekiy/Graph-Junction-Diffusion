@@ -50,17 +50,33 @@ class GraphFlowDenoiser(nn.Module):
         dropout: float = 0.0,
         branch_hidden: Optional[int] = None,
         d_head: Optional[int] = None,
+        d_time: Optional[int] = None,
+        time_encoding: str = "sinusoidal",
+        time_conditioning: str = "adaln",
     ):
         super().__init__()
         self.d_model = int(d_model)
         self.num_node_types = int(num_node_types)
         self.num_edge_states = int(num_edge_states)
 
+        # P2-2：这两个配置项现在就真的控制行为，选到未实现的取值会立刻报错，
+        # 而不是被静默忽略。
+        if time_encoding != "sinusoidal":
+            raise NotImplementedError(
+                f"time.encoding={time_encoding!r} is not implemented (only sinusoidal)"
+            )
+        if time_conditioning != "adaln":
+            raise NotImplementedError(
+                f"time.conditioning={time_conditioning!r} is not implemented (only adaln)"
+            )
+        self.time_encoding = time_encoding
+        self.time_conditioning = time_conditioning
+
         # 参数集合 Theta = {E_node, E_edge, TimeEncoder, GraphFlowBlock,
         #                   BranchScorer, NullScorer}
         self.node_encoder = NodeTypeEmbedding(self.d_model, self.num_node_types)
         self.edge_state_encoder = EdgeStateEncoder(self.d_model, self.num_edge_states)
-        self.time_encoder = TimeEncoder(d_model=self.d_model)
+        self.time_encoder = TimeEncoder(d_model=self.d_model, d_time=d_time)
         self.graph_flow = GraphFlowBlock(
             d_model=self.d_model,
             ffn_hidden=ffn_hidden,

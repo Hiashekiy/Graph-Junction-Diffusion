@@ -120,9 +120,15 @@ class BranchScorer(nn.Module):
         self, H: Tensor, batch, tau_decisions: Tensor
     ) -> Dict[str, Tensor]:
         is_null = batch.candidate_is_null
-        logits = H.new_zeros(batch.num_candidates)
-        logits = logits.masked_scatter(~is_null, self.branch_logits(H, batch, tau_decisions))
-        logits = logits.masked_scatter(is_null, self.null_logits(H, batch, tau_decisions))
+        branch = self.branch_logits(H, batch, tau_decisions)
+        null = self.null_logits(H, batch, tau_decisions)
+
+        # masked_scatter 要求 self 与 source 的 dtype 完全一致。AMP 下 H 是 fp16
+        # 而 Linear 输出可能是 fp32，所以统一取两支 logits 的 dtype。
+        dtype = branch.dtype if branch.numel() else null.dtype
+        logits = H.new_zeros(batch.num_candidates, dtype=dtype)
+        logits = logits.masked_scatter(~is_null, branch.to(dtype))
+        logits = logits.masked_scatter(is_null, null.to(dtype))
 
         log_prob = grouped_log_softmax(logits, batch.candidate_owner, batch.num_decisions)
         return {

@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -49,6 +50,14 @@ class Trainer:
         self.val_dataset = val_dataset
         self.config = config
         self.device = torch.device(device)
+        # 防御：模型必须和 batch 同类型设备（比较 device.type，这样 "cuda" 与
+        # "cuda:0" 不会被误判为不同设备）
+        parameter = next(self.model.parameters(), None)
+        if parameter is not None and parameter.device.type != self.device.type:
+            raise ValueError(
+                f"model is on {parameter.device} but Trainer.device={self.device}; "
+                "move the model before constructing the Trainer"
+            )
         self.generator = generator
         self.run_dir = Path(run_dir) if run_dir is not None else None
         if self.run_dir is not None:
@@ -80,10 +89,24 @@ class Trainer:
         )
         self.eval_max_steps = int(eval_cfg.get("max_steps", 0)) if eval_cfg else 0
 
+        # P2-2：AMP 真正落地。只有 cuda + 显式开启才启用，并且把 scaler 状态
+        # 一起交给 optimizer（已创建的 scaler 也能在 CPU 上安全存在）。
+        self.amp_enabled = bool(self.use_amp and self.device.type == "cuda")
+        self.scaler = (
+            torch.amp.GradScaler("cuda", enabled=True) if self.amp_enabled else None
+        )
+
         self.history: List[Dict[str, Any]] = []
         self.global_step = 0
         self.start_epoch = 0
         self.best_metric = float("-inf")
+
+    # ------------------------------------------------------------------
+    def _autocast(self):
+        """训练用的 autocast 上下文（未开 AMP 时是 no-op）。"""
+        if not self.amp_enabled:
+            return contextlib.nullcontext()
+        return torch.amp.autocast("cuda", dtype=torch.float16)
 
     # ------------------------------------------------------------------
     def train_epoch(self, epoch: int) -> Dict[str, Any]:
@@ -101,20 +124,35 @@ class Trainer:
         start = time.time()
         for batch_index, samples in enumerate(batches):
             batch = collate_samples(samples, device=self.device)
-            out = recurrent_reverse_loss(
-                self.model,
-                self.diffusion,
-                batch,
-                weights=self.weights,
-                generator=self.generator,
-                max_steps=self.diffusion.T,
-                truncate_every=self.max_bptt_steps,
-            )
+            # P2-2：training.amp 现在真的控制 autocast + GradScaler，
+            # 不再是一个只被读取、不生效的配置项。
+            with self._autocast():
+                out = recurrent_reverse_loss(
+                    self.model,
+                    self.diffusion,
+                    batch,
+                    weights=self.weights,
+                    generator=self.generator,
+                    max_steps=self.diffusion.T,
+                    truncate_every=self.max_bptt_steps,
+                )
             self.optimizer.zero_grad(set_to_none=True)
-            out.loss.backward()
-            if self.grad_clip:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-            self.optimizer.step()
+            if self.scaler is not None:
+                self.scaler.scale(out.loss).backward()
+                if self.grad_clip:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.grad_clip
+                    )
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+            else:
+                out.loss.backward()
+                if self.grad_clip:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), self.grad_clip
+                    )
+                self.optimizer.step()
             self.global_step += 1
 
             total_loss += float(out.loss.detach())

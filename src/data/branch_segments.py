@@ -99,6 +99,11 @@ class GraphSegments:
     decision_nodes: List[Node]                 # [M]
     branches: List[List[Branch]]               # [M] 每个 decision 的候选 branch
     endpoints: List[Node] = field(default_factory=list)
+    # 单出口 Source（deg(s) == 1）的被迫段所覆盖的 physical edge IDs。
+    # 它不是 decision，z_t 里没有它的位置，所以这些边**永久 selected**
+    # （修改清单 P0-1）。deg(s) > 1 时是空列表。
+    source_forced_edge_ids: List[int] = field(default_factory=list)
+    source_forced_nodes: List[Node] = field(default_factory=list)
 
     # -- convenience -----------------------------------------------------
     @property
@@ -259,6 +264,28 @@ def set_od(graph: nx.Graph, start: Node, goal: Node) -> nx.Graph:
     return graph
 
 
+def build_source_forced_segment(
+    graph: nx.Graph,
+    start: Node,
+    endpoints: Iterable[Node],
+    edge_of: Optional[Dict[EdgeKey, int]] = None,
+) -> Optional[Branch]:
+    """单出口 Source 的**被迫段**（修改清单 P0-1）。
+
+    ``deg(s) == 1`` 时 Source 没有选择自由度，因此不建立 categorical decision
+    variable；但从 s 出发到第一个 structural endpoint 的那一段是必经之路，
+    它的 physical edges 必须**永久 selected**，否则这段信息永远传不出去。
+
+    ``deg(s) > 1`` 时 Source 自己是 decision node，返回 None。
+    """
+    if graph.degree(start) != 1:
+        return None
+
+    edge_lookup = edge_of if edge_of is not None else physical_edge_lookup(graph)
+    first_hop = next(iter(graph.neighbors(start)))
+    return trace_branch(graph, start, first_hop, endpoints, edge_lookup)
+
+
 def _graph_start(graph: nx.Graph) -> Node:
     if "start" not in graph.graph:
         raise KeyError("graph has no 'start' attribute; call set_od(graph, s, g) first")
@@ -309,6 +336,7 @@ def extract_segments(
     decisions = build_decision_nodes(graph, start, goal)
     edge_index, msg_to_phys, num_phys = build_edge_tables(graph)
     endpoints = build_endpoints(graph, start, goal)
+    forced = build_source_forced_segment(graph, start, endpoints)
 
     return GraphSegments(
         num_nodes=graph.number_of_nodes(),
@@ -321,6 +349,8 @@ def extract_segments(
         decision_nodes=decisions,
         branches=build_branches(graph, decisions, start, goal, endpoints),
         endpoints=endpoints,
+        source_forced_edge_ids=list(forced.physical_edges) if forced else [],
+        source_forced_nodes=list(forced.nodes) if forced else [],
     )
 
 
@@ -354,6 +384,8 @@ def describe_segments(segments: GraphSegments) -> Dict[str, Any]:
         "goal": segments.goal,
         "num_decisions": segments.num_decisions,
         "num_candidates": sum(len(g) for g in segments.branches) + _num_nulls(segments),
+        "source_forced_nodes": list(segments.source_forced_nodes),
+        "source_forced_edges": list(segments.source_forced_edge_ids),
         "branches": [
             {
                 "owner": branch.owner,

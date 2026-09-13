@@ -44,11 +44,21 @@ def describe_sample(sample, index: int) -> None:
         f"M={sample.num_decisions} C={sample.num_candidates}"
     )
     print(f"  GT path ({sample.gt_length} hops): {sample.gt_path}")
-    counts = {}
-    for value in segments.node_type:
-        counts[NODE_TYPE_NAMES[value]] = counts.get(NODE_TYPE_NAMES[value], 0) + 1
+    # node_type 是 {node: type} 的字典，不是按节点顺序排列的 list
+    counts: dict[str, int] = {}
+    for node in range(segments.num_nodes):
+        name = NODE_TYPE_NAMES[segments.node_type[node]]
+        counts[name] = counts.get(name, 0) + 1
     print(f"  node types: {counts}")
     print(f"  decisions : {segments.decision_nodes}")
+    if segments.source_forced_nodes:
+        print(
+            f"  source forced segment (P0-1, 永久 selected): "
+            f"nodes={segments.source_forced_nodes} "
+            f"phys_edges={segments.source_forced_edge_ids}"
+        )
+    else:
+        print("  source forced segment : none (deg(s) > 1, source 是 decision node)")
 
     candidates = field.candidates
     for decision_index, node in enumerate(segments.decision_nodes):
@@ -84,6 +94,7 @@ def main() -> int:
     print(f"  branch_node_ids     {tuple(batch.branch_node_ids.shape)}")
     print(f"  branch_edge_ids     {tuple(batch.branch_edge_ids.shape)}")
     print(f"  candidate_is_null   {int(batch.candidate_is_null.sum())} / {batch.num_candidates}")
+    print(f"  source_forced_edges {batch.source_forced_edge_ids.tolist()}")
     return 0
 
 
