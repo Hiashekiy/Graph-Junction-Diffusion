@@ -69,8 +69,32 @@ def test_real_config_loads_with_overrides():
     assert cfg.get("data.num_nodes") == [18, 28]
     assert cfg.get("data.min_od_distance") == 3
     # 没被覆盖的键仍然是默认值
-    assert cfg.section("data").get("graph_type", "er") == "er"
+    assert cfg.section("data").get("graph_type", "er") == "controlled_junction"
     assert cfg.section("model").get("d_model", 128) == 128
+
+
+def test_controlled_junction_config_is_complete():
+    """指南第 17 节要求的生成参数必须在正式配置里齐备。"""
+    cfg = load_config(CONFIG_PATH)
+    data = cfg.section("data")
+    assert data.get("graph_type") == "controlled_junction"
+    assert data.get("num_samples") == 3000
+    assert data.get("num_queries_per_graph") == 1
+    assert data.get("weighted") is False
+
+    difficulty = data.get("difficulty_mix")
+    assert abs(sum(difficulty.values()) - 1.0) < 1e-6
+    assert difficulty["medium"] == 0.60
+    structure = data.get("structure_mix")
+    assert abs(sum(structure.values()) - 1.0) < 1e-6
+    assert structure["loop_detour"] == 0.20
+
+    assert data.get("source").get("forced_probability") == 0.70
+    branch = data.get("branch")
+    assert list(branch.get("ordinary_nodes_per_segment")) == [1, 4]
+    assert list(branch.get("candidates_per_decision")) == [2, 5]
+    assert cfg.get("split.split_by_graph") is True
+    assert cfg.get("training.epochs") == 100
 
 
 def test_real_config_matches_guide_defaults():

@@ -86,7 +86,43 @@ def build_optimizer(config: Config, model: nn.Module) -> torch.optim.Optimizer:
 
 
 # ---------------------------------------------------------------------------
-def build_datasets(config: Config) -> Dict[str, GraphQueryDataset]:
+def generator_config(data_cfg: Config) -> Dict[str, Any]:
+    """把 config 里的数据生成参数整理成 build_dataset 需要的 ``generator_cfg``。
+
+    支持两类生成器：
+      * ``controlled_junction``：难度混合 / 结构模式 / source 比例 / branch 参数；
+      * 其它（er/ba/ws/...）：直接透传 ``data.generator``。
+    """
+    base = dict(data_cfg.get("generator", {}) or {})
+    graph_type = str(data_cfg.get("graph_type", "er"))
+    if graph_type != "controlled_junction":
+        return base
+
+    cfg: Dict[str, Any] = dict(base)
+    if "difficulty_mix" in data_cfg:
+        cfg["difficulty_mix"] = {
+            str(key): float(value)
+            for key, value in data_cfg.get("difficulty_mix").items()
+        }
+    if "structure_mix" in data_cfg:
+        cfg["structure_mix"] = {
+            str(key): float(value) for key, value in data_cfg.get("structure_mix").items()
+        }
+    source_cfg = data_cfg.get("source", {}) or {}
+    cfg["source_forced_probability"] = float(
+        source_cfg.get("forced_probability", 0.70)
+    )
+    branch_cfg = data_cfg.get("branch", {}) or {}
+    if branch_cfg:
+        cfg["branch"] = {
+            key: list(value) for key, value in branch_cfg.items() if value is not None
+        }
+    return cfg
+
+
+def build_datasets(
+    config: Config, progress_every: int = 500
+) -> Dict[str, GraphQueryDataset]:
     data_cfg = config.section("data")
     split_cfg = config.get("split", {})
     fractions = {
@@ -95,6 +131,7 @@ def build_datasets(config: Config) -> Dict[str, GraphQueryDataset]:
         "test": float(split_cfg.get("test", 0.1)),
     }
     num_nodes = data_cfg.get("num_nodes", [20, 40])
+    generator_cfg = generator_config(data_cfg)
     dataset = build_dataset(
         num_samples=int(data_cfg.get("num_samples", 0)) or _auto_num_samples(config),
         graph_type=str(data_cfg.get("graph_type", "er")),
@@ -102,9 +139,10 @@ def build_datasets(config: Config) -> Dict[str, GraphQueryDataset]:
         min_od_distance=int(data_cfg.get("min_od_distance", 5)),
         seed=int(config.get("seed", 0)),
         queries_per_graph=int(data_cfg.get("num_queries_per_graph", 4)),
-        generator_cfg=dict(data_cfg.get("generator", {}) or {}),
+        generator_cfg=generator_cfg,
         weighted=bool(data_cfg.get("weighted", False)),
         component_fallback=bool(data_cfg.get("component_fallback", True)),
+        progress_every=progress_every,
     )
     splits = split_dataset(dataset, fractions, seed=int(config.get("seed", 0)))
     empty = [name for name, split in splits.items() if len(split) == 0]

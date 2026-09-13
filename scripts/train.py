@@ -26,6 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.data.dataset import GraphQueryDataset  # noqa: E402
 from src.data.dataset_builder import tiny_overfit_dataset  # noqa: E402
+from src.training.checkpoint import load_checkpoint  # noqa: E402
 from src.training.setup import (  # noqa: E402
     build_datasets,
     build_diffusion,
@@ -48,8 +49,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tiny-nodes", type=int, default=24)
     parser.add_argument("--data", default=None, help="load a pre-generated dataset pkl (train)")
     parser.add_argument("--val-data", default=None)
-    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--resume", default=None, help="resume from a checkpoint (e.g. last.pt)")
+    parser.add_argument("--epochs", type=int, default=None, help="total epoch budget")
+    parser.add_argument("--extra-epochs", type=int, default=None, help="在 resume 基础上再训练多少轮")
     parser.add_argument("--device", default=None)
+    parser.add_argument("--log-every", type=int, default=None, help="每多少个 batch 打一行")
     parser.add_argument(
         "--set",
         dest="overrides",
@@ -66,13 +70,14 @@ def main() -> int:
     # --set 可以重复出现；nargs='*' 版本的 argparse 会丢掉前面几次的值，
     # 所以这里显式摊平（action='append' 给的是 [[...], [...]]）
     overrides = [item for group in args.overrides for item in group]
-    overrides = list(args.overrides)
     if args.name:
         overrides.append(f"paths.run_name={args.name}")
     if args.epochs is not None:
         overrides.append(f"training.epochs={args.epochs}")
     if args.device:
         overrides.append(f"training.device={args.device}")
+    if args.log_every is not None:
+        overrides.append(f"training.log_every={args.log_every}")
     config = load_config(args.config, overrides)
 
     seed = int(config.get("seed", 0))
@@ -115,7 +120,26 @@ def main() -> int:
         run_dir=run_dir,
         generator=generator,
     )
-    history = trainer.fit()
+
+    if args.resume:
+        payload = load_checkpoint(
+            args.resume, model=model, optimizer=optimizer, map_location=device
+        )
+        trainer.start_epoch = int(payload.get("epoch", 0))
+        trainer.global_step = int(payload.get("global_step", 0))
+        if payload.get("best_metric") is not None:
+            trainer.best_metric = float(payload["best_metric"])
+        budget = int(config.get("training.epochs", 100))
+        if args.extra_epochs is not None:
+            budget = trainer.start_epoch + int(args.extra_epochs)
+        print(
+            f"resumed from {args.resume}: start_epoch={trainer.start_epoch}, "
+            f"epoch budget={budget}, best_metric={trainer.best_metric:.4f}",
+            flush=True,
+        )
+        history = trainer.fit(epochs=budget)
+    else:
+        history = trainer.fit()
     print(json.dumps(history[-1] if history else {}, indent=1, ensure_ascii=False))
     return 0
 

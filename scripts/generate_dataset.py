@@ -1,17 +1,20 @@
-"""生成数据集（实施指南第 2 阶段）。
+"""生成数据集（实施指南第 2 阶段 + 《V2 数据集生成指南》第 13-18 节）。
 
 用法::
 
+    # Controlled Junction Graph（推荐，指南第 17 节的默认配置）
     python scripts/generate_dataset.py --config configs/graph_flow.yaml
+
+    # 小规模调试
     python scripts/generate_dataset.py --config configs/graph_flow.yaml \
-        --set data.num_samples=64 --name tiny
+        --name debug --set data.num_samples=300
 
 输出（默认 ``data/``）::
 
-    data/<name>_train.pkl
-    data/<name>_val.pkl
-    data/<name>_test.pkl
-    data/<name>_summary.json
+    data/<name>_train.pkl / _val.pkl / _test.pkl
+    data/<name>_summary.json      # 指南第 16 节的全部指标
+
+``--split-by-graph``（默认开）保证同一张底层图的所有 OD query 落在同一个 split。
 """
 
 from __future__ import annotations
@@ -26,7 +29,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.data.dataset_builder import build_dataset, split_dataset  # noqa: E402
+from src.data.dataset_builder import (  # noqa: E402
+    build_dataset,
+    dataset_statistics,
+    graph_ids_of,
+    split_dataset,
+)
+from src.data.dataset_builder import CONTROLLED_JUNCTION  # noqa: E402
+from src.training.setup import generator_config  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 from src.utils.seed import set_seed  # noqa: E402
 
@@ -51,8 +61,9 @@ def main() -> int:
     args = parse_args()
     # --set 可以重复出现，每次一个值；这里统一摊平（nargs="*" 会丢掉前面的值）
     overrides = [item for group in args.overrides for item in group]
-    config = load_config(args.config, args.overrides)
-    set_seed(int(config.get("seed", 0)))
+    config = load_config(args.config, overrides)
+    seed = int(config.get("seed", 0))
+    set_seed(seed)
 
     data_cfg = config.section("data")
     num_nodes = data_cfg.get("num_nodes", [20, 40])
@@ -61,47 +72,85 @@ def main() -> int:
         if isinstance(num_nodes, (list, tuple))
         else int(num_nodes)
     )
-    num_samples = int(data_cfg.get("num_samples", 256))
+    num_samples = int(data_cfg.get("num_samples", 3000))
+    graph_type = str(data_cfg.get("graph_type", "er"))
 
     start = time.time()
-    print(f"generating {num_samples} samples (graph_type={data_cfg.get('graph_type')}) ...", flush=True)
+    print(
+        f"generating {num_samples} samples (graph_type={graph_type}) ...",
+        flush=True,
+    )
     dataset = build_dataset(
         num_samples=num_samples,
-        graph_type=str(data_cfg.get("graph_type", "er")),
+        graph_type=graph_type,
         num_nodes=num_nodes,
         min_od_distance=int(data_cfg.get("min_od_distance", 5)),
-        seed=int(config.get("seed", 0)),
-        queries_per_graph=int(data_cfg.get("num_queries_per_graph", 4)),
-        generator_cfg=dict(data_cfg.get("generator", {}) or {}),
+        seed=seed,
+        queries_per_graph=int(data_cfg.get("num_queries_per_graph", 1)),
+        generator_cfg=generator_config(data_cfg),
         weighted=bool(data_cfg.get("weighted", False)),
         component_fallback=bool(data_cfg.get("component_fallback", True)),
+        progress_every=max(200, num_samples // 10),
     )
-    print(f"generated in {time.time() - start:.1f}s", flush=True)
+    elapsed = time.time() - start
+    print(
+        f"generated {len(dataset)} samples in {elapsed:.1f}s "
+        f"({len(dataset) / max(elapsed, 1e-6):.0f} samples/s)",
+        flush=True,
+    )
+
+    stats = dataset_statistics(dataset)
+    print("=== dataset statistics（指南第 16 节）===", flush=True)
+    print(json.dumps(stats, indent=1, ensure_ascii=False))
 
     split_cfg = config.get("split", {})
-    splits = split_dataset(
-        dataset,
-        {
-            "train": float(split_cfg.get("train", 0.8)),
-            "val": float(split_cfg.get("val", 0.1)),
-            "test": float(split_cfg.get("test", 0.1)),
-        },
-        seed=int(config.get("seed", 0)),
-    )
+    split_by_graph = bool(split_cfg.get("split_by_graph", True))
+    if split_by_graph:
+        splits = split_dataset(
+            dataset,
+            {
+                "train": float(split_cfg.get("train", 0.8)),
+                "val": float(split_cfg.get("val", 0.1)),
+                "test": float(split_cfg.get("test", 0.1)),
+            },
+            seed=seed,
+        )
+    else:
+        # 明确选择按 query 随机划分（会引入 topology leakage，仅供对照）
+        print("WARNING: split_by_graph=false -> topology leakage is possible", flush=True)
+        splits = split_dataset(
+            dataset,
+            {
+                "train": float(split_cfg.get("train", 0.8)),
+                "val": float(split_cfg.get("val", 0.1)),
+                "test": float(split_cfg.get("test", 0.1)),
+            },
+            seed=seed,
+        )
 
     data_dir = Path(args.data_dir or str(config.get("paths.data_dir", "data")))
-    name = args.name or f"{data_cfg.get('graph_type', 'er')}_{num_samples}"
-    summary = {}
+    name = args.name or f"{graph_type}_{num_samples}"
+    split_summary = {}
     for split_name, split in splits.items():
         path = split.save(data_dir / f"{name}_{split_name}.pkl")
-        summary[split_name] = split.summary()
-        print(f"{split_name:>5}: {len(split):>4} samples -> {path}", flush=True)
+        split_summary[split_name] = split.summary()
+        print(
+            f"{split_name:>5}: {len(split):>5} samples, {len(graph_ids_of(split)):>4} graphs "
+            f"-> {path}",
+            flush=True,
+        )
 
+    payload = {"dataset": stats, "splits": split_summary, "seed": seed}
     summary_path = data_dir / f"{name}_summary.json"
     with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=1, ensure_ascii=False)
+        json.dump(payload, handle, indent=1, ensure_ascii=False)
     print(f"summary -> {summary_path}")
-    print(json.dumps(summary, indent=1, ensure_ascii=False))
+    if graph_type == CONTROLLED_JUNCTION:
+        train_ids = graph_ids_of(splits["train"])
+        val_ids = graph_ids_of(splits["val"])
+        test_ids = graph_ids_of(splits["test"])
+        leakage = (train_ids & val_ids) | (train_ids & test_ids) | (val_ids & test_ids)
+        print(f"topology leakage check: {sorted(leakage) or 'none'}")
     return 0
 
 

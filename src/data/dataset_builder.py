@@ -18,15 +18,24 @@ decision node、off-path junction 为 NULL）。不满足语义的 OD 对直接�
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import networkx as nx
 import numpy as np
 
 from src.data import branch_segments as bs
+from src.data.controlled_graph import (
+    ACCEPT_BRANCH_FACTOR,
+    ACCEPT_DECISIONS,
+    ACCEPT_HOPS,
+    generate_controlled_junction_graph,
+)
 from src.data.dataset import GraphQueryDataset, GraphSample, validate_sample
 from src.data.decision_field import build_decision_field, validate_decision_field
 from src.data.graph_generators import generate_connected_graph
+
+CONTROLLED_JUNCTION = "controlled_junction"
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +144,14 @@ def build_dataset(
     weighted: bool = False,
     component_fallback: bool = True,
     max_rejects: int = 5000,
+    progress_every: int = 0,
 ) -> GraphQueryDataset:
     """生成 ``num_samples`` 个 (G, s, g) 样本。
+
+    ``graph_type`` 支持：
+      * ``"controlled_junction"`` —— 走 :func:`build_controlled_dataset`（推荐，
+        指南第 3-12 节的 Controlled Junction Graph）；
+      * ``"er" / "ba" / "ws" / "geometric" / "grid"`` —— 旧的随机图生成器。
 
     ``queries_per_graph`` > 1 时同一张图上抽多个 OD 对；这些样本共享同一个
     ``graph_id``，所以按 graph 划分时它们会一起进同一个 split。
@@ -149,6 +164,19 @@ def build_dataset(
             "V2 baseline does not encode edge cost yet: "
             "weighted=True would make the task unidentifiable from the model's "
             "inputs. Keep weighted=false until an Edge Cost Encoder is implemented."
+        )
+
+    if graph_type == CONTROLLED_JUNCTION:
+        return build_controlled_dataset(
+            num_samples=num_samples,
+            seed=seed,
+            difficulty_mix=(generator_cfg or {}).get("difficulty_mix"),
+            structure_mix=(generator_cfg or {}).get("structure_mix"),
+            forced_source_probability=float(
+                (generator_cfg or {}).get("source_forced_probability", 0.70)
+            ),
+            branch_cfg=(generator_cfg or {}).get("branch"),
+            progress_every=progress_every,
         )
 
     rng = np.random.default_rng(seed)
@@ -202,6 +230,179 @@ def build_dataset(
         graph_id += 1
 
     return GraphQueryDataset(samples, name=f"{graph_type}_{num_samples}")
+
+
+# ---------------------------------------------------------------------------
+# Controlled Junction Graph 数据集（指南第 3-14 节）
+# ---------------------------------------------------------------------------
+def build_controlled_dataset(
+    num_samples: int,
+    seed: int = 0,
+    difficulty_mix: Optional[Dict[str, float]] = None,
+    structure_mix: Optional[Dict[str, float]] = None,
+    forced_source_probability: float = 0.70,
+    branch_cfg: Optional[Dict[str, Any]] = None,
+    progress_every: int = 0,
+    max_attempts_per_sample: int = 300,
+) -> GraphQueryDataset:
+    """用 Controlled Junction Graph 生成样本。
+
+    每张合格图产生一个 OD query（start/goal 由生成器决定），并把难度 / 结构模式 /
+    干扰分支统计写进 ``sample.meta``，供 :func:`dataset_statistics` 汇总。
+    """
+    rng = np.random.default_rng(seed)
+    samples: List[GraphSample] = []
+    attempts = 0
+    t0 = time.time()
+    branch_kwargs: Dict[str, Any] = {}
+    if branch_cfg:
+        if branch_cfg.get("ordinary_nodes_per_segment"):
+            branch_kwargs["ordinary_nodes_per_segment"] = tuple(
+                branch_cfg["ordinary_nodes_per_segment"]
+            )
+        if branch_cfg.get("candidates_per_decision"):
+            branch_kwargs["candidates_per_decision"] = tuple(
+                branch_cfg["candidates_per_decision"]
+            )
+
+    while len(samples) < num_samples:
+        candidate = generate_controlled_junction_graph(
+            rng,
+            difficulty_mix=difficulty_mix,
+            structure_mix=structure_mix,
+            forced_source_probability=forced_source_probability,
+            **branch_kwargs,
+        )
+        attempts += 1
+        if not candidate.accepted:
+            if attempts > max_attempts_per_sample * num_samples:
+                raise RuntimeError(
+                    f"gave up after {attempts} attempts for {num_samples} samples; "
+                    f"last reject: {candidate.reject_reason}"
+                )
+            continue
+
+        graph_id = len(samples)
+        try:
+            sample = build_sample(
+                candidate.graph,
+                candidate.start,
+                candidate.goal,
+                meta={
+                    "graph_type": CONTROLLED_JUNCTION,
+                    "difficulty": candidate.difficulty,
+                    "mode": candidate.mode,
+                    "target_decisions": candidate.target_decisions,
+                    "target_hops": int(candidate.metrics.get("target_hops", -1)),
+                    "distractors": _distractor_counts(candidate.distractors),
+                    "num_nodes": candidate.graph.number_of_nodes(),
+                },
+                graph_id=graph_id,
+            )
+            validate_sample(sample)
+        except (ValueError, RuntimeError, AssertionError, nx.NetworkXError):
+            continue
+        samples.append(sample)
+
+        if progress_every and len(samples) % progress_every == 0:
+            rate = len(samples) / max(time.time() - t0, 1e-6)
+            print(
+                f"  accepted {len(samples)}/{num_samples} "
+                f"(attempts={attempts}, {rate:.1f} samples/s)",
+                flush=True,
+            )
+
+    dataset = GraphQueryDataset(samples, name=f"controlled_{num_samples}")
+    dataset.attempts = attempts
+    del rng, attempts, t0, branch_kwargs
+    return dataset
+
+
+def _distractor_counts(distractors: Iterable[Any]) -> Dict[str, int]:
+    counts = {"dead_end": 0, "detour": 0, "loop": 0}
+    for item in distractors:
+        counts[item.kind] = counts.get(item.kind, 0) + 1
+    return counts
+
+
+def _stats(values: Sequence[float]) -> Dict[str, float]:
+    array = np.asarray(list(values), dtype=float)
+    if array.size == 0:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+    return {
+        "mean": float(array.mean()),
+        "std": float(array.std()),
+        "min": float(array.min()),
+        "max": float(array.max()),
+    }
+
+
+def dataset_statistics(dataset: GraphQueryDataset) -> Dict[str, Any]:
+    """输出指南第 16 节要求的数据集指标。"""
+    if len(dataset) == 0:
+        return {"num_graphs": 0, "num_queries": 0}
+
+    rows = []
+    for sample in dataset:
+        segments = sample.segments
+        branch_counts = [len(group) for group in segments.branches]
+        candidates = sample.field.candidates
+        distractors = sample.meta.get("distractors", {})
+        rows.append(
+            {
+                "nodes": sample.num_nodes,
+                "hops": sample.gt_length,
+                "decisions": sample.num_decisions,
+                "branch_factor": (
+                    float(np.mean(branch_counts)) if branch_counts else 0.0
+                ),
+                "null_fraction": float(np.mean(candidates.candidate_is_null)),
+                "source_is_decision": float(segments.start in set(segments.decision_nodes)),
+                "source_forced": float(bool(segments.source_forced_edge_ids)),
+                "dead_end": float(distractors.get("dead_end", 0)),
+                "detour": float(distractors.get("detour", 0)),
+                "loop": float(distractors.get("loop", 0)),
+            }
+        )
+
+    graph_ids = {sample.graph_id for sample in dataset}
+    total_distractors = sum(row["dead_end"] + row["detour"] + row["loop"] for row in rows)
+    stats: Dict[str, Any] = {
+        "num_graphs": len(graph_ids),
+        "num_queries": len(dataset),
+        "queries_per_graph": len(dataset) / max(len(graph_ids), 1),
+        "attempts": getattr(dataset, "attempts", None),
+    }
+    for key in ("nodes", "hops", "decisions", "branch_factor", "null_fraction"):
+        stats[key] = _stats([row[key] for row in rows])
+
+    stats["source_as_decision_fraction"] = float(
+        np.mean([row["source_is_decision"] for row in rows])
+    )
+    stats["source_forced_fraction"] = float(
+        np.mean([row["source_forced"] for row in rows])
+    )
+    for kind in ("dead_end", "detour", "loop"):
+        amount = sum(row[kind] for row in rows)
+        stats[f"{kind}_branch_fraction"] = (
+            amount / total_distractors if total_distractors else 0.0
+        )
+        stats[f"{kind}_per_graph"] = amount / max(len(rows), 1)
+
+    if any("difficulty" in sample.meta for sample in dataset):
+        for level in ("easy", "medium", "hard"):
+            count = sum(1 for s in dataset if s.meta.get("difficulty") == level)
+            stats[f"difficulty_{level}_fraction"] = count / len(dataset)
+        for mode in ("branch_heavy", "long_chain", "loop_detour"):
+            count = sum(1 for s in dataset if s.meta.get("mode") == mode)
+            stats[f"mode_{mode}_fraction"] = count / len(dataset)
+
+    stats["acceptance_contract"] = {
+        "hops": list(ACCEPT_HOPS),
+        "decisions": list(ACCEPT_DECISIONS),
+        "branch_factor": list(ACCEPT_BRANCH_FACTOR),
+    }
+    return stats
 
 
 def _allocate_group_shares(

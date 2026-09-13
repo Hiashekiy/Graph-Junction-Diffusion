@@ -198,12 +198,50 @@ class Trainer:
         return metrics
 
     # ------------------------------------------------------------------
+    def _history_path(self) -> Optional[Path]:
+        return None if self.run_dir is None else self.run_dir / "history.json"
+
+    def _load_history(self) -> List[Dict[str, Any]]:
+        """把磁盘上已有的 history.json 读回来（resume 时保持完整曲线）。
+
+        没有这一步的话，续训会用新列表覆盖 history.json，前面几轮的曲线就永久丢了
+        （真实踩过：第一段 1..20 轮的逐轮记录被第二段覆盖）。
+        """
+        path = self._history_path()
+        if path is None or not path.exists():
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (json.JSONDecodeError, OSError):
+            return []
+        if not isinstance(loaded, list):
+            return []
+        # 只保留 epoch <= start_epoch 的旧记录，避免重复
+        keep = [
+            record
+            for record in loaded
+            if isinstance(record, dict)
+            and int(record.get("epoch", 0)) <= self.start_epoch
+        ]
+        return sorted(keep, key=lambda record: int(record.get("epoch", 0)))
+
     def fit(self, epochs: Optional[int] = None) -> List[Dict[str, Any]]:
         epochs = int(epochs if epochs is not None else self.epochs)
+        if not self.history:
+            self.history = self._load_history()
+            if self.history:
+                print(
+                    f"loaded {len(self.history)} previous epoch records from history.json",
+                    flush=True,
+                )
         for epoch in range(self.start_epoch + 1, epochs + 1):
             record = self.train_epoch(epoch)
             if epoch % self.eval_every == 0:
                 record.update(self.validate(epoch))
+            # 显式记录真实 epoch 号：resume 之后 history 是拼接的列表，
+            # 靠列表下标推 epoch 会算错。
+            record["epoch"] = epoch
             self.history.append(record)
             self._log(epoch, record)
             self._maybe_save(epoch, record)

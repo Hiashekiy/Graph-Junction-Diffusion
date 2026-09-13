@@ -249,3 +249,80 @@ epoch 300: train_loss=0.047  train_x0_acc=1.000  goal_hit=1.000  loop=0, broken=
 验收（GGMPC 环境，torch 2.9.1+cu126）：`pytest` 171 passed、
 `semantic_check` 0 problems、tiny overfit 的 full-chain `goal_hit=1.0000`、
 按图划分实测 `train ∩ val = train ∩ test = val ∩ test = ∅`。
+
+## 11. 数据集生成（《V2 数据集生成指南》）
+
+第一版不用"先随机生成图、再碰运气筛长路径"，而是 **Controlled Junction Graph**：
+
+```
+采样难度档 / 结构模式 → 选可行的 decision 数 K → 由 K 推出 hop 目标
+  → 构造骨架 S-J1-...-JK-G → 每段展开成 Branch Segment（插入 degree=2 普通节点）
+  → 加干扰分支（dead-end / detour / loop）→ 重新求真实 GT → 难度过滤 → 接受/拒绝
+```
+
+难度由 `(N, L_hop, L_decision, K_avg)` 描述，关键是 **L_decision**（GT 路径上要连续做
+多少次 Branch Decision），而不是节点数。代码在 `src/data/controlled_graph.py`。
+
+```bash
+python scripts/generate_dataset.py --config configs/graph_flow.yaml
+```
+
+输出 `data/controlled_{train,val,test}.pkl` + `data/controlled_summary.json`，后者包含
+指南第 16 节要求的全部指标（hops / decisions / branch factor 的 mean-std-min-max、
+NULL 比例、source-as-decision 比例、三类干扰分支占比、难度与模式配比）。
+
+### 与指南表格的两处必要偏离
+
+1. **Easy 档的 `gt_decisions` 下界抬到 5**：指南表格写 2–5，但第 9.2 节的验收契约
+   要求 `decisions >= 5`，二者直接冲突。以契约优先，否则 Easy 样本会被 100% 丢弃。
+2. **Hard 档收窄为 `hops∈[25,33]`、`decisions∈[6,9]`**：表格写的 `hops<=35 ∧
+   decisions>=8` 在数学上几乎无交集 —— 每段至少 1 个 ordinary 节点意味着
+   `hop >= 2(K+1)`，`K=12` 时 hop 至少 26 且上界 35，实测接受率只有 0.5%。
+   收窄后 hard 档可稳定产出，三档仍保持清晰梯度。
+
+### 生成质量（实测 3000 样本）
+
+| 指标 | 值 |
+|---|---|
+| 接受率 | 3000 / 28462 次尝试 ≈ 10.5% |
+| 生成速度 | 36 samples/s（83.6s 生成 3000 条） |
+| GT hop length | mean 19.1（契约 15–35） |
+| GT decision depth | mean 6.53（契约 5–12） |
+| Average branch factor | mean 4.37（契约 2–5） |
+| NULL fraction | 0.177 |
+| source-forced / source-as-decision | 56% / 44%（目标 70/30，单出口更容易通过过滤） |
+| 干扰分支比例 | dead-end 70% / detour 23% / loop 7% |
+| topology leakage | **无**（三个 split 的 graph_id 两两不相交） |
+
+## 12. 实现生成器时踩到的坑（新增）
+
+1. **loop 分支不能连回 start / 更早的 junction**：会造出 `start → helper → J2`
+   这种绕过整段骨架的捷径，把 GT 从 22 跳压到 17 跳、路径上只剩 2~3 个 junction。
+   现在 loop 只能连"至少隔两跳"的下游 junction。
+2. **被迫段用完的 chain 末端必须就是 J1**：否则 skeleton 节点和被迫段是两套节点，
+   图会不连通（`gt_hops` 直接报 `NetworkXNoPath`）。
+3. **K 与 hop 目标必须耦合**：每段至少 1 个 ordinary 节点 ⇒ `hop >= 2(K+1)`。
+   两者独立随机采样会造出大量自相矛盾的样本（接受率只有 3~6%），
+   现在改为由 K 推出可行 hop 区间、每次重试重新抽 `forced_source`。
+4. **每个 junction 必须至少有一条干扰分支**，否则它的度数停在 2、压根不是 decision；
+   但不能强制成 dead-end（会让 dead-end 占到 78%，而指南要 30~40%）。
+   兜底用的是"两跳纯 dead-end"，它的终点是叶子，不可能造出捷径。
+
+## 13. 正式训练（100 epoch）
+
+```bash
+python scripts/train.py --config configs/graph_flow.yaml --name v2_controlled_100ep \
+    --data data/controlled_train.pkl --val-data data/controlled_val.pkl
+```
+
+第一版正式配置：`num_samples=3000`、`batch_size=48`、`T=50`、`d_model=128`、`amp=true`、
+`epochs=100`。实测约 **43 s/epoch**（50 步 × ~0.86 s，RTX 4070），100 epoch ≈ **72 分钟**。
+
+评测：
+
+```bash
+python scripts/evaluate.py --config configs/graph_flow.yaml \
+    --checkpoint outputs/runs/v2_controlled_100ep/best.pt \
+    --data data/controlled_test.pkl --baselines \
+    --out outputs/runs/v2_controlled_100ep/eval_test.json
+```

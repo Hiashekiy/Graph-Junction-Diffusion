@@ -1,38 +1,52 @@
-# Graph-Junction-Diffusion V2 第一版配置（实施指南第 28 节）
+# Graph-Junction-Diffusion V2 第一版配置
 #
-# 说明：本文件是工程默认值，不是论文最终超参数。
-# 所有键都可以在命令行用 --set key.subkey=value 覆盖。
+# 数据部分按《V2 数据集生成指南》第 17 节配置 Controlled Junction Graph：
+# 难度由 (N, L_hop, L_decision, K_avg) 描述，而不是节点数。
 
 seed: 0
 
 data:
-  graph_type: er            # er | ba | ws | geometric | grid
-  num_nodes: [20, 40]       # 每个样本随机取的节点数区间
-  num_samples: 256          # 总样本数（再按 split 切分）
-  min_od_distance: 5        # d_G(s,g) 的下界
-  num_queries_per_graph: 4  # 每张图采多少对 OD；同一张图的 query 共享 graph_id，
-                            # split 时按 graph 整体划分（无 topology leakage）
-  weighted: false           # 只能填 false：V2 目前不编码 edge cost，
-                            # true 会直接抛 NotImplementedError（信息不可辨识）
-  component_fallback: true  # 生成不连通图时退回到最大连通分量
+  # controlled_junction 是推荐生成器；也支持 er / ba / ws / geometric / grid
+  graph_type: controlled_junction
+  num_samples: 3000          # 总样本数（再按 graph 划分 80/10/10）
+  min_od_distance: 5         # 仅对旧的随机图生成器有效
+  num_queries_per_graph: 1   # controlled 生成器每个 OD 一张图（graph_id = 样本序号）
+
+  difficulty_mix:            # 指南第 10 节：Easy/Medium/Hard 混合训练
+    easy: 0.20
+    medium: 0.60
+    hard: 0.20
+  structure_mix:             # 指南第 12 节：统一生成器内的三种结构模式
+    branch_heavy: 0.40
+    long_chain: 0.40
+    loop_detour: 0.20
+  source:
+    forced_probability: 0.70 # 70% 单出口 source（被迫段永久 selected），30% 多出口
+  branch:
+    ordinary_nodes_per_segment: [1, 4]   # 骨架段之间插入的 degree=2 普通节点数
+    candidates_per_decision: [2, 5]      # 每个 decision 的总出口数
+
+  weighted: false            # 只能填 false：V2 不编码 edge cost，true 会直接报错
+  component_fallback: true
   generator: {}
 
 split:
   train: 0.8
   val: 0.1
   test: 0.1
+  split_by_graph: true       # 按底层图划分，禁止 topology leakage
 
 model:
   d_model: 128
-  node_types: 4             # Ordinary / Junction / Start / Goal
-  edge_states: 2            # unselected / selected
+  node_types: 4              # Ordinary / Junction / Start / Goal
+  edge_states: 2             # unselected / selected
   ffn_hidden: 256
   dropout: 0.0
 
 time:
-  encoding: sinusoidal
+  encoding: sinusoidal       # 目前只实现 sinusoidal（其它取值会报错）
   d_time: 128
-  conditioning: adaln      # MLP(tau) -> (gamma, beta)
+  conditioning: adaln        # 目前只实现 adaln
 
 diffusion:
   T: 50
@@ -46,25 +60,25 @@ training:
   lr: 1.0e-4
   weight_decay: 1.0e-4
   grad_clip: 1.0
-  amp: false                # 第一版默认关掉，避免 CPU/小图上出问题
-  batch_size: 8
-  epochs: 50
-  max_bptt_steps: 0         # 0 = 整条链反传（指南要求第一版不 detach）
-  log_every: 1
+  amp: true                  # 只在 cuda 上生效
+  batch_size: 48
+  epochs: 100
+  max_bptt_steps: 0          # 0 = 整条链反传（指南要求第一版不 detach）
+  log_every: 5
   eval_every: 5
-  device: auto              # auto | cpu | cuda
+  device: auto
 
 loss:
   x0_ce: 1.0
-  null_weight: 1.0          # NULL candidate 的权重
-  active_weight: 1.0        # 非 NULL candidate 的权重
+  null_weight: 1.0
+  active_weight: 1.0
 
 evaluation:
-  stochastic_sampling: true # false = 每步取 posterior argmax
-  batch_size: 8
-  max_steps: 0              # 0 = 用 diffusion.T
+  stochastic_sampling: true
+  batch_size: 16
+  max_steps: 0               # 只能为 0/None 或等于 diffusion.T
 
 paths:
   data_dir: data
   output_dir: outputs/runs
-  run_name: graph_flow
+  run_name: v2_controlled_100ep
