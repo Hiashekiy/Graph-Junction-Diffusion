@@ -666,9 +666,34 @@ python tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 \
 | 取值 | 含义 |
 |---|---|
 | `auto`（默认） | 先跑完整个 pool，再按 (难度, 结局) 分桶，按约 6:4 混着抽成功/失败案例 |
+| `random` | **在整个 pool 里均匀随机抽** `--num` 条。默认用系统熵，所以每次跑都不一样；把打印出来的 `select_seed` 填回 `--select-seed` 就能复现同一组图 |
 | `indices` | `--indices 277,47,249` 指定样本下标，便于复现同一组图（也可用来和别的 run 画同一批图对比） |
 | `goal` / `broken` / `loop` / `optimal` | 只看某一类结局 |
-| `--only-difficulty hard` / `--only-mode loop_detour` | 先在某个子集里抽 |
+| `--only-difficulty hard` / `--only-mode loop_detour` | 先在某个子集里抽（对 `random` 同样生效，即"在某个子集里随机抽"） |
+
+**两种随机性要分清楚**（命令输出和图的标题里都会打印出来，方便追溯）：
+
+| 参数 | 控制什么 | 默认 |
+|---|---|---|
+| `--seed` | **推理采样**的随机数种子（`make_generator`）。改它 = 换一副骰子重新解码整个 pool，pool 指标和结局分布都会变 | 取 `run_config.json` 里的 `seed`（本项目是 0） |
+| `--select-seed` | 只控制**从 pool 里挑哪几条**（`--select random` 用） | 随机（系统熵），除非显式指定 |
+
+所以同一个命令**每次跑出来的图完全一样**（推理种子固定 + 选择规则确定 + 布局确定性），
+这是刻意为之：图可以被引用、可原样复现。想"每次看点不一样的"，用
+`--select random`（选样本随机）或 `--seed 1/2/3...`（连解码都换一副骰子）：
+
+```bash
+# 每次随机抽 8 条（打印 select_seed，可复现）
+python tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --num 8 --cols 2 --select random \
+    --out outputs/figures/paths_random.png
+
+# 固定抽样种子 -> 每次都得到同一组随机样本
+... --select random --select-seed 42 --out outputs/figures/paths_random42.png
+
+# 换推理种子 -> 连 pool 结果都变
+... --num 8 --seed 1 --out outputs/figures/paths_seed1.png
+```
 
 注意两点：`auto` 是**故意偏置**的（约 40% 面板是失败案例），不能拿它估计准确率 ——
 准确率看 pool 那一行（`pool result: goal=...`）或正式评测；另外**图里可能有多条等长的

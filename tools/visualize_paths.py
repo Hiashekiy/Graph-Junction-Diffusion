@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -63,9 +64,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--select",
         default="auto",
-        help="auto | optimal | goal | loop | broken | indices | all",
+        help="auto | random | optimal | goal | loop | broken | indices | all",
     )
     parser.add_argument("--indices", default=None, help="逗号分隔的样本下标（--select indices）")
+    parser.add_argument(
+        "--select-seed",
+        type=int,
+        default=None,
+        help="--select random 用的抽样种子；不给就用系统熵（每次不同），"
+             "给了就固定下来便于复现同一组图",
+    )
     parser.add_argument("--out", default="outputs/figures/paths.png")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=0)
@@ -167,6 +175,20 @@ def apply_filters(results: Sequence[Dict[str, Any]], args) -> List[int]:
     return allowed
 
 
+def resolve_select_seed(args) -> Optional[int]:
+    """``--select random`` 用哪个抽样种子。
+
+    不给 ``--select-seed`` 就用系统熵（每次跑都不一样，这是"随机看样本"想要的），
+    并把实际用的数字打印出来 —— 想复现同一组图时把它填回 ``--select-seed`` 即可。
+    其它 ``--select`` 模式是确定性的，返回 None。
+    """
+    if args.select != "random":
+        return None
+    if args.select_seed is not None:
+        return int(args.select_seed)
+    return int.from_bytes(os.urandom(4), "little")
+
+
 def select_indices(results: Sequence[Dict[str, Any]], args) -> List[int]:
     """从解码结果里挑要画的下标（返回 pool 内的位置）。"""
     allowed = apply_filters(results, args)
@@ -195,6 +217,13 @@ def select_indices(results: Sequence[Dict[str, Any]], args) -> List[int]:
 
     if args.select == "all":
         return allowed
+    if args.select == "random":
+        import random as _random
+
+        seed = getattr(args, "resolved_select_seed", None)
+        rng = _random.Random(seed)
+        count = min(int(args.num), len(allowed))
+        return rng.sample(allowed, count)
     if args.select == "optimal":
         return [i for i in allowed if results[i]["optimal"]]
     if args.select in ("goal", "loop", "broken"):
@@ -452,6 +481,7 @@ def main() -> int:
     print(f"checkpoint : {checkpoint} (epoch={payload.get('epoch')})")
     print(f"model      : {model.flow_steps_label}")
     print(f"data       : {args.data} ({len(dataset)} queries)")
+    print(f"sample seed: {seed}（推理采样；改 --seed 会改变 pool 结果）")
 
     results = decode_pool(
         model, diffusion, dataset, device, make_generator(seed, device="cpu"), args
@@ -463,9 +493,17 @@ def main() -> int:
         f"broken={sum(1 for r in results if r['status'] == 'broken')}"
     )
 
+    args.resolved_select_seed = resolve_select_seed(args)
     positions = select_indices(results, args)
     if not positions:
         raise SystemExit("no sample matched the selection; try --select auto")
+    if args.select == "random":
+        print(
+            f"select     : random  选样种子 select_seed={args.resolved_select_seed}"
+            f"（想复现这一组就加 --select-seed {args.resolved_select_seed}）"
+        )
+    else:
+        print(f"select     : {args.select}（确定性规则）")
     print(f"selected   : {[results[p]['index'] for p in positions]}")
 
     import matplotlib
@@ -507,9 +545,15 @@ def main() -> int:
     for spare in range(len(positions), len(axes)):
         axes[spare].set_axis_off()
 
+    select_note = (
+        f"select=random(select_seed={args.resolved_select_seed})"
+        if args.select == "random"
+        else f"select={args.select}"
+    )
     title = args.title or (
         f"{run_dir.name}  ·  {model.flow_steps_label}  ·  "
-        f"Checkpoint epoch {payload.get('epoch')}  ·  {Path(args.data).name}"
+        f"Checkpoint epoch {payload.get('epoch')}  ·  {Path(args.data).name}  ·  "
+        f"{select_note}  ·  sample_seed={seed}"
     )
     fig.suptitle(title, fontsize=13, y=0.995)
     if legend_handles:
