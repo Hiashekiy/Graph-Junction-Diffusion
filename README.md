@@ -560,33 +560,69 @@ round 数会直接 `ValueError`（slot embedding 没有那么多行）；评测�
 | 要路径本身（节点序列、结局、分岔点、机器可读 JSON） | `tools/predict_path.py` |
 
 ```bash
-# 只给一条 query 生成路径（文本）
-python tools/predict_path.py \
-    --run outputs/runs/v2_controlled_100ep_flow3 \
+# ---- 1) 只要路径本身（文本，不画图）------------------------------------------
+# 单条 query：--index 就是 dataset[i] 的编号，也是画图标题里的 #170
+python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
     --data data/controlled_test.pkl --index 170
 
-# 多条 + 导出 json
-python tools/predict_path.py \
-    --run outputs/runs/v2_controlled_100ep_flow3 \
+# 多条（逗号分隔或重复 --index）+ 导出机器可读 json
+python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
     --data data/controlled_test.pkl --index 0,47,170 --out-json paths.json
 
-# 同一个 checkpoint 做推理轮数 ablation / 换采样种子
-python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
-    --data data/controlled_test.pkl --index 170 --flow-steps 1
+# 换采样种子 / 要确定性输出（推理是随机的，见下文）
 python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
     --data data/controlled_test.pkl --index 170 --seed 3
+python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --index 170 --deterministic
 
-# 画图
-python tools/visualize_paths.py \
-    --run outputs/runs/v2_controlled_100ep_flow3 \
-    --data data/controlled_test.pkl --num 8 --labels \
+# 同一个 checkpoint 只跑 1 轮图信息交流（推理轮数 ablation）
+python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --index 170 --flow-steps 1
+
+# 换另一个 run（单轮基线）
+python tools/predict_path.py --run outputs/runs/v2_controlled_100ep \
+    --data data/controlled_test.pkl --index 47
+
+# ---- 2) 画图（预测路径 vs GT 路径）------------------------------------------
+# 自动抽样 8 条：覆盖 easy/medium/hard × 到达/断掉
+python tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --num 8 --cols 2 --labels \
     --out outputs/figures/paths_flow3_test.png
+
+# 只看指定几条（便于复现同一组图，或与别的 run 画同一批 query 做对照）
+python tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --select indices --indices 170,47,79,140 \
+    --cols 2 --labels --out outputs/figures/paths_pick4.png
+
+# 只看 hard 难度
+python tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --num 6 --only-difficulty hard --cols 2 --labels \
+    --out outputs/figures/paths_hard.png
+
+# 换布局（默认 spring，见下表）
+python tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --num 4 --layout kamada_kawai \
+    --out outputs/figures/paths_kk.png
 ```
 
-`--index` 就是 `dataset[i]` 的位置，也是画图标题里的 `#170`。`predict_path.py` 会打印：
-结局（到达 goal / 断掉 / 走进环）、预测与 GT 的跳数、**预测路径的完整节点序列**、
-与 GT 分岔的位置、GT 路径。注意**推理是随机采样**的（每个扩散步从 posterior 采样），
-所以同一条 query 换 `--seed` 可能走出不同路径；想固定就加 `--deterministic`。
+`predict_path.py` 的实测输出（`best.pt`，epoch 80）：
+
+```text
+#170  medium/branch_heavy  58 节点 / 5 决策
+  结果     : 断掉（node 27 has no decision variable）
+  跳数     : 预测 5 / GT 25
+  预测路径 : [0, 1, 2, 3, 4, 27]
+  与 GT 分岔: 第 5 跳（节点 4）
+  GT 路径  : [0, 1, 2, 3, 4, 28, 29, 30, 5, 10, 11, 12, 13, 6, 21, 22, 23, 7, 14, 15, 16, 8, 24, 25, 26, 9]
+```
+
+它给出四件事：**结局**（到达 goal / 断掉 / 走进环 + 具体原因）、**预测与 GT 的跳数**、
+**预测路径的完整节点序列**、**与 GT 分岔的位置**（第几跳、哪个节点）。`--max-nodes-print N`
+（默认 64）控制长路径打印时截断显示。
+
+**推理是随机采样的**：整条 reverse chain 有 T=50 个扩散步，每一步都从模型预测的后验分布里
+采样"走哪条 branch segment"，所以同一条 query 换个 `--seed` 可能走出不同路径（这也是评测要
+多种子平均的原因，见第 16 节）。想固定结果就加 `--deterministic`（用 posterior argmax）。
 
 一张图 2 列 4 行，每个面板一条 query：
 
@@ -623,6 +659,56 @@ python tools/visualize_paths.py \
 准确率看 pool 那一行（`pool result: goal=...`）或正式评测；另外**图里可能有多条等长的
 最短路**（实测 sample 170 有 2 条），模型走了另一条时标题会写"同代价最优（与标注 GT
 是另一条等长路）"，这不是错。
+
+### 在自己的代码里生成路径
+
+路径的生成分两步，和评测用的是同一条链路：
+
+```
+z_T ~ 先验  --sample_reverse_chain-->  z_0（每个 decision 选哪条 branch segment）
+z_0        --decode_flat（Path Decoder）-->  节点序列 path + 结局 status
+```
+
+```python
+from src.data.collate import collate_samples
+from src.data.dataset import GraphQueryDataset
+from src.diffusion.sampler import sample_reverse_chain
+from src.evaluation.path_decoder import candidate_offsets, decision_offsets, decode_flat
+from src.training.checkpoint import load_checkpoint
+from src.training.setup import build_diffusion, build_model
+from src.utils.config import load_config
+from src.utils.seed import make_generator, set_seed
+
+run = "outputs/runs/v2_controlled_100ep_flow3"
+config = load_config(f"{run}/run_config.json")          # run 自己的配置，保证结构匹配
+dataset = GraphQueryDataset.load("data/controlled_test.pkl")
+
+set_seed(0)
+model = build_model(config, "cuda")
+load_checkpoint(f"{run}/best.pt", model=model, map_location="cuda")
+model.eval()
+
+samples = [dataset[170]]
+batch = collate_samples(samples, device="cuda")
+z0 = sample_reverse_chain(                              # 整条 reverse chain
+    build_diffusion(config), model, batch,
+    generator=make_generator(0, device="cpu"), stochastic=True,
+)["z0"]
+result = decode_flat(                                   # z_0 -> 路径
+    samples[0], z0,
+    decision_offset=decision_offsets(samples)[0],
+    candidate_offset=candidate_offsets(samples)[0],
+)
+print(result.status, result.path, result.reason)        # 结局 / 节点序列 / 原因
+```
+
+三个注意点：
+
+1. **批量解码必须同时传两个 offset**（`decision_offset` / `candidate_offset`），因为
+   `z_0` 与候选表在 batch 里是拼接起来的（`collate_samples` 的 paged 布局）。
+2. **`z_T ~ 先验` 只在 `t = T` 成立**，所以 sampler 只接受完整链（`P2-3`），不能"从中间起跑"。
+3. **推理是随机采样**：想复现就固定 `set_seed` + `make_generator(seed)`，或用
+   `stochastic=False`（posterior argmax）。
 
 ## 16. 最终对照结论：多轮图信息交流到底有没有用
 
