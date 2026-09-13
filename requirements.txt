@@ -1,0 +1,8 @@
+# Graph-Junction-Diffusion V2
+# Edge-State Conditioned Recurrent Graph Flow Denoiser
+
+torch>=2.0
+networkx>=3.0
+numpy>=1.24
+PyYAML>=6.0
+pytest>=7.0

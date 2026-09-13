@@ -1,0 +1,132 @@
+"""Branch Scorer + NULL Scorer + Grouped Softmax (实施指南第 13-14 节).
+
+Branch Mean Pool：平均的是**整条 branch 上除 owner 以外**的节点
+
+    h_bar_ik = 1/|B_ik \\ {i}| * sum_{v in B_ik \\ {i}} h_v
+
+dataset 里的 ``branch_node_ids`` 已经不包含 owner，所以分母就是 membership 长度。
+
+Branch Scorer 输入：
+
+    c_ik = [h_i^{t-1}, h_bar_ik^{t-1}, tau_t]   in R^{3d}
+
+NULL Scorer 输入：
+
+    c_iNULL = [h_i^{t-1}, tau_t]                in R^{2d}
+
+最后所有 logits 填回 flat ``candidate_logits [C]``，用 grouped softmax 在每个
+Junction 自己的 ragged candidate set 内归一化：
+
+    sum_{c in C_i} p_i(c) = 1
+"""
+
+from __future__ import annotations
+
+from typing import Dict, Optional
+
+import torch
+from torch import Tensor, nn
+
+from src.utils.segment_ops import grouped_log_softmax, segment_sum
+
+
+def branch_mean_pool(
+    H: Tensor,                    # [N, d]
+    branch_node_ids: Tensor,      # [C, L] padded（不含 owner）
+    branch_node_lengths: Tensor,  # [C]
+    num_candidates: int,
+) -> Tensor:
+    """Branch 的 mean-pool 表示，形状 [C, d]；NULL / 空 branch 保持 0。"""
+    if branch_node_ids.numel() == 0:
+        return H.new_zeros(num_candidates, H.shape[1])
+
+    device = H.device
+    dtype = H.dtype
+    width = branch_node_ids.shape[1]
+    mask = (
+        torch.arange(width, device=device)[None, :] < branch_node_lengths[:, None]
+    )
+
+    node_feat = H[branch_node_ids.reshape(-1)].reshape(num_candidates, width, -1)
+    node_feat = node_feat * mask.unsqueeze(-1).to(node_feat.dtype)
+
+    owner_index = torch.arange(num_candidates, device=device).repeat_interleave(width)
+    totals = segment_sum(
+        node_feat.reshape(-1, H.shape[1]), owner_index, num_candidates
+    )
+    counts = mask.sum(dim=1).to(H.dtype)
+    # segment_sum 内部按 float32 计算，这里还原成输入 dtype（AMP 下是 fp16）
+    return (totals / counts.clamp_min(1.0)[:, None]).to(dtype)
+
+
+class BranchScorer(nn.Module):
+    def __init__(
+        self,
+        d_model: int = 128,
+        hidden_dim: Optional[int] = None,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        self.d_model = int(d_model)
+        hidden = int(hidden_dim or 2 * self.d_model)
+
+        # Linear(3d, 2d) -> SiLU -> Linear(2d, 1)
+        self.branch_mlp = nn.Sequential(
+            nn.Linear(3 * self.d_model, hidden),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+        # Linear(2d, d) -> SiLU -> Linear(d, 1)
+        self.null_mlp = nn.Sequential(
+            nn.Linear(2 * self.d_model, self.d_model),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.d_model, 1),
+        )
+
+    # ------------------------------------------------------------------
+    def branch_logits(
+        self, H: Tensor, batch, tau_decisions: Tensor
+    ) -> Tensor:
+        """所有非 NULL candidate 的 logits，形状 [C_nonnull]。"""
+        is_branch = ~batch.candidate_is_null
+        if not bool(is_branch.any()):
+            return H.new_zeros(0)
+
+        owners = batch.candidate_owner[is_branch]
+        pooled = branch_mean_pool(
+            H,
+            batch.branch_node_ids,
+            batch.branch_node_lengths,
+            batch.num_candidates,
+        )[is_branch]
+        junction = H[batch.decision_node[owners]]
+        features = torch.cat([junction, pooled, tau_decisions[owners]], dim=-1)
+        return self.branch_mlp(features).squeeze(-1)
+
+    def null_logits(self, H: Tensor, batch, tau_decisions: Tensor) -> Tensor:
+        """所有 NULL candidate 的 logits，形状 [C_null]。"""
+        is_null = batch.candidate_is_null
+        if not bool(is_null.any()):
+            return H.new_zeros(0)
+        owners = batch.candidate_owner[is_null]
+        junction = H[batch.decision_node[owners]]
+        features = torch.cat([junction, tau_decisions[owners]], dim=-1)
+        return self.null_mlp(features).squeeze(-1)
+
+    # ------------------------------------------------------------------
+    def forward(
+        self, H: Tensor, batch, tau_decisions: Tensor
+    ) -> Dict[str, Tensor]:
+        is_null = batch.candidate_is_null
+        logits = H.new_zeros(batch.num_candidates)
+        logits = logits.masked_scatter(~is_null, self.branch_logits(H, batch, tau_decisions))
+        logits = logits.masked_scatter(is_null, self.null_logits(H, batch, tau_decisions))
+
+        log_prob = grouped_log_softmax(logits, batch.candidate_owner, batch.num_decisions)
+        return {
+            "candidate_logits": logits,
+            "candidate_log_prob": log_prob,
+            "candidate_prob": log_prob.exp(),
+        }

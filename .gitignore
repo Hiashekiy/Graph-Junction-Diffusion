@@ -1,0 +1,16 @@
+# 缓存 / 构建产物（这些模式在任何层级匹配都没问题）
+__pycache__/
+*.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+
+# 产物目录：必须用前导斜杠锚定到仓库根！
+# 不带斜杠的 `data/` 会在**任意层级**匹配，会把源码包 src/data/ 也一起忽略掉
+# （真实踩过：src/data 下 7 个文件因此没进版本库）。
+/outputs/
+/data/
+
+# 权重 / 数据文件
+*.pt
+*.ckpt
+*.pkl
