@@ -9,6 +9,7 @@ pytest-cache-files-*/
 # （真实踩过：src/data 下 7 个文件因此没进版本库）。
 /outputs/
 /data/
+/data_old/
 
 # 权重 / 数据文件
 *.pt
