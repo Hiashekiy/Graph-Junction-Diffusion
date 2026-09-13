@@ -444,6 +444,29 @@ H_{t-1} = H_{flow_steps}
 可用于确认多轮真的发生了（`tests/test_graph_flow.py` 里逐条断言了"多轮 ≠ 不动点迭代"、
 "每轮 Start/Goal 都被 clamp"、"梯度能回到每一轮的 slot embedding"）。
 
+还有一个专门的诊断工具，直接量"多轮有没有做事"：
+
+```bash
+python tools/round_diagnostic.py outputs/runs/v2_controlled_100ep_flow3 --samples 8
+```
+
+它打印一个 reverse step 内部每轮对 H 的相对改动 `||H_k - H_{k-1}|| / ||H_{k-1}||`
+（只在自由节点上算），以及"少跑几轮"时最终状态离得有多远。实测（flow_steps=3、
+epoch 6 的 checkpoint）：
+
+```text
+round 0: ||dH_free||/||H_free|| = 0.4576
+round 1: ||dH_free||/||H_free|| = 0.3963
+round 2: ||dH_free||/||H_free|| = 0.3112
+1 round instead of 3: ||H_k - H_K||/||H_K|| = 0.6817
+2 rounds instead of 3: ||H_k - H_K||/||H_K|| = 0.3111
+```
+
+三点解读：每轮改动都在 30%~46% 量级，**不是**在求不动点（否则会迅速塌到 0），也说
+明 slot embedding 这个通道没有被初始化尺度压死（虽然 `std=0.019`、`mean_norm=0.217`
+比 `tau_t` 的范数小一个量级，梯度会把它放大到有用的程度）；而只跑 1 轮时最终 H 与
+3 轮版本相差 68%，所以"提前退出"是一个真问题、值得用 `--eval-flow-steps` 量化。
+
 ### 配套的可复现性改动
 
 改 `flow_steps` 会改变参数集合（每轮一个 `flow_slot_embedding`），所以"这个
