@@ -70,8 +70,19 @@ def main() -> int:
 
     run_dir = Path(args.run_dir)
     history = load_history(run_dir)
+    # 训练时落盘的 run_config.json 才是这次 run 真正用的配置；没有它才退回 --config
+    # （旧 run 目录里没有这个文件，用当前 config 解释它们可能给出错的 flow_steps）。
+    run_config_path = run_dir / "run_config.json"
+    if run_config_path.exists():
+        config_source = str(run_config_path)
+        overrides: List[str] = []
+    else:
+        config_source = args.config
+        overrides = [item for group in args.overrides for item in group]
+    config = load_config(config_source, overrides)
     summary: Dict[str, Any] = {
         "run_dir": str(run_dir),
+        "config_source": config_source,
         "epochs_completed": len(history),
         "curves": {
             key: curve(history, key)
@@ -87,6 +98,26 @@ def main() -> int:
             )
         },
     }
+
+    # 一个 run 目录必须能自证自己是哪套模型/超参跑出来的，否则"单轮 vs 多轮"这类
+    # 对比只能靠回忆。这里把 config 里真正影响模型的项 + 参数量写进 summary.json。
+    device = get_device(args.device or str(config.get("training.device", "auto")))
+    probe = build_model(config)
+    summary["model"] = {
+        "d_model": int(config.get("model.d_model", 128)),
+        "ffn_hidden": int(config.get("model.ffn_hidden", 256)),
+        "flow_steps": int(config.get("model.flow_steps", 1)),
+        "flow_slot_embedding": bool(config.get("model.flow_slot_embedding", True)),
+        "flow_slot_scale": float(config.get("model.flow_slot_scale", 1.0)),
+        "parameters": int(probe.num_parameters()),
+        "diffusion_T": int(config.get("diffusion.T", 50)),
+        "batch_size": int(config.get("training.batch_size", 0)),
+        "lr": float(config.get("training.lr", 0.0)),
+        "amp": bool(config.get("training.amp", False)),
+        "device": str(device),
+        "label": probe.flow_steps_label,
+    }
+    del probe
 
     validation = [r for r in history if "goal_hit_rate" in r]
     if validation:
@@ -107,11 +138,8 @@ def main() -> int:
         }
 
     if args.test_data and not args.skip_eval:
-        overrides = [item for group in args.overrides for item in group]
-        config = load_config(args.config, overrides)
         seed = int(config.get("seed", 0))
         set_seed(seed)
-        device = get_device(args.device or str(config.get("training.device", "auto")))
         checkpoint = args.checkpoint or str(run_dir / "best.pt")
 
         model = build_model(config, device)
@@ -146,6 +174,15 @@ def main() -> int:
         json.dump(summary, handle, indent=1, ensure_ascii=False)
 
     lines = [f"run: {run_dir}", f"epochs completed: {len(history)}"]
+    if "config_source" in summary:
+        lines.append(f"config: {summary['config_source']}")
+    if "model" in summary:
+        model_info = summary["model"]
+        lines.append(
+            f"model: flow_steps={model_info['flow_steps']} "
+            f"({model_info['label']})  params={model_info['parameters']}  "
+            f"T={model_info['diffusion_T']}  batch={model_info['batch_size']}"
+        )
     if "best_validation" in summary:
         best = summary["best_validation"]
         lines.append(

@@ -62,7 +62,13 @@ def load_checkpoint(
 ) -> Dict[str, Any]:
     payload = torch.load(path, map_location=map_location, weights_only=False)
     if model is not None:
-        model.load_state_dict(payload["model"])
+        try:
+            model.load_state_dict(payload["model"])
+        except RuntimeError as error:
+            # 结构不匹配是最容易踩的坑：比如用 flow_steps=3 的 config 去加载
+            # flow_steps=1 训出来的 checkpoint（或反过来），会多/少一个
+            # flow_slot_embedding。原始报错只会列出 key 名，看不出是为什么。
+            raise RuntimeError(_mismatch_message(payload, model, error)) from error
     if optimizer is not None and "optimizer" in payload:
         optimizer.load_state_dict(payload["optimizer"])
     if scheduler is not None and "scheduler" in payload:
@@ -70,6 +76,25 @@ def load_checkpoint(
     if restore_rng and "rng_state" in payload:
         set_rng_state(payload["rng_state"])
     return payload
+
+
+def _mismatch_message(payload: Dict[str, Any], model: nn.Module, error: Exception) -> str:
+    saved = payload.get("model_config") or {}
+    current = {
+        "d_model": getattr(model, "d_model", None),
+        "flow_steps": getattr(model, "flow_steps", None),
+        "flow_slot_embedding": getattr(model, "flow_slot_embedding", None) is not None,
+    }
+    return (
+        "checkpoint does not match the model built from this config.\n"
+        f"  checkpoint model_config: {saved}\n"
+        f"  current model          : {current}\n"
+        "  hint: model.flow_steps changes the parameter set (one "
+        "flow_slot_embedding per round), so a checkpoint can only be loaded with the "
+        "SAME flow_steps it was trained with. Use that run's own config snapshot "
+        "(outputs/runs/<run>/run_config.json) instead of a hand-edited config.\n"
+        f"  original error: {error}"
+    )
 
 
 def latest_checkpoint(directory: str | Path, pattern: str = "*.pt") -> Optional[Path]:

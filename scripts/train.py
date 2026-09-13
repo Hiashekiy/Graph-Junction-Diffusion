@@ -103,11 +103,21 @@ def main() -> int:
     optimizer = build_optimizer(config, model)
     run_dir = run_directory(config)
 
+    # 把**解析后**的配置（含 --set 覆盖）落盘：run 目录必须能自证是 flow_steps 几、
+    # T 多少、batch 多大跑出来的，否则事后无法区分"单轮 vs 多轮"这类对比。
+    try:
+        (run_dir / "run_config.json").write_text(
+            json.dumps(config.to_dict(), indent=1, ensure_ascii=False), encoding="utf-8"
+        )
+    except (TypeError, ValueError):  # pragma: no cover - 配置里出现非 JSON 值时跳过
+        pass
+
     print(f"device      : {device}")
     print(f"run dir     : {run_dir}")
     print(f"train/val   : {len(train_dataset)} / {len(val_dataset) if val_dataset else 0}")
     print(f"parameters  : {model.num_parameters():,}")
     print(f"T           : {diffusion.T}")
+    print(f"flow steps  : {model.flow_steps_label}")
 
     trainer = Trainer(
         model=model,

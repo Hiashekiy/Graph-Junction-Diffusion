@@ -378,3 +378,28 @@ H_{t-1} = H_{flow_steps}
 诊断：`DenoiserOutput.attn_per_slot`（长度 = `flow_steps`）与 `DenoiserOutput.flow_steps`
 可用于确认多轮真的发生了（`tests/test_graph_flow.py` 里逐条断言了"多轮 ≠ 不动点迭代"、
 "每轮 Start/Goal 都被 clamp"、"梯度能回到每一轮的 slot embedding"）。
+
+### 配套的可复现性改动
+
+改 `flow_steps` 会改变参数集合（每轮一个 `flow_slot_embedding`），所以"这个
+checkpoint 到底是几轮训出来的"必须能从 run 目录里读出来，否则以后所有对比都只能靠回忆：
+
+- `scripts/train.py` 现在把**解析后**的配置（含 `--set` 覆盖）写进
+  `outputs/runs/<run>/run_config.json`，并在启动日志里打印
+  `flow steps  : 3 round(s) per reverse step (shared-cell+slot)`。
+- `tools/summarize_run.py` 优先用该 run 自己的 `run_config.json`（而不是命令行传的
+  `--config`）来解释它，并在 `summary.json` 里写入 `model.flow_steps / parameters / T /
+  batch_size`。基线 run 的这份快照是从 commit `825f4dd` 的 config 事后重建的，
+  文件里带 `_reconstructed_from` 说明。
+- `load_checkpoint` 在结构不匹配时不再抛裸的 state_dict 报错，而是直接告诉你
+  "checkpoint 的 model_config 是 X、当前模型是 Y，flow_steps 必须一致，请用那个 run
+  自己的 `run_config.json`"（见 `tests/test_checkpoint_mismatch.py`）。
+  评测基线 checkpoint 时要显式换配置：
+
+  ```bash
+  python scripts/evaluate.py \
+      --config outputs/runs/v2_controlled_100ep/run_config.json \
+      --checkpoint outputs/runs/v2_controlled_100ep/best.pt \
+      --data data/controlled_test.pkl --baselines \
+      --out outputs/runs/v2_controlled_100ep/eval_test.json
+  ```
