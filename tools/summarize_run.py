@@ -41,6 +41,11 @@ def main() -> int:
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--skip-eval", action="store_true")
+    parser.add_argument(
+        "--baselines",
+        action="store_true",
+        help="顺带跑 shortest/greedy baseline，并写进 eval_test.json（与 evaluate.py 一致）",
+    )
     parser.add_argument("--set", dest="overrides", action="append", default=[])
     args = parser.parse_args()
 
@@ -165,8 +170,28 @@ def main() -> int:
             "debug": report.debug,
             "baselines": baseline_summary(dataset),
         }
+        records = records_to_dicts(report.records)
         with open(run_dir / "test_records.json", "w", encoding="utf-8") as handle:
-            json.dump(records_to_dicts(report.records), handle, indent=1)
+            json.dump(records, handle, indent=1)
+        # 顺手写成与 scripts/evaluate.py 完全相同的格式：后续的
+        # tools/breakdown_eval.py / tools/paired_compare.py 都要吃这个文件，
+        # 这样"评测一次"就够了，不用为了格式再跑一遍模型。
+        payload = {
+            "metrics": report.metrics,
+            "debug": report.debug,
+            "inference": {
+                "flow_steps": int(model.flow_steps),
+                "trained_flow_steps": int(model.max_flow_steps),
+                "label": model.flow_steps_label,
+            },
+            "records": records,
+        }
+        if payload["inference"]["flow_steps"] != payload["inference"]["trained_flow_steps"]:
+            payload["eval_flow_steps"] = int(model.flow_steps)
+        if args.baselines:
+            payload["baselines"] = baseline_summary(dataset)
+        with open(run_dir / "eval_test.json", "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=1, ensure_ascii=False)
         del torch
 
     with open(run_dir / "summary.json", "w", encoding="utf-8") as handle:
