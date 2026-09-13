@@ -84,6 +84,11 @@ loss:
   goal_reach_eps: 1.0e-8
   # alpha_bar：t 越大噪声越大，Goal 级约束越弱；uniform 做消融用
   goal_timestep_weighting: alpha_bar
+  # soft goal 的 value iteration 轮数上限。decision 数 <= 上限的图行为完全不变
+  # （controlled 数据最多 10 个 decision）；混入路口很多的旧数据（单图最多 79 个）
+  # 时必须设上限，否则一个样本就会把整批的轮数抬高、训练变成 CPU-bound。
+  # null 表示不设上限（只用旧数据规模时才这么干）。
+  goal_horizon_cap: 24
 
 evaluation:
   stochastic_sampling: true

@@ -959,6 +959,7 @@ loss:
   goal_reach_weight: 0.1        # =0 时严格退化成纯 CE baseline
   goal_reach_eps: 1.0e-8
   goal_timestep_weighting: alpha_bar   # 或 uniform（消融）
+  goal_horizon_cap: 24          # value iteration 轮数上限（见第 18 节；controlled 数据无影响）
 ```
 
 训练日志拆成：
@@ -981,6 +982,60 @@ degree-1 Source 从 forced 终点起算 / 多出口 Source 从自己起算、多
 sender 相同而 edge 不同时也必须能不同。
 
 ```bash
-python -m pytest tests -q        # 246 passed
-python tools/semantic_check.py --strict   # checked 59 modules, 0 problems
+python -m pytest tests -q        # 252 passed
+python tools/semantic_check.py --strict   # checked 61 modules, 0 problems
 ```
+
+## 18. 旧数据（V1）融合训练
+
+`data/processed/v1/`（原 `data_old/`，5000 图 / 25000 query）是 V1 时代的预处理数据，
+它的候选是"下一跳边"，V2 用的是"branch segment"，两者语义不同，所以必须转换：
+
+```bash
+# 1) V1 -> V2（GT 沿用 V1 自己的 gt_path，decision/active 集合逐条核对为 0 不一致）
+python tools/convert_v1_dataset.py --input data/processed/v1/test.pt  --out data/oldv1_test.pkl
+python tools/convert_v1_dataset.py --input data/processed/v1/train.pt --out data/oldv1_train_sub.pkl \
+    --sample 2000 --seed 0
+python tools/convert_v1_dataset.py --input data/processed/v1/val.pt   --out data/oldv1_val_sub.pkl \
+    --sample 400 --seed 0
+
+# 2) 与现有训练/验证集合并（不合并 test；"融入训练"只动 train/val）
+python tools/merge_datasets.py --out data/mixed_oldv1_train.pkl \
+    --input data/controlled_longmix_train.pkl --input data/oldv1_train_sub.pkl --seed 0
+python tools/merge_datasets.py --out data/mixed_oldv1_val.pkl \
+    --input data/controlled_longmix_val.pkl --input data/oldv1_val_sub.pkl --seed 0
+
+# 3) 图级泄漏检查（必须 0 重叠才能训）
+python tools/check_leakage.py --pair data/mixed_oldv1_train.pkl data/mixed_oldv1_val.pkl \
+    --pair data/mixed_oldv1_train.pkl data/oldv1_test.pkl \
+    --pair data/mixed_oldv1_train.pkl data/controlled_test.pkl
+
+# 4) 训练
+python scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed \
+    --data data/mixed_oldv1_train.pkl --val-data data/mixed_oldv1_val.pkl
+```
+
+要点：
+
+* **`--sample` 而不是 `--limit`**：V1 的 query 按图类型分块存储（er/ba/ws/geometric
+  各占一段），取前缀只会拿到 `er` 图。`tools/convert_v1_dataset.py` 与
+  `tools/merge_datasets.py` 都支持 `--sample N[:INDEX]`。
+* **约 2.2% 的 V1 query 转换不了**：随机图里存在"由两个 degree=2 节点构成的三角"
+  （例如 `5-11-12-5`），V2 的 branch segment 会判定"回到 owner"并断言失败，这些样本
+  会被跳过并打印原因。
+* **`loss.goal_horizon_cap`（新增，默认 24）**：soft goal 的 value iteration 轮数取
+  "batch 内最大 decision 数"（旧 V1 单图最多 79 个路口）。不设上限时**一个这样的样本
+  会把整批 50 个 timestep 的轮数全抬到 79**，训练变成 CPU-bound（实测 GPU 利用率
+  ~20%，混合 batch 4.43 s → 设 24 后 3.10 s）。对 decision 数 ≤ 上限的图**行为逐位
+  不变**（controlled 数据最多 10），所以旧 run 的结果不受影响。
+* **分布差异要有预期**：混合集每 query 决策数 38.2（V1）/ 7.3（longmix），active
+  decision 占比从 91.5% 掉到 **31.9%** —— NULL 类样本大幅变多，CE 里 `null_weight`
+  默认还是 1，模型可能更倾向"在该走的路口选 NULL"。必要时用
+  `--set loss.null_weight=0.3` 做对照。
+
+### 18.1 legacy checkpoint 兼容（第二轮修订的连带改动）
+
+第二轮把 `k_proj` 拆成 `k_node_proj` + `k_edge_proj` 后，旧 checkpoint 本来无法加载。
+`load_checkpoint` 现在会自动检测并做**无损映射**（`k_node = 0`、
+`k_edge = sqrt(2) * k_proj`，数学上新 K 恒等于旧 K），并打印一行提示；这样旧 run 的
+`best.pt` 仍可用来评测/对比（实测复现了旧 run 的 history 数字）。

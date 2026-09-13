@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -62,8 +63,22 @@ def load_checkpoint(
 ) -> Dict[str, Any]:
     payload = torch.load(path, map_location=map_location, weights_only=False)
     if model is not None:
+        state = payload["model"]
+        if needs_attention_remap(state):
+            # 第二轮修订把 K 从"只吃 edge"改成"node + edge"，参数名从 k_proj 变成
+            # k_node_proj / k_edge_proj。旧 checkpoint 可以**无损**映射过来
+            # （k_node=0、k_edge=sqrt(2)*k_proj => 新 K 恒等于旧 K），所以这里自动
+            # 转换并明确打印，而不是直接报结构不匹配。
+            state = remap_legacy_attention_state_dict(state)
+            payload["model"] = state
+            print(
+                "[load_checkpoint] legacy k_proj detected -> remapped to "
+                "k_node_proj(zeros) + k_edge_proj(*sqrt(2)); the loaded model is "
+                "numerically identical to the pre-revision one",
+                flush=True,
+            )
         try:
-            model.load_state_dict(payload["model"])
+            model.load_state_dict(state)
         except RuntimeError as error:
             # 结构不匹配是最容易踩的坑：比如用 flow_steps=3 的 config 去加载
             # flow_steps=1 训出来的 checkpoint（或反过来），会多/少一个
@@ -76,6 +91,44 @@ def load_checkpoint(
     if restore_rng and "rng_state" in payload:
         set_rng_state(payload["rng_state"])
     return payload
+
+
+# ---------------------------------------------------------------------------
+# 旧版 attention（K = W_K e）-> 新版（K = (W_{K,n} h + W_{K,e} e)/sqrt(2)）
+# ---------------------------------------------------------------------------
+def needs_attention_remap(state_dict: Dict[str, torch.Tensor]) -> bool:
+    """旧 checkpoint：有 k_proj.* 且没有 k_node_proj.* / k_edge_proj.*。"""
+    keys = list(state_dict)
+    has_legacy = any(key.endswith("k_proj.weight") for key in keys)
+    has_new = any("k_node_proj.weight" in key for key in keys)
+    return bool(has_legacy and not has_new)
+
+
+def remap_legacy_attention_state_dict(
+    state_dict: Dict[str, torch.Tensor],
+    k_pair_scale: Optional[float] = None,
+) -> Dict[str, torch.Tensor]:
+    """把旧版 K 投影拆成新版两路，且保持输出**逐位等价**。
+
+    新版 ``k = (k_node + k_edge) * k_pair_scale``；令 ``k_node = 0``、
+    ``k_edge = k_proj / k_pair_scale``，则 ``k == k_proj``（旧行为）。
+
+    返回新的 dict，不修改输入。
+    """
+    scale = float(k_pair_scale) if k_pair_scale is not None else 1.0 / math.sqrt(2.0)
+    if scale <= 0:
+        raise ValueError(f"k_pair_scale must be positive, got {k_pair_scale}")
+    remapped: Dict[str, torch.Tensor] = dict(state_dict)
+    for key in list(remapped):
+        for suffix in ("weight", "bias"):
+            marker = f"k_proj.{suffix}"
+            if not key.endswith(marker):
+                continue
+            prefix = key[: -len(marker)]
+            value = remapped.pop(key) / scale
+            remapped[f"{prefix}k_edge_proj.{suffix}"] = value
+            remapped[f"{prefix}k_node_proj.{suffix}"] = torch.zeros_like(value)
+    return remapped
 
 
 def _mismatch_message(payload: Dict[str, Any], model: nn.Module, error: Exception) -> str:

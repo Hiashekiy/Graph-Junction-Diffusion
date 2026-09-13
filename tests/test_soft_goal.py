@@ -459,3 +459,69 @@ def test_invalid_goal_timestep_weighting_is_rejected(chain_batch):
             LossWeights(goal_timestep_weighting="nope"),
             max_steps=4,
         )
+
+
+# ---------------------------------------------------------------------------
+# 8. horizon cap（混入"路口很多、路径很短"的数据时控制 cost）
+# ---------------------------------------------------------------------------
+def _long_chain_sample():
+    """s-a-J1-b-J2-c-J3-d-g，每个 J 带一个 dead-end：值需要传 3 轮才到 J1。"""
+    edges = [
+        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (7, 8),
+        (2, 9), (4, 10), (6, 11),
+    ]
+    return make_sample(edges, 0, 8)
+
+
+def test_horizon_cap_does_not_change_small_graphs(chain_sample, chain_batch):
+    """decision 数 <= cap 的图，加不加 cap 结果必须逐位相同。"""
+    j1 = _decision_index(chain_sample, CHAIN_J1)
+    j2 = _decision_index(chain_sample, CHAIN_J2)
+    prob = _prob_from_table(
+        chain_batch,
+        {
+            _candidate_index(chain_sample, j1, CHAIN_J2): 0.8,
+            _candidate_index(chain_sample, j1, CHAIN_D1): 0.2,
+            _candidate_index(chain_sample, j2, CHAIN_G): 0.7,
+            _candidate_index(chain_sample, j2, CHAIN_D2): 0.3,
+        },
+    )
+    assert torch.equal(
+        soft_goal_reachability(prob, chain_batch),
+        soft_goal_reachability(prob, chain_batch, horizon_cap=24),
+    )
+
+
+def test_horizon_cap_truncates_the_propagation():
+    sample = _long_chain_sample()
+    batch = collate_samples([sample], device="cpu")
+    j1, j2, j3 = (_decision_index(sample, node) for node in (2, 4, 6))
+    prob = _prob_from_table(
+        batch,
+        {
+            _candidate_index(sample, j1, 4): 1.0,
+            _candidate_index(sample, j2, 6): 1.0,
+            _candidate_index(sample, j3, 8): 1.0,
+        },
+    ).requires_grad_(True)
+
+    full = soft_goal_reachability(prob, batch)
+    assert abs(float(full[0].detach()) - 1.0) < 1e-6      # 3 轮之后 J1 才拿到 1.0
+    assert abs(float(soft_goal_reachability(prob, batch, horizon_cap=3)[0].detach()) - 1.0) < 1e-6
+    # cap 太小时传播被截断：J1 的值还是 0
+    assert float(soft_goal_reachability(prob, batch, horizon_cap=1)[0].detach()) == 0.0
+    assert float(soft_goal_reachability(prob, batch, horizon_cap=2)[0].detach()) == 0.0
+
+    soft_goal_loss(soft_goal_reachability(prob, batch, horizon_cap=2)).backward()
+    assert prob.grad is not None and torch.isfinite(prob.grad).all()
+
+
+def test_invalid_horizon_cap_is_rejected(chain_batch):
+    model = GraphFlowDenoiser(d_model=16, ffn_hidden=32)
+    diffusion = CategoricalDiffusion(
+        NoiseSchedule(T=4, schedule="linear", beta_start=0.05, beta_end=0.5)
+    )
+    with pytest.raises(ValueError):
+        recurrent_reverse_loss(
+            model, diffusion, chain_batch, LossWeights(goal_horizon_cap=0), max_steps=4
+        )

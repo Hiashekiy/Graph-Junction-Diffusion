@@ -89,6 +89,11 @@ class Trainer:
             )
             if loss_cfg
             else "alpha_bar",
+            goal_horizon_cap=(
+                int(loss_cfg.get("goal_horizon_cap"))
+                if loss_cfg and loss_cfg.get("goal_horizon_cap") is not None
+                else None
+            ),
         )
         self.weights.validate()
         self.stochastic_sampling = (

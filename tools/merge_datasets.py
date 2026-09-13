@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
         "--skip", action="append", default=[],
         help="'N:INDEX' 表示第 INDEX 份输入跳过前 N 条（配合 --limit 把一份池子拆两份）",
     )
+    parser.add_argument(
+        "--sample", action="append", default=[],
+        help="'N:INDEX' 表示第 INDEX 份输入**随机抽** N 条（无放回，种子 = --seed + INDEX）。"
+             "与 --limit 的区别：--limit 取文件前缀，而按图类型分块存储的数据集"
+             "（例如 V1 转换出来的）取前缀会只拿到一种图类型",
+    )
     parser.add_argument("--seed", type=int, default=0, help="打乱顺序用的种子")
     parser.add_argument("--min-decisions", type=int, default=9,
                         help="统计报告里『长链』的门槛（默认 9）")
@@ -73,6 +79,7 @@ def main() -> int:
 
     limits = _limits_map(args.limit)
     skips = _limits_map(args.skip)
+    samples_map = _limits_map(args.sample)
     merged: List = []
     composition: List[Dict[str, object]] = []
     next_graph_id = 0
@@ -81,7 +88,11 @@ def main() -> int:
         dataset = GraphQueryDataset.load(path)
         samples = list(dataset)
         skip = skips.get(index, 0)
-        if skip or index in limits:
+        if index in samples_map:
+            # 随机抽样（无放回）：按图类型分块存储的数据集不能用前缀取子集
+            count = min(int(samples_map[index]), len(samples))
+            samples = random.Random(args.seed + index).sample(samples, count)
+        elif skip or index in limits:
             samples = samples[skip : skip + limits.get(index, len(samples))]
         elif skip:
             samples = samples[skip:]

@@ -39,7 +39,9 @@ if TYPE_CHECKING:  # pragma: no cover - 只为类型提示
     from src.data.collate import Batch
 
 
-def soft_goal_reachability(candidate_prob: Tensor, batch: "Batch") -> Tensor:
+def soft_goal_reachability(
+    candidate_prob: Tensor, batch: "Batch", horizon_cap: int | None = None
+) -> Tensor:
     """每个图从 source 出发在有限步内到达 Goal 的软概率，形状 ``[B]``。
 
     Args:
@@ -47,6 +49,15 @@ def soft_goal_reachability(candidate_prob: Tensor, batch: "Batch") -> Tensor:
             直接来自 grouped softmax，**不要**做 argmax）。
         batch:          :class:`src.data.collate.Batch`，需要第二轮修订新增的
             四个拓扑字段。
+        horizon_cap:    可选的 horizon 上限（轮数）。默认 ``None`` = 每张图迭代到
+            自己的 decision 数。**为什么要它**：value iteration 是一个 Python 循环
+            且每轮都要扫全 batch 的 candidate，代价 ∝ max_rounds × C；混入
+            "路口很多但路径很短" 的图（例如旧 V1 数据，单图 79 个 decision）时，
+            一个这样的样本会把整个 batch 的轮数抬到 79，训练直接变成 CPU-bound
+            （实测 GPU 利用率掉到 ~20%）。给一个上限（例如 24）后，对
+            decision 数 ≤ 上限的图**行为完全不变**（controlled 数据最多 10），
+            对超出的图只是把"软可达性"的传播截断在有限步内 —— 它本来就只是个
+            可微代理指标，不是硬指标。
 
     Returns:
         ``[B]`` 的 ``P_goal``，值域 ``[0, 1]``。
@@ -73,6 +84,8 @@ def soft_goal_reachability(candidate_prob: Tensor, batch: "Batch") -> Tensor:
         batch.decision_graph_id, minlength=num_graphs
     ).to(device)
     max_rounds = int(decision_counts.max().item())
+    if horizon_cap is not None:
+        max_rounds = min(max_rounds, int(horizon_cap))
 
     value = candidate_prob.new_zeros(num_decisions)          # V_i^{(0)}
     for round_index in range(1, max_rounds + 1):

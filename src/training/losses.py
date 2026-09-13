@@ -72,12 +72,19 @@ class LossWeights:
     # "alpha_bar"：t 越大噪声越大，Goal 级约束给得越弱（推荐）；
     # "uniform"  ：每个 timestep 等权（做 ablation 用）。
     goal_timestep_weighting: str = "alpha_bar"
+    # soft goal 的 value iteration 轮数上限（None = 每张图迭代到自己的 decision 数）。
+    # 只在"路口数 > 上限"的图上改变数值；对 controlled 数据（≤10）完全无影响。
+    goal_horizon_cap: Optional[int] = None
 
     def validate(self) -> None:
         if self.goal_timestep_weighting not in GOAL_TIMESTEP_WEIGHTINGS:
             raise ValueError(
                 f"loss.goal_timestep_weighting={self.goal_timestep_weighting!r} is not "
                 f"supported (choose one of {GOAL_TIMESTEP_WEIGHTINGS})"
+            )
+        if self.goal_horizon_cap is not None and int(self.goal_horizon_cap) < 1:
+            raise ValueError(
+                f"loss.goal_horizon_cap must be >= 1 or None, got {self.goal_horizon_cap}"
             )
 
 
@@ -293,7 +300,9 @@ def recurrent_reverse_loss(
         ce_losses.append(step_loss)
 
         # Soft Goal Reachability（可微代理指标，直接吃 grouped softmax 概率）
-        p_goal = soft_goal_reachability(out.candidate_prob, batch)
+        p_goal = soft_goal_reachability(
+            out.candidate_prob, batch, horizon_cap=weights.goal_horizon_cap
+        )
         step_goal_loss = soft_goal_loss(p_goal, weights.goal_reach_eps)
         goal_losses.append(step_goal_loss)
         goal_weights.append(
@@ -398,7 +407,9 @@ def one_step_clean_state_metrics(
         batch.candidate_owner,
         batch.num_decisions,
     )
-    p_goal = soft_goal_reachability(out.candidate_prob, batch)
+    p_goal = soft_goal_reachability(
+        out.candidate_prob, batch, horizon_cap=weights.goal_horizon_cap
+    )
     return {
         "loss": float(loss),
         "accuracy": float(acc),
