@@ -132,7 +132,7 @@ def test_residual_keeps_old_state_and_gradients_flow(manual_batch):
 
 
 def test_attention_uses_edge_state_as_key(manual_batch):
-    """K 来自 edge state：把 selected/unselected 的 embedding 换掉，attention 必变。"""
+    """K 里仍有 edge state 一路：把某条边的 edge embedding 换掉，attention 必变。"""
     block = GraphFlowBlock(d_model=16, ffn_hidden=32)
     H_t, _, tau = _inputs(manual_batch)
     edge_feat = torch.zeros(manual_batch.edge_index.shape[1], 16)
@@ -140,10 +140,12 @@ def test_attention_uses_edge_state_as_key(manual_batch):
     with torch.no_grad():
         block.q_proj.weight.zero_()
         block.q_proj.bias.zero_()
-        block.k_proj.weight.zero_()
-        block.k_proj.bias.zero_()
+        block.k_node_proj.weight.zero_()
+        block.k_node_proj.bias.zero_()
+        block.k_edge_proj.weight.zero_()
+        block.k_edge_proj.bias.zero_()
         block.q_proj.weight[:, 0] = 1.0
-        block.k_proj.weight[:, 0] = 1.0
+        block.k_edge_proj.weight[:, 0] = 1.0
 
     unselected = edge_feat.clone()
     selected = edge_feat.clone()
@@ -166,6 +168,88 @@ def test_attention_uses_edge_state_as_key(manual_batch):
         graph_node_ptr=manual_batch.graph_node_ptr,
     )
     assert not torch.allclose(out_a["attn"], out_b["attn"])
+
+
+def _flat_attention(block, batch, H_t, edge_feat, tau):
+    return block(
+        H_t=H_t,
+        edge_index=batch.edge_index,
+        edge_feat=edge_feat,
+        tau_t=tau,
+        fixed_mask=batch.start_goal_mask,
+        graph_node_ptr=batch.graph_node_ptr,
+    )["attn"]
+
+
+def test_attention_can_distinguish_senders_with_identical_edge_state(manual_batch):
+    """第二轮修订 A 项：边状态相同但 sender 不同时，attention 必须能不同。
+
+    旧实现 K 只来自 edge feature，两条入边 edge 相同 -> score 相同 -> attention
+    必然相等。这里让 K 只吃 sender 节点，检查同一接收节点上两条入边的 attention
+    确实被 sender 身份区分开。
+    """
+    block = GraphFlowBlock(d_model=16, ffn_hidden=32)
+    H_t, _, tau = _inputs(manual_batch)
+    edge_feat = torch.zeros(manual_batch.edge_index.shape[1], 16)
+
+    with torch.no_grad():
+        for projection in (
+            block.q_proj,
+            block.k_node_proj,
+            block.k_edge_proj,
+            block.v_proj,
+        ):
+            projection.weight.zero_()
+            projection.bias.zero_()
+        # q = h_hat[dst][0], k = h_hat[src][0] -> score 只由 sender 决定
+        block.q_proj.weight[0, 0] = 1.0
+        block.k_node_proj.weight[0, 0] = 1.0
+
+    attn = _flat_attention(block, manual_batch, H_t, edge_feat, tau)
+
+    src = manual_batch.edge_index[0]
+    dst = manual_batch.edge_index[1]
+    # 找一个有 >= 2 条入边的接收节点（且不是 Start / Goal）
+    fixed = manual_batch.start_goal_mask
+    for node in dst.unique():
+        if bool(fixed[node]):
+            continue
+        rows = torch.nonzero(dst == node, as_tuple=False).squeeze(1)
+        senders = src[rows]
+        if senders.unique().numel() < 2:
+            continue
+        # 边状态完全相同（全 0），attention 只能靠 sender 区分
+        assert edge_feat[rows].abs().sum() == 0
+        values = attn[rows]
+        assert not torch.allclose(values, values[0].expand_as(values)), (
+            "attention 无法区分 sender：同一接收节点上不同 sender 的权重完全一样"
+        )
+        break
+    else:  # pragma: no cover - 手工图一定满足
+        raise AssertionError("manual graph has no multi-incoming non-fixed node")
+
+
+def test_attention_still_uses_sender_node_when_edges_are_identical(manual_batch):
+    """反过来：sender 相同、edge 不同时也要能区分（两路 Key 缺一不可）。"""
+    block = GraphFlowBlock(d_model=16, ffn_hidden=32)
+    H_t, _, tau = _inputs(manual_batch)
+    edge_feat = torch.zeros(manual_batch.edge_index.shape[1], 16)
+
+    with torch.no_grad():
+        for projection in (block.q_proj, block.k_node_proj, block.k_edge_proj):
+            projection.weight.zero_()
+            projection.bias.zero_()
+        block.q_proj.weight[0, 0] = 1.0
+        block.k_edge_proj.weight[0, 0] = 1.0
+
+    src = manual_batch.edge_index[0]
+    dst = manual_batch.edge_index[1]
+    node = dst[0]
+    rows = torch.nonzero(dst == node, as_tuple=False).squeeze(1)
+    edge_feat[rows[0], 0] = 3.0
+    attn = _flat_attention(block, manual_batch, H_t, edge_feat, tau)
+    changed = attn[rows]
+    assert not torch.allclose(changed, changed[0].expand_as(changed))
 
 
 def test_time_conditioning_actually_depends_on_t(manual_batch):

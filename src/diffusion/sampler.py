@@ -208,6 +208,7 @@ def sample_reverse_chain(
         trace.append(H_t, z_t)
 
     last_log_prob = None
+    last_prob = None
     for t in range(steps, 0, -1):
         step = reverse_step(
             diffusion, model, batch, H_t, z_t, t, generator, stochastic=stochastic
@@ -215,6 +216,10 @@ def sample_reverse_chain(
         H_t = step["H_next"]
         z_t = step["z_prev"]
         last_log_prob = step["candidate_log_prob"]
+        # 最后一个 reverse step（t=1）的 clean-state 概率分布：评测时用它算
+        # Soft Goal Reachability（可微代理指标），与路径解码出来的 Hard Goal Hit
+        # 分开报告。
+        last_prob = step["candidate_prob"]
         if record:
             trace.append(H_t, z_t, last_log_prob)
 
@@ -222,5 +227,6 @@ def sample_reverse_chain(
         "z0": z_t,
         "H0": H_t,
         "candidate_log_prob": last_log_prob,
+        "candidate_prob": last_prob,
         "trace": trace if record else None,
     }

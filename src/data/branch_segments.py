@@ -299,6 +299,77 @@ def _graph_goal(graph: nx.Graph) -> Node:
 
 
 # ---------------------------------------------------------------------------
+# 软可达性需要的拓扑信息（第二轮修订 B 项）
+#
+# Soft Goal Reachability 要在 batch 张量上做 value iteration，模型内部不做任何
+# NetworkX 遍历，所以这里把"这条 branch 走到哪个 decision / 是不是 goal"和
+# "source 从哪个 decision 开始算"在数据层就翻译成整数编号。
+# ---------------------------------------------------------------------------
+def decision_index_map(segments: GraphSegments) -> Dict[Node, int]:
+    """node -> decision 局部编号（非 decision 的节点不在表里）。"""
+    return {node: index for index, node in enumerate(segments.decision_nodes)}
+
+
+def branch_reach_target(
+    end: Node,
+    goal: Node,
+    decision_index: Dict[Node, int],
+) -> Tuple[int, bool]:
+    """一条 branch 的 structural endpoint 对应到 (next_decision, hits_goal)。
+
+    * endpoint == goal              -> (-1, True)
+    * endpoint 是某个 decision 节点 -> (decision 局部编号, False)
+    * 其它（dead-end / 绕回 start） -> (-1, False)
+    """
+    if end == goal:
+        return -1, True
+    return int(decision_index.get(end, -1)), False
+
+
+def candidate_reach_topology(
+    segments: GraphSegments,
+    candidate_branch: Sequence[Optional[Branch]],
+) -> Tuple[List[int], List[bool]]:
+    """每个 candidate 的 (candidate_next_decision, candidate_hits_goal)。
+
+    顺序与 ``FlatCandidates.candidate_branch`` 完全一致（NULL 位置为 (-1, False)）。
+    """
+    decision_index = decision_index_map(segments)
+    next_decision: List[int] = []
+    hits_goal: List[bool] = []
+    for branch in candidate_branch:
+        if branch is None:
+            next_decision.append(-1)
+            hits_goal.append(False)
+            continue
+        target, is_goal = branch_reach_target(
+            branch.end, segments.goal, decision_index
+        )
+        next_decision.append(target)
+        hits_goal.append(is_goal)
+    return next_decision, hits_goal
+
+
+def source_reach_start(segments: GraphSegments) -> Tuple[int, bool]:
+    """source 的软可达性起点 (reach_start_decision, reach_start_is_goal)。
+
+    * ``deg(s) > 1``：source 自己就是 decision -> (index(source), False)
+    * ``deg(s) == 1``：从 forced segment 的终点开始
+        - 终点是 goal            -> (-1, True)（整张图没有 decision，直接可达）
+        - 终点是 decision        -> (index, False)
+        - 终点是 dead-end        -> (-1, False)
+    """
+    decision_index = decision_index_map(segments)
+    source_index = decision_index.get(segments.start, -1)
+    if source_index >= 0:
+        return int(source_index), False
+
+    end = segments.source_forced_nodes[-1] if segments.source_forced_nodes else segments.start
+    return branch_reach_target(end, segments.goal, decision_index)
+
+
+
+# ---------------------------------------------------------------------------
 def extract_segments(
     graph: nx.Graph,
     start: Optional[Node] = None,

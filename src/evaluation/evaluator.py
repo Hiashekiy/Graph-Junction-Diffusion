@@ -33,6 +33,7 @@ from src.evaluation.path_decoder import (
 )
 from src.models.denoiser import GraphFlowDenoiser
 from src.training.losses import LossWeights, one_step_clean_state_metrics
+from src.training.soft_goal import soft_goal_reachability
 
 
 @dataclass
@@ -66,6 +67,8 @@ def evaluate_dataset(
     records: List[SampleRecord] = []
     debug_accum: Dict[str, float] = {}
     debug_count = 0
+    soft_goal_total = 0.0
+    soft_goal_graphs = 0
     start_time = time.time()
     batches = iter_batches(list(dataset), batch_size=batch_size, shuffle=False)
 
@@ -82,6 +85,13 @@ def evaluate_dataset(
         )
         elapsed = time.time() - batch_start
         z0 = chain["z0"]
+
+        # Soft Goal Reachability：与 Hard Goal Hit 分开报告的可微代理指标。
+        # 它是"概率传播到 Goal"的软概率，不是路径解码结果，两者不能互相替代。
+        if chain.get("candidate_prob") is not None:
+            p_goal = soft_goal_reachability(chain["candidate_prob"], batch)
+            soft_goal_total += float(p_goal.sum())
+            soft_goal_graphs += int(batch.num_graphs)
 
         offsets = decision_offsets(samples)
         candidate_starts = candidate_offsets(samples)
@@ -114,6 +124,8 @@ def evaluate_dataset(
 
     metrics = aggregate(records)
     metrics["wall_time"] = time.time() - start_time
+    if soft_goal_graphs:
+        metrics["soft_goal_reachability"] = soft_goal_total / soft_goal_graphs
     debug = (
         {key: value / max(debug_count, 1) for key, value in debug_accum.items()}
         if debug_count

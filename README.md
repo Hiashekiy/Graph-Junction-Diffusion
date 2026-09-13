@@ -86,7 +86,7 @@ J1 ─ a ─ b ─ J2        branch.nodes = [J1, a, b, J2]
 | `tau_t` 正弦编码 + MLP | `models/time_encoder.py::TimeEncoder` |
 | AdaLN：`h_hat = (1+gamma) LN(h) + beta` | `models/graph_flow.py` + `TimeConditioner` |
 | `Q = W_Q h_v`（接收节点） | `graph_flow.py::q_proj(H_hat[dst])` |
-| `K = W_K e_uv`（边状态） | `graph_flow.py::k_proj(edge_feat)` |
+| `K = W_{K,n} h_u + W_{K,e} e_uv`（发送节点 + 边状态，第二轮修订 A） | `graph_flow.py::k_node_proj(H_hat[src]) + k_edge_proj(edge_feat)`，再乘 `1/sqrt(2)` |
 | `V = W_V h_u`（发送节点） | `graph_flow.py::v_proj(H_hat[src])` |
 | 每条入边 softmax | `segment_softmax(score, dst, num_nodes)` |
 | Start/Goal 只出不进 | `valid_msg = ~fixed_mask[dst]`，并从聚合里剔除 |
@@ -907,3 +907,80 @@ python tools/multiseed_eval.py --a outputs/runs/v2_controlled_100ep \
 产物：`outputs/runs/v2_controlled_100ep_flow3/{eval_test.json, summary.txt,
 breakdown_test.json, paired_*.json, curves_vs_baseline.json, multiseed_goal_hit.json,
 ablation_flow_steps.json}`。
+
+## 17. 本轮修订：节点/边联合 Attention + Soft Goal Reachability
+
+这一轮只做两件事，其它已经稳定的结构（persistent `H_t`、Start/Goal 只出不进与
+clamp、AdaLN、residual、两套 LayerNorm、edge selected/unselected embedding、
+一个 reverse step 内多轮交流 + slot embedding、Branch Mean Pool、grouped softmax）
+全部没动。**改完只做了测试与冒烟验证，没有真的开始训练。**
+
+### 17.1 Graph Attention：节点 + 边共同决定权重（A）
+
+```text
+旧：K_{uv} = W_K e_uv^t                    边状态相同 -> attention 必然相同
+新：K_{uv} = W_{K,n} h_u + W_{K,e} e_uv^t  sender 身份（含 Start/Goal）也能进权重
+    score  = <q_v, (k_node + k_edge)/sqrt(2)> / sqrt(d)
+```
+
+* 代码：`src/models/graph_flow.py`（`k_proj` 拆成 `k_node_proj` + `k_edge_proj`）；
+* `1/sqrt(2)` 只是让两路相加后的初始方差与单路一致，不改变表达能力；
+* **旧 checkpoint 不能直接加载**（`k_proj` 已被拆开），需要重新训练；
+  加载失败时 `load_checkpoint` 会给出可读的结构不匹配报错。
+
+### 17.2 Loss：CE + Soft Goal Reachability（B）
+
+```text
+L = x0_ce * L_CE + goal_reach_weight * L_goal
+L_goal = sum_t omega_t * L_goal^{(t)} / sum_t omega_t ,  omega_t = alpha_bar_t
+L_goal^{(t)} = -(1/B) * sum_b log(P_goal,b^{(t)} + eps)
+```
+
+* 每个 reverse timestep **同时**算 CE 与 Soft Goal，只在最后反传一次；
+* `P_goal` 用 Branch Scorer 的概率分布做有限 horizon 的 value iteration
+  （`src/training/soft_goal.py`）：`branch -> Goal = 1`、`branch -> decision j = V_j`、
+  `NULL / dead-end = 0`，只有 softmax 概率 + gather + 乘法 + `segment_sum`，
+  梯度能回到 Branch logits；
+* 拓扑信息在数据层预先翻译成整数编号（`collate.py` 新增四个字段
+  `candidate_next_decision / candidate_hits_goal / reach_start_decision /
+  reach_start_is_goal`），Soft Goal 内部**不做任何 NetworkX 遍历**；
+* `deg(s) > 1` 时从 source 自己开始算，`deg(s) == 1` 时从 forced segment 的终点开始算；
+* **Soft Goal 只是可微训练代理指标**，验证阶段仍然报告
+  `Hard Goal Hit / Optimal Path Rate / Loop Rate / Broken Rate`，并额外报告
+  `soft_goal_reachability`（评测与每个 epoch 的 `val_*` 都会写进 `history.json`）。
+
+配置（`configs/graph_flow.yaml`）：
+
+```yaml
+loss:
+  x0_ce: 1.0
+  null_weight: 1.0
+  active_weight: 1.0
+  goal_reach_weight: 0.1        # =0 时严格退化成纯 CE baseline
+  goal_reach_eps: 1.0e-8
+  goal_timestep_weighting: alpha_bar   # 或 uniform（消融）
+```
+
+训练日志拆成：
+
+```text
+[epoch 1] batch 1/2 loss=1.8581 ce=1.4822 goal=3.7588 soft_goal=0.0265 x0_acc=0.800
+```
+
+`history.json` 里对应 `train_loss / train_ce_loss / train_goal_loss /
+train_soft_goal / train_x0_acc`，验证部分多一个 `val_one_step_soft_goal` 与
+`soft_goal_reachability`。
+
+### 17.3 本轮新增的测试
+
+`tests/test_soft_goal.py`（16 个）覆盖：`0.8 x 0.7 = 0.56`、NULL / dead-end 贡献为 0、
+两条路径概率相加、`SoftGoalLoss.backward()` 给 Branch 概率非零梯度、
+degree-1 Source 从 forced 终点起算 / 多出口 Source 从自己起算、多图 batch 不串图
+（含不同 horizon）、`goal_reach_weight=0` 与纯 CE 逐位一致。
+`tests/test_graph_flow.py` 新增 2 个：边状态相同但 sender 不同时 attention 必须能不同、
+sender 相同而 edge 不同时也必须能不同。
+
+```bash
+python -m pytest tests -q        # 246 passed
+python tools/semantic_check.py --strict   # checked 59 modules, 0 problems
+```

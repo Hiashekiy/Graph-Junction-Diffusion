@@ -1,22 +1,35 @@
 """Losses + Recurrent reverse-chain training (实施指南第 18-22 节).
 
-这里包含两部分：
+这里包含三部分：
 
-1. **loss 定义**（第 21 节）
+1. **局部 CE**（第 21 节）
 
        L_t = -(1/M) * sum_i w_i * log p_theta(z_0^i | H_{t-1}, z_t, t)
-       L   = (1/T) * sum_{t=1}^{T} L_t
+       L_CE = (1/T) * sum_{t=1}^{T} L_t
 
    即 clean-state categorical CE，`w_i` 由 NULL / active 权重决定（默认都是 1）。
 
-2. **整条 reverse chain 的 teacher-forced 展开**（第 18-20 节）
+2. **Soft Goal Reachability**（第二轮修订 B 项，见 :mod:`src.training.soft_goal`）
+
+       L_goal = sum_t omega_t * L_goal^{(t)} / sum_t omega_t
+       L_goal^{(t)} = -(1/B) * sum_b log(P_goal,b^{(t)} + eps)
+       omega_t = alpha_bar_t
+
+   CE 负责"局部 branch 选得对不对"，Soft Goal 负责"这些 branch 概率组合起来
+   能不能到 Goal"。
+
+       最终： L = lambda_ce * L_CE + lambda_goal * L_goal
+
+   ``lambda_goal = 0`` 时严格退化成旧的纯 CE baseline。
+
+3. **整条 reverse chain 的 teacher-forced 展开**（第 18-20 节）
 
    1. 从 GT z_0 出发，按单步 transition 采样一条完整的
       z_0 -> z_1 -> ... -> z_T 前向轨迹；
    2. 只初始化一次 H_T = TypeEmbedding(V)；
    3. 对 t = T, ..., 1 连续调用同一个 F_theta，每一步都用 teacher state z_t；
-   4. 每一步都预测 z_0 并算 clean-state CE；
-   5. 最后 L = (1/T) * sum_t L_t，一次 backward。
+   4. **每一步**都预测 z_0、算 clean-state CE，并同时算一次 Soft Goal；
+   5. 一次 backward。
 
 **不做** ``H_t = H_t.detach()``（除非显式设置 ``truncate_every``），否则会直接
 切断跨 timestep 的学习。
@@ -32,8 +45,12 @@ from torch import Tensor
 
 from src.diffusion.categorical import CategoricalDiffusion
 from src.models.denoiser import GraphFlowDenoiser
+from src.training.soft_goal import soft_goal_loss, soft_goal_reachability
 
 _EPS = 1e-12
+
+# goal loss 的 timestep 加权方式
+GOAL_TIMESTEP_WEIGHTINGS = ("alpha_bar", "uniform")
 
 
 # ---------------------------------------------------------------------------
@@ -41,11 +58,27 @@ _EPS = 1e-12
 # ---------------------------------------------------------------------------
 @dataclass
 class LossWeights:
-    """clean-state CE 的权重（实施指南第 21 节）。"""
+    """clean-state CE + Soft Goal Reachability 的权重（第二轮修订 B 项）。
+
+    ``goal_reach_weight = 0`` 必须严格退化成旧的纯 CE baseline（数值完全一致）。
+    """
 
     x0_ce: float = 1.0
     null_weight: float = 1.0
     active_weight: float = 1.0
+
+    goal_reach_weight: float = 0.1
+    goal_reach_eps: float = 1e-8
+    # "alpha_bar"：t 越大噪声越大，Goal 级约束给得越弱（推荐）；
+    # "uniform"  ：每个 timestep 等权（做 ablation 用）。
+    goal_timestep_weighting: str = "alpha_bar"
+
+    def validate(self) -> None:
+        if self.goal_timestep_weighting not in GOAL_TIMESTEP_WEIGHTINGS:
+            raise ValueError(
+                f"loss.goal_timestep_weighting={self.goal_timestep_weighting!r} is not "
+                f"supported (choose one of {GOAL_TIMESTEP_WEIGHTINGS})"
+            )
 
 
 def per_decision_ce(
@@ -161,11 +194,37 @@ def accuracy(
 # ---------------------------------------------------------------------------
 @dataclass
 class RecurrentLossOutput:
+    """一次 reverse chain 的损失与拆开的日志字段（第二轮修订 B 项）。
+
+    ``loss``          = ``x0_ce * ce_loss + goal_reach_weight * goal_loss``
+    ``ce_loss``       = 逐 timestep 的 clean-state CE 平均
+    ``goal_loss``     = 逐 timestep 的 Soft Goal Loss 按 ``omega_t`` 加权平均
+    ``soft_goal_mean``= 逐 timestep ``P_goal`` 的均值（监控用，不参与反传）
+    ``per_step_loss`` = 每个 timestep 的 CE（名字保持不变，向后兼容）
+    """
+
     loss: Tensor
+    ce_loss: Optional[Tensor] = None
+    goal_loss: Optional[Tensor] = None
+    soft_goal_mean: float = float("nan")
     per_step_loss: List[float] = field(default_factory=list)
+    per_step_goal_loss: List[float] = field(default_factory=list)
+    per_step_soft_goal: List[float] = field(default_factory=list)
     per_step_accuracy: List[float] = field(default_factory=list)
     final_log_prob: Optional[Tensor] = None
     final_accuracy: float = 0.0
+
+
+def goal_timestep_weight(diffusion: CategoricalDiffusion, t: int, mode: str) -> float:
+    """``omega_t``：t 越大噪声越大，Goal 级约束越弱。"""
+    if mode == "uniform":
+        return 1.0
+    if mode == "alpha_bar":
+        return float(diffusion.schedule.alpha_bar_at(t))
+    raise ValueError(
+        f"unknown goal timestep weighting {mode!r} "
+        f"(choose one of {GOAL_TIMESTEP_WEIGHTINGS})"
+    )
 
 
 def recurrent_reverse_loss(
@@ -178,8 +237,22 @@ def recurrent_reverse_loss(
     truncate_every: int = 0,
     record: bool = False,
 ) -> RecurrentLossOutput:
-    """teacher-forced full-chain loss（默认整条链反传）。"""
+    """teacher-forced full-chain loss（默认整条链反传）。
+
+        L = lambda_ce * L_CE + lambda_goal * L_goal
+
+    每个 reverse timestep **同时**算局部 CE 与 Soft Goal Reachability：
+
+        t=T   -> CE_T   + SoftGoal_T
+        t=T-1 -> CE_T-1 + SoftGoal_T-1
+        ...
+        t=1   -> CE_1   + SoftGoal_1
+
+    Soft Goal 用的是 Branch Scorer 的概率分布本身（不做 argmax、不跑 Path
+    Decoder），所以梯度可以完整反传到 Branch logits。
+    """
     weights = weights or LossWeights()
+    weights.validate()
     steps = int(diffusion.T if max_steps is None else max_steps)
 
     # 1) forward noising trajectory：z_path[t] 就是 teacher state
@@ -194,8 +267,13 @@ def recurrent_reverse_loss(
     # 2) 只初始化一次
     H_t = model.init_nodes(batch)
 
-    losses: List[Tensor] = []
+    ce_losses: List[Tensor] = []
+    goal_losses: List[Tensor] = []
+    goal_weights: List[float] = []
+    soft_goal_means: List[Tensor] = []
     step_losses: List[float] = []
+    step_goal_losses: List[float] = []
+    step_soft_goals: List[float] = []
     step_accuracies: List[float] = []
     final_log_prob: Optional[Tensor] = None
     steps_done = 0
@@ -212,10 +290,22 @@ def recurrent_reverse_loss(
             batch.num_decisions,
             weights,
         )
-        losses.append(step_loss)
+        ce_losses.append(step_loss)
+
+        # Soft Goal Reachability（可微代理指标，直接吃 grouped softmax 概率）
+        p_goal = soft_goal_reachability(out.candidate_prob, batch)
+        step_goal_loss = soft_goal_loss(p_goal, weights.goal_reach_eps)
+        goal_losses.append(step_goal_loss)
+        goal_weights.append(
+            goal_timestep_weight(diffusion, t, weights.goal_timestep_weighting)
+        )
+        soft_goal_means.append(p_goal.mean().detach())
+
         steps_done += 1
         if record:
             step_losses.append(float(step_loss.detach()))
+            step_goal_losses.append(float(step_goal_loss.detach()))
+            step_soft_goals.append(float(p_goal.mean().detach()))
             step_accuracies.append(
                 float(
                     accuracy(
@@ -234,7 +324,13 @@ def recurrent_reverse_loss(
         if truncate_every and steps_done % truncate_every == 0 and t > 1:
             H_t = H_t.detach()
 
-    loss = torch.stack(losses).mean()
+    ce_loss = torch.stack(ce_losses).mean()
+    # 注意：必须除以 sum_t omega_t，否则改 T 会改变 loss 的整体尺度
+    omega = torch.tensor(goal_weights, device=ce_loss.device, dtype=ce_loss.dtype)
+    goal_loss = (torch.stack(goal_losses) * omega).sum() / omega.sum().clamp_min(_EPS)
+    loss = ce_loss + float(weights.goal_reach_weight) * goal_loss
+    soft_goal_mean = float(torch.stack(soft_goal_means).mean())
+
     final_accuracy = (
         float(
             accuracy(
@@ -249,7 +345,12 @@ def recurrent_reverse_loss(
     )
     return RecurrentLossOutput(
         loss=loss,
+        ce_loss=ce_loss,
+        goal_loss=goal_loss,
+        soft_goal_mean=soft_goal_mean,
         per_step_loss=step_losses,
+        per_step_goal_loss=step_goal_losses,
+        per_step_soft_goal=step_soft_goals,
         per_step_accuracy=step_accuracies,
         final_log_prob=final_log_prob,
         final_accuracy=final_accuracy,
@@ -297,4 +398,10 @@ def one_step_clean_state_metrics(
         batch.candidate_owner,
         batch.num_decisions,
     )
-    return {"loss": float(loss), "accuracy": float(acc), "t": float(step)}
+    p_goal = soft_goal_reachability(out.candidate_prob, batch)
+    return {
+        "loss": float(loss),
+        "accuracy": float(acc),
+        "soft_goal": float(p_goal.mean()),
+        "t": float(step),
+    }

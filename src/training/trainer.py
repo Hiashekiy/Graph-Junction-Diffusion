@@ -80,7 +80,17 @@ class Trainer:
             x0_ce=float(loss_cfg.get("x0_ce", 1.0)) if loss_cfg else 1.0,
             null_weight=float(loss_cfg.get("null_weight", 1.0)) if loss_cfg else 1.0,
             active_weight=float(loss_cfg.get("active_weight", 1.0)) if loss_cfg else 1.0,
+            goal_reach_weight=float(loss_cfg.get("goal_reach_weight", 0.1))
+            if loss_cfg
+            else 0.1,
+            goal_reach_eps=float(loss_cfg.get("goal_reach_eps", 1e-8)) if loss_cfg else 1e-8,
+            goal_timestep_weighting=str(
+                loss_cfg.get("goal_timestep_weighting", "alpha_bar")
+            )
+            if loss_cfg
+            else "alpha_bar",
         )
+        self.weights.validate()
         self.stochastic_sampling = (
             bool(eval_cfg.get("stochastic_sampling", True)) if eval_cfg else True
         )
@@ -120,6 +130,9 @@ class Trainer:
         print(f"[epoch {epoch}] {len(batches)} batches", flush=True)
 
         total_loss = 0.0
+        total_ce = 0.0
+        total_goal = 0.0
+        total_soft_goal = 0.0
         total_acc = 0.0
         start = time.time()
         for batch_index, samples in enumerate(batches):
@@ -156,19 +169,31 @@ class Trainer:
             self.global_step += 1
 
             total_loss += float(out.loss.detach())
+            total_ce += float(out.ce_loss.detach())
+            total_goal += float(out.goal_loss.detach())
+            total_soft_goal += float(out.soft_goal_mean)
             total_acc += out.final_accuracy
             if (batch_index + 1) % self.log_every == 0:
+                # 拆开的日志：只看总 loss 分不清是 CE 没学好还是 Goal reachability
+                # 没起来（第二轮修订第十二条）。
                 print(
                     f"[epoch {epoch}] batch {batch_index + 1}/{len(batches)} "
                     f"loss={float(out.loss.detach()):.4f} "
+                    f"ce={float(out.ce_loss.detach()):.4f} "
+                    f"goal={float(out.goal_loss.detach()):.4f} "
+                    f"soft_goal={out.soft_goal_mean:.4f} "
                     f"x0_acc={out.final_accuracy:.3f} "
                     f"({time.time() - start:.1f}s)",
                     flush=True,
                 )
 
+        batches_done = max(len(batches), 1)
         return {
-            "train_loss": total_loss / max(len(batches), 1),
-            "train_x0_acc": total_acc / max(len(batches), 1),
+            "train_loss": total_loss / batches_done,
+            "train_ce_loss": total_ce / batches_done,
+            "train_goal_loss": total_goal / batches_done,
+            "train_soft_goal": total_soft_goal / batches_done,
+            "train_x0_acc": total_acc / batches_done,
             "train_seconds": time.time() - start,
         }
 
@@ -192,6 +217,7 @@ class Trainer:
         metrics = dict(report.metrics)
         metrics["val_x0_acc"] = report.debug.get("accuracy", float("nan"))
         metrics["val_one_step_loss"] = report.debug.get("loss", float("nan"))
+        metrics["val_one_step_soft_goal"] = report.debug.get("soft_goal", float("nan"))
         if self.run_dir is not None:
             with open(self.run_dir / f"val_records_epoch{epoch}.json", "w", encoding="utf-8") as handle:
                 json.dump(records_to_dicts(report.records), handle, indent=1)

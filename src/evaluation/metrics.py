@@ -152,6 +152,8 @@ def format_metrics(metrics: Dict[str, float]) -> str:
         ("success_cost_ratio", "cost_ratio"),
         ("loop_rate", "loop"),
         ("broken_rate", "broken"),
+        # 可微的软可达性代理指标，和 Hard Goal Hit 并排报告（第二轮修订）
+        ("soft_goal_reachability", "soft_goal"),
         ("mean_elapsed", "sec/query"),
     ]
     parts = []

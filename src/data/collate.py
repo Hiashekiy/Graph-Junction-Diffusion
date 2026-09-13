@@ -30,7 +30,12 @@ from typing import Any, Dict, List, Sequence
 import torch
 from torch import Tensor
 
-from src.data.branch_segments import NUM_EDGE_STATES, NUM_NODE_TYPES
+from src.data.branch_segments import (
+    NUM_EDGE_STATES,
+    NUM_NODE_TYPES,
+    candidate_reach_topology,
+    source_reach_start,
+)
 from src.data.dataset import GraphSample
 
 
@@ -75,6 +80,22 @@ class Batch:
         default_factory=lambda: torch.zeros(0, dtype=torch.long)
     )                                  # [F] batch 级物理边 ID
     num_source_forced_edges: int = 0
+
+    # -- 软可达性拓扑（第二轮修订 B 项）-------------------------------------
+    # 「从 decision i 出发走 candidate c 会到哪里」在 batch 张量层面直接查表，
+    # Soft Goal 的 value iteration 因此不需要任何 NetworkX 遍历。
+    candidate_next_decision: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.long)
+    )                                  # [C] -1 = 这条 branch 不通向 decision
+    candidate_hits_goal: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.bool)
+    )                                  # [C] 这条 branch 是否直接到 goal
+    reach_start_decision: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.long)
+    )                                  # [B] -1 = source 后面没有 decision
+    reach_start_is_goal: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.bool)
+    )                                  # [B] source 的被迫段是否直接到 goal
 
     # -- misc -------------------------------------------------------------
     sizes: Dict[str, Any] = field(default_factory=dict)
@@ -129,6 +150,9 @@ class Batch:
             "branch_node_slots": int(self.branch_node_ids.numel()),
             "branch_edge_slots": int(self.branch_edge_ids.numel()),
             "num_source_forced_edges": self.num_source_forced_edges,
+            "num_goal_candidates": int(self.candidate_hits_goal.sum().item())
+            if self.candidate_hits_goal.numel()
+            else 0,
         }
 
 
@@ -175,6 +199,12 @@ def collate_samples(
     branch_edge_ids: List[List[int]] = []
     source_forced_edges: List[int] = []
 
+    # 软可达性拓扑（每图一条 reach_start，每个 candidate 一条 branch endpoint）
+    candidate_next_decision: List[int] = []
+    candidate_hits_goal: List[bool] = []
+    reach_start_decision: List[int] = []
+    reach_start_is_goal: List[bool] = []
+
     # 物理边 ID 在 segments 里是**每图局部**的（0..E_phys(g)-1），batch 里必须整体
     # 平移到 batch 级编号空间，否则第二张图起会写进/读到别的图的物理边槽位。
     physical_edge_offset = 0
@@ -217,6 +247,25 @@ def collate_samples(
 
         for local_target in candidates.target_candidate:
             target_candidate.append(candidate_offset + int(local_target))
+
+        # 软可达性：每个 candidate 走到的 structural endpoint 是什么
+        local_next, local_hits = candidate_reach_topology(
+            segments, candidates.candidate_branch
+        )
+        for target, hits in zip(local_next, local_hits):
+            candidate_next_decision.append(
+                decision_offset + int(target) if int(target) >= 0 else -1
+            )
+            candidate_hits_goal.append(bool(hits))
+
+        # source 的起点（deg(s) > 1 时 source 自己是 decision；否则从 forced 段终点开始）
+        local_start_decision, start_is_goal = source_reach_start(segments)
+        reach_start_decision.append(
+            decision_offset + int(local_start_decision)
+            if int(local_start_decision) >= 0
+            else -1
+        )
+        reach_start_is_goal.append(bool(start_is_goal))
 
         # branch membership（排除 owner；NULL 留空）
         for branch in candidates.candidate_branch:
@@ -270,6 +319,18 @@ def collate_samples(
             source_forced_edges, dtype=torch.long, device=device
         ),
         num_source_forced_edges=len(source_forced_edges),
+        candidate_next_decision=torch.tensor(
+            candidate_next_decision, dtype=torch.long, device=device
+        ),
+        candidate_hits_goal=torch.tensor(
+            candidate_hits_goal, dtype=torch.bool, device=device
+        ),
+        reach_start_decision=torch.tensor(
+            reach_start_decision, dtype=torch.long, device=device
+        ),
+        reach_start_is_goal=torch.tensor(
+            reach_start_is_goal, dtype=torch.bool, device=device
+        ),
         sizes={
             "num_node_types": NUM_NODE_TYPES,
             "num_edge_states": NUM_EDGE_STATES,

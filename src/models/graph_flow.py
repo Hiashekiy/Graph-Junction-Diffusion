@@ -4,15 +4,23 @@
 
     H_{t-1} = F_theta(H_t, E_t, tau_t)
 
-注意力角色分工（这是 V2 的核心）：
+注意力角色分工（这是 V2 的核心；第二轮修订后 Key 同时吃 sender 节点与边状态）：
 
-    Q_v      = W_Q * h_hat_v        接收节点     "我怎样接收信息"
-    K_{uv}   = W_K * e_uv^t         边状态       "这条通道当前是什么状态"
-    V_u      = W_V * h_hat_u        发送节点     "传播什么信息"
+    Q_v      = W_Q * h_hat_v                             接收节点  "我需要什么信息"
+    K_{uv}   = W_{K,n} * h_hat_u + W_{K,e} * e_uv^t      发送节点 + 边状态
+                                                         "你是谁 + 这条通道什么状态"
+    V_u      = W_V * h_hat_u                             发送节点  "传播什么信息"
 
-    score    = <q_v, k_uv> / sqrt(d)
+    score    = <q_v, (k_node + k_edge) / sqrt(2)> / sqrt(d)
     alpha    = softmax_{u in N(v)} score
     m_v      = sum_u alpha_uv * V_u
+
+旧实现里 K **只**来自 edge feature，于是同一接收节点的两条入边只要边状态相同，
+attention 必然相等，sender 的节点身份（例如 Start / Goal 的独立 embedding）
+根本进不了权重。把 node / edge 两路 Key 相加后 attention 才能真正区分 sender。
+
+``1/sqrt(2)`` 只是让 ``k_node + k_edge`` 的初始方差与单路 Key 一致（两路独立、
+各自方差相同，相加后方差翻倍，除以 sqrt(2) 抵消），不改变表达能力。
 
 三条硬约束：
 
@@ -26,6 +34,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 import torch
 from torch import Tensor, nn
@@ -56,9 +65,13 @@ class GraphFlowBlock(nn.Module):
         self.time_conditioner = TimeConditioner(self.d_model, dropout=dropout)
 
         self.q_proj = nn.Linear(self.d_model, self.d_head)
-        self.k_proj = nn.Linear(self.d_model, self.d_head)
+        # Key 拆成"发送节点"与"边状态"两路，forward 里相加（第二轮修订 A 项）。
+        self.k_node_proj = nn.Linear(self.d_model, self.d_head)
+        self.k_edge_proj = nn.Linear(self.d_model, self.d_head)
         self.v_proj = nn.Linear(self.d_model, self.d_head)
         self.o_proj = nn.Linear(self.d_head, self.d_model)
+        # k = (k_node + k_edge) / sqrt(2)：保持初始 Key 方差与单路一致
+        self.k_pair_scale = 1.0 / math.sqrt(2.0)
 
         # 两个 residual 子层各用一套 LayerNorm 参数（修改清单 P1-3）：
         #   h~      = LN_1(h + W_O m)
@@ -77,7 +90,12 @@ class GraphFlowBlock(nn.Module):
         )
 
         # 让 Q / K / V 的初始尺度与 d_model 匹配
-        for projection in (self.q_proj, self.k_proj, self.v_proj):
+        for projection in (
+            self.q_proj,
+            self.k_node_proj,
+            self.k_edge_proj,
+            self.v_proj,
+        ):
             nn.init.normal_(projection.weight, std=self.d_model ** -0.5)
             nn.init.zeros_(projection.bias)
 
@@ -110,9 +128,11 @@ class GraphFlowBlock(nn.Module):
         beta = broadcast_time(beta, graph_node_ptr)
         H_hat = (1.0 + gamma) * self.node_norm(H_t) + beta
 
-        # ---- Q = receiver, K = edge state, V = sender ----------------
+        # ---- Q = receiver, K = sender node + edge state, V = sender ---
         q = self.q_proj(H_hat[dst])                                # [E_msg, d_head]
-        k = self.k_proj(edge_feat)
+        k_node = self.k_node_proj(H_hat[src])                      # [E_msg, d_head]
+        k_edge = self.k_edge_proj(edge_feat)                       # [E_msg, d_head]
+        k = (k_node + k_edge) * self.k_pair_scale                  # [E_msg, d_head]
         v = self.v_proj(H_hat[src])
         score = (q * k).sum(-1) * self.attn_scale                  # [E_msg]
 

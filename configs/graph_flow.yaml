@@ -76,6 +76,15 @@ loss:
   null_weight: 1.0
   active_weight: 1.0
 
+  # 第二轮修订 B 项：CE + Soft Goal Reachability
+  #   L = x0_ce * L_CE + goal_reach_weight * L_goal
+  # goal_reach_weight = 0 时必须严格退化成旧的纯 CE baseline。
+  # 消融建议：0 / 0.05 / 0.1 / 0.2 / 0.5（第一版固定 0.1）
+  goal_reach_weight: 0.1
+  goal_reach_eps: 1.0e-8
+  # alpha_bar：t 越大噪声越大，Goal 级约束越弱；uniform 做消融用
+  goal_timestep_weighting: alpha_bar
+
 evaluation:
   stochastic_sampling: true
   batch_size: 16
