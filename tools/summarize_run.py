@@ -23,76 +23,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-
-def load_history(run_dir: Path) -> List[Dict[str, Any]]:
-    path = run_dir / "history.json"
-    if not path.exists():
-        raise FileNotFoundError(f"no history.json in {run_dir}")
-    with open(path, "r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def _val_file_goal_hit(path: Path) -> float:
-    with open(path, "r", encoding="utf-8") as handle:
-        records = json.load(handle)
-    if not records:
-        raise ValueError(f"empty val records: {path}")
-    return sum(1 for r in records if r["goal_hit"]) / len(records)
-
-
-def reconstruct_epoch_offset(
-    run_dir: Path, history: List[Dict[str, Any]]
-) -> Optional[int]:
-    """给"没有 epoch 字段的老 history"找回真实 epoch 号。
-
-    老版本的 trainer 不往记录里写 ``epoch``，而 ``history.json`` 可能只保留了后一段
-    （例如 ``v2_controlled_100ep`` 只剩 epoch 21-100 的 80 条，前面 20 条丢了）。
-    这时 ``index + 1`` 会凭空少算 20 个 epoch —— 报出来的 "best validation: epoch 60"
-    其实是 epoch 80。
-
-    可靠的锚点是 ``val_records_epoch{N}.json``：文件名里带真实 epoch，内容能算出
-    goal_hit。做法是从**末尾**对齐：history 里第 j 个带验证的记录，对应最后
-    len(val_positions) 个 val 文件里的第 j 个，并用 goal_hit 值逐个核对。核对通过
-    才返回偏移量；对不上就返回 None（调用方退回 index+1 并打警告），绝不猜。
-    """
-    positions = [i for i, record in enumerate(history) if "goal_hit_rate" in record]
-    if not positions:
-        return None
-    files = sorted(
-        run_dir.glob("val_records_epoch*.json"),
-        key=lambda path: int(path.stem.replace("val_records_epoch", "")),
-    )
-    if len(files) < len(positions):
-        return None
-    files = files[-len(positions):]
-    for position, path in zip(positions, files):
-        expected = float(history[position]["goal_hit_rate"])
-        actual = _val_file_goal_hit(path)
-        if abs(expected - actual) > 1e-9:
-            return None
-    first_epoch = int(files[0].stem.replace("val_records_epoch", ""))
-    return first_epoch - (positions[0] + 1)
-
-
-def curve(
-    history: List[Dict[str, Any]], key: str, epoch_offset: int = 0
-) -> List[Dict[str, float]]:
-    """从 history 抽一条曲线。
-
-    epoch 号优先用记录里的 ``epoch`` 字段；老 history 没有这个字段，就用
-    ``index + 1 + epoch_offset``（``epoch_offset`` 由 :func:`reconstruct_epoch_offset`
-    用 val_records 文件名校准）。
-    """
-    out = []
-    for index, record in enumerate(history, start=1):
-        if key in record and record[key] == record[key]:  # 过滤 NaN
-            out.append(
-                {
-                    "epoch": int(record.get("epoch", index + epoch_offset)),
-                    "value": float(record[key]),
-                }
-            )
-    return out
+# 历史读取 / epoch 校准 / 曲线抽样的实现在 src/evaluation/history.py
+# （tools/compare_curves.py 与它共用，两边口径不会漂）
+from src.evaluation.history import (  # noqa: E402
+    CURVE_KEYS,
+    curve,
+    load_history,
+    reconstruct_epoch_offset,
+)
 
 
 def main() -> int:
@@ -146,17 +84,7 @@ def main() -> int:
         "epochs_completed": len(history),
         "epoch_offset_reconstructed": epoch_offset,
         "curves": {
-            key: curve(history, key, epoch_offset or 0)
-            for key in (
-                "train_loss",
-                "train_x0_acc",
-                "goal_hit_rate",
-                "optimal_path_rate",
-                "success_cost_ratio",
-                "loop_rate",
-                "broken_rate",
-                "val_x0_acc",
-            )
+            key: curve(history, key, epoch_offset or 0) for key in CURVE_KEYS
         },
     }
 

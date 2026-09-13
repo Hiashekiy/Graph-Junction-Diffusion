@@ -143,7 +143,13 @@ python tools/compare_runs.py \
     --b outputs/runs/v2_controlled_100ep_flow3/eval_test.json \
     --data data/controlled_test.pkl --label-a "flow_steps=1" --label-b "flow_steps=3"
 
-# 8) 无 torch 也能跑的静态检查
+# 8) 两次训练的曲线按**真实 epoch** 对齐比较（train loss / 验证 goal hit）
+python tools/compare_curves.py \
+    --a outputs/runs/v2_controlled_100ep \
+    --b outputs/runs/v2_controlled_100ep_flow3 \
+    --label-a "flow_steps=1" --label-b "flow_steps=3" --every 5
+
+# 9) 无 torch 也能跑的静态检查
 python tools/semantic_check.py --strict
 ```
 
@@ -506,6 +512,14 @@ checkpoint 到底是几轮训出来的"必须能从 run 目录里读出来，否
       --data data/controlled_test.pkl --baselines \
       --out outputs/runs/v2_controlled_100ep/eval_test.json
   ```
+
+- **曲线对比必须按真实 epoch 对齐**。基线 `v2_controlled_100ep` 的 `history.json`
+  只剩 epoch 21-100 且没有 `epoch` 字段，直接按下标对齐会拿"flow3 的 epoch 5"去比
+  "基线的 epoch 25"。读取 / 校准 / 对齐统一在 `src/evaluation/history.py`
+  （`reconstruct_epoch_offset` 用 `val_records_epoch{N}.json` 的文件名 + goal_hit 值
+  核对，核不过就返回 `None` 并警告），`tools/summarize_run.py` 与
+  `tools/compare_curves.py` 共用它。**因此基线只有 epoch ≥ 21 的训练曲线和
+  epoch ≥ 25 的验证点可用于对比；前 20 个 epoch 已永久丢失。**
 
 ### 推理时的提前退出（"训练 3 轮、推理只跑 1 轮"）
 
