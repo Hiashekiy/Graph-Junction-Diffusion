@@ -155,7 +155,12 @@ python tools/visualize_paths.py \
     --data data/controlled_test.pkl --num 8 --labels \
     --out outputs/figures/paths_flow3_test.png
 
-# 10) 无 torch 也能跑的静态检查
+# 10) 只要路径本身（文本 / JSON，不画图）
+python tools/predict_path.py \
+    --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --index 170
+
+# 11) 无 torch 也能跑的静态检查
 python tools/semantic_check.py --strict
 ```
 
@@ -547,12 +552,41 @@ round 数会直接 `ValueError`（slot embedding 没有那么多行）；评测�
 
 ## 15. 结果可视化（预测路径 vs GT 路径）
 
+两个工具，分工不同：
+
+| 想干什么 | 用哪个 |
+|---|---|
+| 看图（预测路径 vs GT 画在一起） | `tools/visualize_paths.py` |
+| 要路径本身（节点序列、结局、分岔点、机器可读 JSON） | `tools/predict_path.py` |
+
 ```bash
+# 只给一条 query 生成路径（文本）
+python tools/predict_path.py \
+    --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --index 170
+
+# 多条 + 导出 json
+python tools/predict_path.py \
+    --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --index 0,47,170 --out-json paths.json
+
+# 同一个 checkpoint 做推理轮数 ablation / 换采样种子
+python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --index 170 --flow-steps 1
+python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --index 170 --seed 3
+
+# 画图
 python tools/visualize_paths.py \
     --run outputs/runs/v2_controlled_100ep_flow3 \
     --data data/controlled_test.pkl --num 8 --labels \
     --out outputs/figures/paths_flow3_test.png
 ```
+
+`--index` 就是 `dataset[i]` 的位置，也是画图标题里的 `#170`。`predict_path.py` 会打印：
+结局（到达 goal / 断掉 / 走进环）、预测与 GT 的跳数、**预测路径的完整节点序列**、
+与 GT 分岔的位置、GT 路径。注意**推理是随机采样**的（每个扩散步从 posterior 采样），
+所以同一条 query 换 `--seed` 可能走出不同路径；想固定就加 `--deterministic`。
 
 一张图 2 列 4 行，每个面板一条 query：
 
