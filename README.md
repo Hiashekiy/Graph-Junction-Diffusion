@@ -171,6 +171,12 @@ python -m pytest tests -q
 | `test_reverse_chain.py` | 完整 T 步链、forward trajectory（alpha_t）、decoder、训练能降 loss |
 | `test_diffusion.py` | categorical 前向/后验数学（原 V1 测试，全部保留） |
 | `test_grouped_softmax.py` | ragged grouped softmax / segment reduction |
+| `test_config.py` / `test_config_effects.py` | 配置项真的生效（`d_time` / `flow_steps` / `amp` / schedule） |
+| `test_controlled_graph.py` | 生成器难度契约、GT 重算、干扰分支类型 |
+| `test_split_and_relabel.py` | 按 graph 划分（无 topology leakage）、节点重编号 |
+| `test_source_forced.py` | 单出口 source 的被迫段永久 selected |
+| `test_buckets.py` | 评测分桶口径（cost 均值只用成功样本、空桶 NaN、分桶恰好划分全量） |
+| `test_checkpoint_mismatch.py` | checkpoint 与模型结构不匹配时的可读报错（flow_steps 必须一致） |
 
 ## 7. 评测指标
 
