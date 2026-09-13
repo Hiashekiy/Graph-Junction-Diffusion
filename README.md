@@ -149,7 +149,13 @@ python tools/compare_curves.py \
     --b outputs/runs/v2_controlled_100ep_flow3 \
     --label-a "flow_steps=1" --label-b "flow_steps=3" --every 5
 
-# 9) 无 torch 也能跑的静态检查
+# 9) 把预测路径和 GT 路径画在一起（直观看效果，见第 15 节）
+python tools/visualize_paths.py \
+    --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --num 8 --labels \
+    --out outputs/figures/paths_flow3_test.png
+
+# 10) 无 torch 也能跑的静态检查
 python tools/semantic_check.py --strict
 ```
 
@@ -538,3 +544,39 @@ python scripts/evaluate.py \
 约束（`GraphFlowDenoiser.set_inference_flow_steps`）：只能**减少**轮数，超过训练时的
 round 数会直接 `ValueError`（slot embedding 没有那么多行）；评测结果 json 里会写上
 `inference.flow_steps` 与 `inference.trained_flow_steps`，避免事后分不清这是几次前向的结果。
+
+## 15. 结果可视化（预测路径 vs GT 路径）
+
+```bash
+python tools/visualize_paths.py \
+    --run outputs/runs/v2_controlled_100ep_flow3 \
+    --data data/controlled_test.pkl --num 8 --labels \
+    --out outputs/figures/paths_flow3_test.png
+```
+
+一张图 2 列 4 行，每个面板一条 query：
+
+* **橙色粗实线 = 模型预测路径**（断掉/成环时只画到断掉那一段）
+* **蓝色细虚线 = 标注的 GT 最短路径**
+* 绿色星 = start，红色星 = goal，白色小方块 = decision node（模型真正做选择的位置），
+  红 X = **预测与 GT 最后一次相同的位置**（也就是分岔点）
+* 标题给出：难度/模式、GT 跳数/决策数、预测跳数、结局（到达 goal / 断掉 / 走进环），
+  以及"与标注 GT 完全一致 / 同代价但走了另一条等长路 / 比 GT 多几跳"
+
+布局刻意不用 spring：Controlled Junction Graph 就是"骨架 + 挂在骨架上的干扰链"，
+所以把 GT 路径画成一条**水平脊柱**、干扰分支从挂点垂直伸出（`layout_graph`），
+60~120 个节点也一眼能看出模型在哪一跳拐错。布局是确定性的，同一张图每次画出来一样。
+
+选择的样本（`--select`）：
+
+| 取值 | 含义 |
+|---|---|
+| `auto`（默认） | 先跑完整个 pool，再按 (难度, 结局) 分桶，按约 6:4 混着抽成功/失败案例 |
+| `indices` | `--indices 277,47,249` 指定样本下标，便于复现同一组图（也可用来和别的 run 画同一批图对比） |
+| `goal` / `broken` / `loop` / `optimal` | 只看某一类结局 |
+| `--only-difficulty hard` / `--only-mode loop_detour` | 先在某个子集里抽 |
+
+注意两点：`auto` 是**故意偏置**的（约 40% 面板是失败案例），不能拿它估计准确率 ——
+准确率看 pool 那一行（`pool result: goal=...`）或正式评测；另外**图里可能有多条等长的
+最短路**（实测 sample 170 有 2 条），模型走了另一条时标题会写"同代价最优（与标注 GT
+是另一条等长路）"，这不是错。
