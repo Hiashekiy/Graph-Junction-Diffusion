@@ -248,6 +248,13 @@ source 取第一条 branch）**不是** `z_T ~ pi` 的确定性等价物，而�
 
 ## 9. 单步内部的多轮信息交流（第三轮修订）
 
+> **对设计报告 V2.1 的有意偏离**：V2.1 第 10 节写的是"第一版固定为
+> 1 个 Graph Flow Block / Reverse Step"，理由是"完整 reverse chain 本身就提供了
+> 50 轮信息传播"。本修订把每个 step 内部的轮数变成超参 `flow_steps`（默认 3）。
+> V2.1 第 11 节（所有 timestep 共享同一个 `F_theta`）**没有被破坏** —— 轮次之间也
+> 共享同一个 Cell，只多了 `SlotEmbedding(k)` 这一个与 timestep 无关的条件向量。
+> `flow_steps=1` 时与 V2.1 原始设计逐位一致，因此可以把 V2.1 当作 `k=1` 的特例。
+
 第一版每个 reverse step 只跑**一次** `F_theta`。这有两个后果：一是每轮只能看到一跳
 邻居，二是长度为 `L_decision` 的决策链要跨 `T` 个 timestep 才能把信息传完。现在把
 "一轮"改成"一个 step 内部连续 `flow_steps` 轮"，远距离信息可以在同一个 timestep
@@ -279,3 +286,12 @@ H_{t-1} = H_{flow_steps}
 配置项：`model.flow_steps`、`model.flow_slot_embedding`、`model.flow_slot_scale`
 （见 `configs/graph_flow.yaml`）。诊断信息：`DenoiserOutput.flow_steps` 与
 `DenoiserOutput.attn_per_slot`。
+
+推理侧的提前退出：`GraphFlowDenoiser.set_inference_flow_steps(k)`（`k <= 训练时的
+轮数`）与 `scripts/evaluate.py --eval-flow-steps k`。它与"改 config 里的
+`flow_steps`"不是一回事：后者会改变参数集合，导致 checkpoint 结构不匹配。
+
+"多轮是否真的在做事"用 `tools/round_diagnostic.py` 量（每轮
+`||H_k - H_{k-1}|| / ||H_{k-1}||`）。flow_steps=3、epoch 6 的实测值是
+0.4576 / 0.3963 / 0.3112，只跑 1 轮时 `||H_k - H_K||/||H_K|| = 0.6817`
+—— 既不是不动点迭代，也不是"第一轮之后就不动了"。

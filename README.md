@@ -105,6 +105,13 @@ J1 ─ a ─ b ─ J2        branch.nodes = [J1, a, b, J2]
 **第一版刻意不包含**：LapPE、RWSE、DegreeEmbedding、Node-ID Embedding、
 Global Pool、Static Graph Encoder、旧 Routing-State Encoder。
 
+> **与设计报告 V2.1 的唯一一处有意偏离**：报告第 10 节写的是
+> "1 个 Graph Flow Block / Reverse Step"（并把"完整 reverse chain 提供 50 轮信息
+> 传播"当作足够），现在改成 `model.flow_steps` 轮 / step（默认 3）。报告第 11 节的
+> "所有 timestep 共享同一个 `F_theta`" 仍然成立 —— 轮次之间也共享同一个 Cell，
+> 各轮靠 `SlotEmbedding(k)` 注入 AdaLN 条件区分（详见第 14 节）。若把
+> `model.flow_steps` 设为 1，行为与报告 V2.1 的原始设计逐位一致。
+
 ## 5. 使用
 
 ```bash
