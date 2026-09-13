@@ -843,6 +843,59 @@ python tools/multiseed_eval.py \
     --out outputs/runs/v2_controlled_100ep_flow3/multiseed_long_goal_hit.json
 ```
 
+### 长链偏重的训练集已备好（**只造数据，尚未训练**）
+
+训练分布的问题已经量化：现有训练集里 ≥9 决策的样本只有 **119/2400 = 5.0%**
+（6–8 决策占 82%），所以 82% 的算力花在中短链上。按"让长链占 30% 左右"补了数据：
+
+```bash
+# 1) 先另外造一批长链样本（不要动现有 train/val/test）
+python scripts/generate_dataset.py --config configs/graph_flow.yaml \
+    --name controlled_longpool --no-split --min-decisions 9 \
+    --set data.num_samples=1050 --set seed=11
+# 实测：1050 条 / 1050 图，决策数 9–10（均值 9.22）、hops 16–33（均值 22.0），
+#       201,352 次 attempt 才凑出来（接受率 0.52%），耗时 ~10 分钟
+
+# 2) 与现有训练/验证集合并（graph_id 全局重编号 + 固定 seed 打乱）
+python tools/merge_datasets.py --out data/controlled_longmix_train.pkl \
+    --input data/controlled_train.pkl --input data/controlled_longpool.pkl \
+    --limit 900:1 --seed 0
+python tools/merge_datasets.py --out data/controlled_longmix_val.pkl \
+    --input data/controlled_val.pkl --input data/controlled_longpool.pkl \
+    --skip 900:1 --seed 0
+```
+
+| 文件 | queries / graphs | 决策数直方图 | ≥9 占比 |
+|---|---|---|---|
+| `data/controlled_longmix_train.pkl` | 3300 / 3300 | 5:310, 6:1037, 7:669, 8:265, **9:807, 10:212** | **30.9%** |
+| `data/controlled_longmix_val.pkl` | 450 / 450 | 5:38, 6:131, 7:85, 8:28, **9:128, 10:40** | **37.3%** |
+| （原）`data/controlled_train.pkl` | 2400 / 2400 | 5:310, 6:1037, 7:669, 8:265, 9:101, 10:18 | 5.0% |
+
+**无泄漏**（按图结构指纹即排序边集合的哈希核对）：longmix_train ↔ longmix_val = 0、
+longmix_train ↔ controlled_test = 0、longmix_train ↔ controlled_long = 0，
+longmix_val ↔ 两个 test 也都是 0。原来三个 split 与两个 test 集**一个字节都没动**，
+所以前面所有结论继续有效。
+
+**将来要（用户批准后）训练时**：
+
+```bash
+python scripts/train.py --config configs/graph_flow.yaml \
+    --name v2_longmix_100ep \
+    --data data/controlled_longmix_train.pkl \
+    --val-data data/controlled_longmix_val.pkl
+```
+
+想验证的两件事（先记下来，免得事后凑解释）：
+1. 在 `controlled_long.pkl`（400 条长链测试集）上，新模型应该明显高于现在 flow1 的 0.601
+   / flow3 的 0.669 —— 如果没提高，说明瓶颈不是"没数据"而是别的（优化/容量/表示）；
+2. **flow1 与 flow3 在长链上的差距可能会缩小**：多轮交流现在的价值有一部分来自
+   "长链样本太稀有、学不好"，一旦长链被训够，单轮模型可能自己就能覆盖，多轮的边际收益
+   会下降。这是个可证伪的预测，下次直接对比。
+
+注意长链补充样本的构成仍有偏：难度标签是 medium 86% / hard 14%（自然采样），
+结构模式 branch_heavy 89% / long_chain 5% / loop_detour 6% —— 这是各模式接受率差异
+造成的（见第 11 节），不是刻意设计。
+
 复现全部结论：
 
 ```bash
