@@ -8,7 +8,8 @@
         --data data/controlled_test.pkl
 
 `--data` 可选：给了就按难度 / 结构模式 / source / gt_decisions 分组比较
-（分组口径与 ``tools/breakdown_eval.py`` 完全一致），不给就只比整体指标。
+（分桶口径来自 ``src/evaluation/buckets.py``，与 tools/breakdown_eval.py 共用），
+不给就只比整体指标。
 
 只读工具：不写任何文件，也不加载模型，因此可以在训练还在跑的时候安全使用。
 """
@@ -17,61 +18,20 @@ from __future__ import annotations
 
 import argparse
 import json
-import statistics
 import sys
-from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-METRICS = (
-    "goal_hit_rate",
-    "optimal_path_rate",
-    "success_cost_ratio",
-    "loop_rate",
-    "broken_rate",
-)
+from src.evaluation.buckets import METRICS, bucket_indices, summarize_records  # noqa: E402
 
 
 def load_eval(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         return json.load(handle)
-
-
-def summarize(records: List[Dict[str, Any]]) -> Dict[str, float]:
-    total = len(records)
-    if total == 0:
-        return {key: float("nan") for key in METRICS}
-    hits = [r for r in records if r["goal_hit"]]
-    ratios = [
-        r["cost_ratio"] for r in hits if r["cost_ratio"] not in (None, float("inf"))
-    ]
-    return {
-        "goal_hit_rate": len(hits) / total,
-        "optimal_path_rate": sum(1 for r in records if r["optimal"]) / total,
-        "success_cost_ratio": statistics.fmean(ratios) if ratios else float("nan"),
-        "loop_rate": sum(1 for r in records if r["status"] == "loop") / total,
-        "broken_rate": sum(1 for r in records if r["status"] == "broken") / total,
-    }
-
-
-def buckets(dataset) -> Dict[str, List[int]]:
-    """返回 bucket 名 -> 记录下标（口径同 breakdown_eval.py）。"""
-    groups: Dict[str, List[int]] = defaultdict(list)
-    for index, sample in enumerate(dataset):
-        groups["ALL"].append(index)
-        groups[f"difficulty={sample.meta.get('difficulty', 'n/a')}"].append(index)
-        groups[f"mode={sample.meta.get('mode', 'n/a')}"].append(index)
-        groups[
-            "source=" + ("forced" if sample.segments.source_forced_edge_ids else "decision")
-        ].append(index)
-        low = sample.num_decisions // 3 * 3
-        groups[f"gt_decisions={low}-{low + 2}"].append(index)
-    return groups
-
 
 def fmt(value: float) -> str:
     if value != value:  # NaN
@@ -86,6 +46,7 @@ def main() -> int:
     parser.add_argument("--data", default=None, help="same test split, for bucketing")
     parser.add_argument("--label-a", default="A")
     parser.add_argument("--label-b", default="B")
+    parser.add_argument("--out", default=None, help="可选：把逐 bucket 结果写成 json")
     args = parser.parse_args()
 
     payload_a = load_eval(args.a)
@@ -122,7 +83,7 @@ def main() -> int:
             "pass the same test split that produced both eval jsons"
         )
 
-    groups = buckets(dataset)
+    groups = bucket_indices(dataset)
     header = (
         f"{'bucket':<28}{'n':>5}  "
         f"{'goal_hit A':>10}{'B':>8}{'delta':>8}   "
@@ -135,8 +96,8 @@ def main() -> int:
     rows: List[Dict[str, Any]] = []
     for name in sorted(groups, key=lambda key: (key != "ALL", key)):
         index = groups[name]
-        stats_a = summarize([records_a[i] for i in index])
-        stats_b = summarize([records_b[i] for i in index])
+        stats_a = summarize_records([records_a[i] for i in index])
+        stats_b = summarize_records([records_b[i] for i in index])
         row = {"bucket": name, "n": len(index)}
         for key in METRICS:
             row[f"{key}_a"] = stats_a[key]
@@ -152,6 +113,19 @@ def main() -> int:
             f"{fmt(stats_a['success_cost_ratio']):>9}{fmt(stats_b['success_cost_ratio']):>8}"
             f"{stats_b['success_cost_ratio'] - stats_a['success_cost_ratio']:>+8.3f}"
         )
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "a": {"path": args.a, "label": args.label_a},
+                    "b": {"path": args.b, "label": args.label_b},
+                    "buckets": rows,
+                },
+                handle,
+                indent=1,
+                ensure_ascii=False,
+            )
+        print(f"\nwritten: {args.out}")
     return 0
 
 
