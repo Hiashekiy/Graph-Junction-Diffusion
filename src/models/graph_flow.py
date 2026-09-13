@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
-
 import torch
 from torch import Tensor, nn
 
@@ -91,14 +90,22 @@ class GraphFlowBlock(nn.Module):
         tau_t: Tensor,               # [B, d] 每个图当前 timestep 的 embedding
         fixed_mask: Tensor,          # [N] bool, Start/Goal
         graph_node_ptr: Tensor,      # [B+1]
+        slot_tau: Optional[Tensor] = None,   # [B, d] 本轮（step 内第几轮）的 embedding
     ) -> Dict[str, Any]:
+        """一次 Graph Flow：``H_next = F_theta(H_t, E_t, tau_t [+ slot_tau])``。
+
+        ``slot_tau`` 是"同一个 reverse step 内部第几轮交流"的 embedding。多轮交流时
+        每轮传入不同的 ``slot_tau``，这样即使是同一个 Cell、同一份 ``E_t``，各轮也
+        不会退化成"把同一个映射反复应用求不动点"。
+        """
         if edge_index.numel():
             src, dst = edge_index[0], edge_index[1]
         else:
             src = dst = torch.zeros(0, dtype=torch.long, device=H_t.device)
 
         # ---- timestep conditioning (AdaLN / FiLM) ---------------------
-        gamma, beta = self.time_conditioner(tau_t)                 # [B, d]
+        condition = tau_t if slot_tau is None else tau_t + slot_tau
+        gamma, beta = self.time_conditioner(condition)             # [B, d]
         gamma = broadcast_time(gamma, graph_node_ptr)              # [N, d]
         beta = broadcast_time(beta, graph_node_ptr)
         H_hat = (1.0 + gamma) * self.node_norm(H_t) + beta
@@ -140,3 +147,54 @@ class GraphFlowBlock(nn.Module):
             "gamma": gamma,
             "beta": beta,
         }
+
+    # ------------------------------------------------------------------
+    def forward_multi(
+        self,
+        H_t: Tensor,
+        edge_index: Tensor,
+        edge_feat: Tensor,
+        tau_t: Tensor,
+        fixed_mask: Tensor,
+        graph_node_ptr: Tensor,
+        flow_steps: int = 1,
+        slot_embedding: Optional[nn.Embedding] = None,
+        slot_scale: float = 1.0,
+    ) -> Dict[str, Any]:
+        """在一个 reverse step 内部连续做 ``flow_steps`` 轮图信息交流。
+
+        ``H`` 在轮与轮之间**继续累积**（每轮都是 ``H_k = F(H_{k-1})``），所以多轮
+        不等于把同一个映射重复作用于同一输入。第 k 轮额外拿到 ``slot_embedding(k)``
+        作为条件，用来区分"这是第几轮"。
+
+        返回最后一轮的 ``H_next`` 以及每一轮的 attention（便于诊断）。
+        """
+        steps = max(1, int(flow_steps))
+        H = H_t
+        attentions = []
+        out: Dict[str, Any] = {}
+        for step in range(steps):
+            slot_tau = None
+            if slot_embedding is not None and steps > 1:
+                index = torch.full(
+                    (tau_t.shape[0],),
+                    min(step, slot_embedding.num_embeddings - 1),
+                    dtype=torch.long,
+                    device=tau_t.device,
+                )
+                slot_tau = slot_embedding(index) * float(slot_scale)
+            out = self.forward(
+                H_t=H,
+                edge_index=edge_index,
+                edge_feat=edge_feat,
+                tau_t=tau_t,
+                fixed_mask=fixed_mask,
+                graph_node_ptr=graph_node_ptr,
+                slot_tau=slot_tau,
+            )
+            H = out["H_next"]
+            attentions.append(out["attn"])
+        out["H_next"] = H
+        out["attn_per_slot"] = attentions
+        out["flow_steps"] = steps
+        return out

@@ -100,6 +100,41 @@ def test_real_config_time_section_is_wired():
     )
 
 
+def test_flow_steps_is_wired_from_config(manual_batch):
+    """model.flow_steps 必须真的改变每个 reverse step 内部的交流轮数。"""
+    config = Config(
+        {
+            "model": {
+                "d_model": 16,
+                "ffn_hidden": 32,
+                "flow_steps": 4,
+                "flow_slot_embedding": True,
+            }
+        }
+    )
+    kwargs = model_kwargs(config)
+    assert kwargs["flow_steps"] == 4
+    assert kwargs["slot_embedding"] is True
+
+    model = GraphFlowDenoiser(**kwargs)
+    assert model.flow_steps == 4
+    out = model.step(
+        manual_batch, model.init_nodes(manual_batch), manual_batch.target_candidate, 5
+    )
+    assert out.flow_steps == 4
+    assert len(out.attn_per_slot) == 4
+
+
+def test_real_config_flow_steps_is_wired():
+    config = load_config(CONFIG_PATH)
+    kwargs = model_kwargs(config)
+    assert kwargs["flow_steps"] == int(config.get("model.flow_steps", 1))
+    assert kwargs["flow_steps"] >= 1
+    assert kwargs["slot_embedding"] == bool(
+        config.get("model.flow_slot_embedding", True)
+    )
+
+
 # ---------------------------------------------------------------------------
 # AMP（P2-2）
 # ---------------------------------------------------------------------------

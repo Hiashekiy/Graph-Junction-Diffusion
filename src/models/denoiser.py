@@ -36,6 +36,8 @@ class DenoiserOutput:
     candidate_prob: Tensor         # [C]
     tau_graph: Optional[Tensor] = None   # [B, d]
     attn: Optional[Tensor] = None
+    attn_per_slot: Optional[list] = None  # 一个 reverse step 内每轮的 attention
+    flow_steps: int = 1
 
 
 class GraphFlowDenoiser(nn.Module):
@@ -53,11 +55,16 @@ class GraphFlowDenoiser(nn.Module):
         d_time: Optional[int] = None,
         time_encoding: str = "sinusoidal",
         time_conditioning: str = "adaln",
+        flow_steps: int = 1,
+        slot_embedding: bool = True,
+        slot_scale: float = 1.0,
     ):
         super().__init__()
         self.d_model = int(d_model)
         self.num_node_types = int(num_node_types)
         self.num_edge_states = int(num_edge_states)
+        self.flow_steps = max(1, int(flow_steps))
+        self.slot_scale = float(slot_scale)
 
         # P2-2：这两个配置项现在就真的控制行为，选到未实现的取值会立刻报错，
         # 而不是被静默忽略。
@@ -86,6 +93,22 @@ class GraphFlowDenoiser(nn.Module):
         self.branch_scorer = BranchScorer(
             d_model=self.d_model, hidden_dim=branch_hidden, dropout=dropout
         )
+
+        # 一个 reverse step 内部要做多轮图信息交流时，用"第几轮"的 embedding 作为
+        # 额外条件：同一个 Cell、同一份 E_t 反复作用才不至于退化成求不动点。
+        # 它是每个轮次一个向量（与 timestep 无关），所以参数量只增加 flow_steps * d。
+        if self.flow_steps > 1 and slot_embedding:
+            self.flow_slot_embedding: Optional[nn.Embedding] = nn.Embedding(
+                self.flow_steps, self.d_model
+            )
+            nn.init.normal_(self.flow_slot_embedding.weight, std=0.02)
+        else:
+            self.flow_slot_embedding = None
+
+    @property
+    def flow_steps_label(self) -> str:
+        shared = "shared-cell" + ("+slot" if self.flow_slot_embedding is not None else "")
+        return f"{self.flow_steps} round(s) per reverse step ({shared})"
 
     # ------------------------------------------------------------------
     def init_nodes(self, batch) -> Tensor:
@@ -116,13 +139,19 @@ class GraphFlowDenoiser(nn.Module):
 
         edge_feat_t = self.edge_state_encoder(batch, z_t)
 
-        flow_out = self.graph_flow(
+        # 一个 reverse step 内部做 flow_steps 轮图信息交流（默认 1 轮 = 旧行为）。
+        # 轮与轮之间 H 继续累积，且每轮带上"第几轮"的 embedding，避免同一个 Cell
+        # 反复作用于同一输入退化成求不动点。
+        flow_out = self.graph_flow.forward_multi(
             H_t=H_t,
             edge_index=batch.edge_index,
             edge_feat=edge_feat_t,
             tau_t=tau_graph,
             fixed_mask=batch.start_goal_mask,
             graph_node_ptr=batch.graph_node_ptr,
+            flow_steps=self.flow_steps,
+            slot_embedding=self.flow_slot_embedding,
+            slot_scale=self.slot_scale,
         )
         H_next = flow_out["H_next"]
 
@@ -135,6 +164,8 @@ class GraphFlowDenoiser(nn.Module):
             candidate_prob=scored["candidate_prob"],
             tau_graph=tau_graph,
             attn=flow_out["attn"],
+            attn_per_slot=flow_out.get("attn_per_slot"),
+            flow_steps=int(flow_out.get("flow_steps", 1)),
         )
 
     # 兼容旧调用写法：forward == step

@@ -92,7 +92,7 @@ J1 ─ a ─ b ─ J2        branch.nodes = [J1, a, b, J2]
 | Start/Goal 只出不进 | `valid_msg = ~fixed_mask[dst]`，并从聚合里剔除 |
 | `H~ = LN(H + W_O m)`，再 `LN(H~ + FFN(H~))` | `graph_flow.py` residual 更新 |
 | Start/Goal 状态 clamp | `torch.where(fixed_mask, H_t, H_new)` |
-| 一步 reverse step 只跑一次 Flow | `denoiser.py::step` 只调一次 `graph_flow` |
+| 一步 reverse step 内部的图信息交流轮数 | `denoiser.py::step` 调 `graph_flow.forward_multi`，轮数 = `model.flow_steps` |
 | 所有 timestep 共享 `F_theta` | 只有一个 module 实例，参数与 T 无关 |
 | Branch Mean Pool（排除 owner） | `branch_scorer.py::branch_mean_pool` |
 | `[h_i, h_bar_ik, tau_t] -> 1 logit` | `BranchScorer.branch_mlp`（3d -> 2d -> 1） |
@@ -326,3 +326,55 @@ python scripts/evaluate.py --config configs/graph_flow.yaml \
     --data data/controlled_test.pkl --baselines \
     --out outputs/runs/v2_controlled_100ep/eval_test.json
 ```
+
+### 第一版单轮结果（flow_steps = 1，作为对照基线）
+
+`best.pt` 取在第 80 epoch。test 300 条查询：goal_hit 0.893、optimal 0.733、
+cost_ratio 1.016、loop 0.003、broken 0.103，单条 22 ms。按 decision 条数拆分：
+3–5 = 1.000、6–8 = 0.893、9–11 = 0.545 —— 误差沿决策链复利放大，每步约 97%。
+
+## 14. 单个 reverse step 内部的多轮图信息交流（flow_steps）
+
+**动机**：第一版每个 reverse step 只做**一轮**信息交流，即
+`H_{t-1} = F_theta(H_t, E_t, tau_t)` 只算一次。这意味着一条长度为 L_decision 的决策链
+要跨越 T = 50 个 timestep 才能把信息传完，而且每轮只能看一跳。把"一轮"改成"一个
+step 内部连续交流 k 轮"可以让远距离信息在同一个 timestep 内多次传播。
+
+配置（`configs/graph_flow.yaml`）：
+
+```yaml
+model:
+  flow_steps: 3              # 每个 reverse step 内部的交流轮数（1 = 旧行为）
+  flow_slot_embedding: true  # 每轮一个"第几轮"的 embedding
+  flow_slot_scale: 1.0
+```
+
+实现（`models/graph_flow.py::GraphFlowBlock.forward_multi`）：
+
+```text
+H_0 = H_t
+for k in 0 .. flow_steps-1:
+    H_{k+1} = F_theta(H_k, E_t, tau_t + SlotEmbedding(k))
+H_{t-1} = H_{flow_steps}
+```
+
+四个必须说明的点：
+
+1. **不是"重复作用同一个映射"**。如果每轮条件完全相同，`F` 反复作用于同一输入只会
+   收敛到不动点，多轮几乎等于白算。所以每轮额外加一个**只跟轮次有关**的
+   `SlotEmbedding(k)`（与 timestep 无关），加在 `tau_t` 上一起进 AdaLN 条件器。
+2. **仍然只有一个 Cell 实例**。`F_theta` 在所有 timestep、所有轮次上共享参数；新增
+   的只有 `nn.Embedding(flow_steps, d_model)`。`d_model=128, flow_steps=3` 时
+   是 3 × 128 = 384 个参数（相对 348K 约 0.1%）。
+3. **状态在轮之间继续累积**（`H_k` 而不是每轮从 `H_t` 重启），Start/Goal 每轮都被
+   clamp 回输入，attention 仍然是"按 dst 分组"的 softmax。
+4. **`flow_steps=1` 与旧实现逐位一致**（`forward_multi` 退回单次 `forward`），
+   所以旧 checkpoint 与 `outputs/runs/v2_controlled_100ep` 的一切结论都仍然可复现。
+
+代价：每个 reverse step 的计算量约为原来的 `flow_steps` 倍。`flow_steps=3` 时实测
+**67 s/epoch**（batch 48、T=50、50 步；GPU 利用率不高，所以实际只比单轮的 43 s 慢 1.55 倍），
+100 epoch ≈ **1.9 小时**；训练用的是独立 run 名 `v2_controlled_100ep_flow3`，不会覆盖单轮基线。
+
+诊断：`DenoiserOutput.attn_per_slot`（长度 = `flow_steps`）与 `DenoiserOutput.flow_steps`
+可用于确认多轮真的发生了（`tests/test_graph_flow.py` 里逐条断言了"多轮 ≠ 不动点迭代"、
+"每轮 Start/Goal 都被 clamp"、"梯度能回到每一轮的 slot embedding"）。

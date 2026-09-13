@@ -42,6 +42,9 @@ model:
   edge_states: 2             # unselected / selected
   ffn_hidden: 256
   dropout: 0.0
+  flow_steps: 3              # 一个 reverse step 内部做几轮图信息交流（1 = 旧行为）
+  flow_slot_embedding: true  # 每轮加一个"第几轮"的 embedding（否则退化成求不动点）
+  flow_slot_scale: 1.0
 
 time:
   encoding: sinusoidal       # 目前只实现 sinusoidal（其它取值会报错）
@@ -81,4 +84,4 @@ evaluation:
 paths:
   data_dir: data
   output_dir: outputs/runs
-  run_name: v2_controlled_100ep
+  run_name: v2_controlled_100ep_flow3

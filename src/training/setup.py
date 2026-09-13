@@ -61,6 +61,10 @@ def model_kwargs(config: Config) -> Dict[str, Any]:
         "d_time": int(time_cfg.get("d_time", model_cfg.get("d_model", 128))),
         "time_encoding": str(time_cfg.get("encoding", "sinusoidal")),
         "time_conditioning": str(time_cfg.get("conditioning", "adaln")),
+        # 一个 reverse step 内部的图信息交流轮数（1 = 旧行为）。
+        "flow_steps": int(model_cfg.get("flow_steps", 1)),
+        "slot_embedding": bool(model_cfg.get("flow_slot_embedding", True)),
+        "slot_scale": float(model_cfg.get("flow_slot_scale", 1.0)),
     }
 
 

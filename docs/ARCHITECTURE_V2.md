@@ -68,7 +68,7 @@
      tau_t [B,d] -> TimeConditioner -> (gamma,beta) -> AdaLN(LN(H_t))
               |
               v
-        GraphFlowBlock F_theta(H_t, E_t, tau_t)
+        GraphFlowBlock F_theta(H_t, E_t, tau_t)   x flow_steps 轮（见第 9 节）
               |   Q = W_Q h_hat[dst]
               |   K = W_K edge_feat
               |   V = W_V h_hat[src]
@@ -245,3 +245,37 @@ source 取第一条 branch）**不是** `z_T ~ pi` 的确定性等价物，而�
 `max_steps is None or max_steps == diffusion.T`，其它值直接 `ValueError`。
 训练侧的 `recurrent_reverse_loss(max_steps=k)` 是**另一件事**（截断 BPTT 的那条
 前向轨迹长度），不受这条限制。
+
+## 9. 单步内部的多轮信息交流（第三轮修订）
+
+第一版每个 reverse step 只跑**一次** `F_theta`。这有两个后果：一是每轮只能看到一跳
+邻居，二是长度为 `L_decision` 的决策链要跨 `T` 个 timestep 才能把信息传完。现在把
+"一轮"改成"一个 step 内部连续 `flow_steps` 轮"，远距离信息可以在同一个 timestep
+内多次传播。
+
+```
+H_0 = H_t
+for k in 0 .. flow_steps-1:
+    H_{k+1} = F_theta(H_k, E_t, tau_t + SlotEmbedding(k))
+H_{t-1} = H_{flow_steps}
+```
+
+要点：
+
+1. **每轮条件必须不同**。若各轮条件完全一样，`F` 反复作用于同一输入只会收敛到
+   不动点，"多轮"退化成白算。所以每轮加一个**只与轮次有关、与 timestep 无关**的
+   `SlotEmbedding(k)`，加在 `tau_t` 上后一起进入 `TimeConditioner`（AdaLN）。
+2. **参数仍然只有一份 Cell**。`F_theta` 在所有 timestep、所有轮次间共享；新增的只有
+   `nn.Embedding(flow_steps, d_model)`（`d_model=128, flow_steps=3` 时 384 个参数）。
+3. **状态跨轮累积**：第 k+1 轮读的是第 k 轮写出的 `H`，不是重新从 `H_t` 开始。
+   每一轮都执行 `H = where(fixed_mask, H, H_new)`，所以 Start/Goal 在任意轮次都被
+   clamp 回输入；attention 仍是按 dst 分组的 softmax（含"Start/Goal 只出不进"）。
+4. **向后兼容**：`flow_steps=1` 时 `forward_multi` 等价于原来的单次 `forward`
+   （不构造 slot embedding），旧 checkpoint 与旧实验结论照旧可复现。
+5. **BPTT 深度**：`flow_steps` 轮都参与反传（不 detach），因此单个 reverse step 的
+   有效深度是 `flow_steps x cell_depth`；`training.max_bptt_steps` 的语义不变
+   （它管的是时间轴上的截断，不是轮次）。
+
+配置项：`model.flow_steps`、`model.flow_slot_embedding`、`model.flow_slot_scale`
+（见 `configs/graph_flow.yaml`）。诊断信息：`DenoiserOutput.flow_steps` 与
+`DenoiserOutput.attn_per_slot`。

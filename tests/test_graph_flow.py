@@ -225,3 +225,118 @@ def test_shares_one_cell_across_timesteps(manual_batch):
     for t in (1, 17, 50):
         out = model.step(manual_batch, H_t, z, t)
         assert out.H_next.shape == H_t.shape
+
+
+# ---------------------------------------------------------------------------
+# 一个 reverse step 内部的多轮图信息交流（forward_multi）
+# ---------------------------------------------------------------------------
+def _multi_kwargs(batch):
+    H_t, edge_feat, tau = _inputs(batch)
+    return dict(
+        H_t=H_t,
+        edge_index=batch.edge_index,
+        edge_feat=edge_feat,
+        tau_t=tau,
+        fixed_mask=batch.start_goal_mask,
+        graph_node_ptr=batch.graph_node_ptr,
+    )
+
+
+def test_forward_multi_single_step_matches_forward(manual_batch):
+    """flow_steps=1 必须与旧的单轮 forward 完全一致（向后兼容）。"""
+    block = GraphFlowBlock(d_model=16, ffn_hidden=32)
+    kwargs = _multi_kwargs(manual_batch)
+    single = block(**kwargs)
+    multi = block.forward_multi(**kwargs, flow_steps=1)
+    assert torch.allclose(single["H_next"], multi["H_next"])
+    assert multi["flow_steps"] == 1
+    assert len(multi["attn_per_slot"]) == 1
+
+
+def test_forward_multi_reports_each_round(manual_batch):
+    block = GraphFlowBlock(d_model=16, ffn_hidden=32)
+    kwargs = _multi_kwargs(manual_batch)
+    out = block.forward_multi(**kwargs, flow_steps=3)
+    assert out["flow_steps"] == 3
+    assert len(out["attn_per_slot"]) == 3
+    assert out["H_next"].shape == kwargs["H_t"].shape
+    assert torch.isfinite(out["H_next"]).all()
+
+
+def test_forward_multi_is_not_a_fixed_point_iteration(manual_batch):
+    """多轮不等于"把同一个映射反复作用于同一输入"：每轮条件不同，输出也不同。"""
+    import torch.nn as nn
+
+    block = GraphFlowBlock(d_model=16, ffn_hidden=32)
+    kwargs = _multi_kwargs(manual_batch)
+    slot = nn.Embedding(4, 16)
+    nn.init.normal_(slot.weight, std=0.5)
+
+    plain = block.forward_multi(**kwargs, flow_steps=3)
+    slotted = block.forward_multi(**kwargs, flow_steps=3, slot_embedding=slot)
+    assert not torch.allclose(plain["H_next"], slotted["H_next"])
+    # 逐轮之间也真的在变（不是第一轮之后就不动了）
+    assert not torch.allclose(
+        slotted["attn_per_slot"][0], slotted["attn_per_slot"][1]
+    )
+
+
+def test_forward_multi_clamps_start_and_goal_every_round(manual_batch):
+    block = GraphFlowBlock(d_model=16, ffn_hidden=32)
+    kwargs = _multi_kwargs(manual_batch)
+    out = block.forward_multi(**kwargs, flow_steps=4)
+    assert torch.allclose(out["H_next"][manual_batch.starts], kwargs["H_t"][manual_batch.starts])
+    assert torch.allclose(out["H_next"][manual_batch.goals], kwargs["H_t"][manual_batch.goals])
+
+
+def test_forward_multi_backward_reaches_every_round(manual_batch):
+    import torch.nn as nn
+
+    block = GraphFlowBlock(d_model=16, ffn_hidden=32)
+    H_t, edge_feat, tau = _inputs(manual_batch)
+    H_t = H_t.clone().requires_grad_(True)
+    slot = nn.Embedding(3, 16)
+    out = block.forward_multi(
+        H_t=H_t,
+        edge_index=manual_batch.edge_index,
+        edge_feat=edge_feat,
+        tau_t=tau,
+        fixed_mask=manual_batch.start_goal_mask,
+        graph_node_ptr=manual_batch.graph_node_ptr,
+        flow_steps=3,
+        slot_embedding=slot,
+    )
+    out["H_next"].sum().backward()
+    assert H_t.grad is not None and torch.isfinite(H_t.grad).all()
+    assert slot.weight.grad is not None and torch.isfinite(slot.weight.grad).all()
+
+
+def test_denoiser_flow_steps_is_configurable(manual_batch):
+    """denoiser 的 flow_steps 真的生效：轮数写进输出，且额外带了 slot embedding 参数。"""
+    from src.models.denoiser import GraphFlowDenoiser
+
+    one = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=1)
+    three = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=3)
+    assert one.flow_slot_embedding is None
+    assert three.flow_slot_embedding is not None
+    assert three.num_parameters() > one.num_parameters()
+    expected = 3 * 16
+    assert three.num_parameters() - one.num_parameters() == expected
+
+    H_t = three.init_nodes(manual_batch)
+    out = three.step(manual_batch, H_t, manual_batch.target_candidate, 10)
+    assert out.flow_steps == 3
+    assert len(out.attn_per_slot) == 3
+
+
+def test_denoiser_flow_steps_changes_the_update(manual_batch):
+    from src.models.denoiser import GraphFlowDenoiser
+
+    one = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=1)
+    three = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=3)
+    three.load_state_dict(one.state_dict(), strict=False)
+    z = manual_batch.target_candidate
+    H_t = one.init_nodes(manual_batch)
+    out_one = one.step(manual_batch, H_t, z, 10)
+    out_three = three.step(manual_batch, H_t, z, 10)
+    assert not torch.allclose(out_one.H_next, out_three.H_next)
