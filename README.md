@@ -126,7 +126,17 @@ python scripts/evaluate.py --config configs/graph_flow.yaml \
     --checkpoint outputs/runs/graph_flow/best.pt \
     --data data/er_256_test.pkl --baselines --out outputs/runs/graph_flow/eval.json
 
-# 6) 无 torch 也能跑的静态检查
+# 6) 按难度 / 结构模式 / 决策数拆分测试结果
+python tools/breakdown_eval.py outputs/runs/graph_flow/eval.json \
+    --data data/er_256_test.pkl
+
+# 7) 两次评测并排比较（逐 bucket 给 A / B / delta；不加载模型，训练中也能跑）
+python tools/compare_runs.py \
+    --a outputs/runs/v2_controlled_100ep/eval_test.json \
+    --b outputs/runs/v2_controlled_100ep_flow3/eval_test.json \
+    --data data/controlled_test.pkl --label-a "flow_steps=1" --label-b "flow_steps=3"
+
+# 8) 无 torch 也能跑的静态检查
 python tools/semantic_check.py --strict
 ```
 
@@ -293,6 +303,41 @@ NULL 比例、source-as-decision 比例、三类干扰分支占比、难度与�
 | source-forced / source-as-decision | 56% / 44%（目标 70/30，单出口更容易通过过滤） |
 | 干扰分支比例 | dead-end 70% / detour 23% / loop 7% |
 | topology leakage | **无**（三个 split 的 graph_id 两两不相交） |
+| 可复现性 | 同 seed 重跑得到完全相同的 `attempts=28462 / accepted=3000` |
+
+### 目标 mix 与实测 mix 不一致（重要）
+
+`configs/graph_flow.yaml` 里的 `difficulty_mix` / `structure_mix` 是**每次 attempt 重新
+采样**的（`generate_controlled_junction_graph` 内部采样，`build_controlled_dataset`
+的外层循环只判断 `accepted`）。被留下的样本带着"成功那次 attempt"的标签，于是
+**各标签的接受率不同会重新加权 mix**。实测（把生成器包一层计数器、用 seed=0 跑完整
+3000 条；attempts/accepted 与 `data/controlled_summary.json` 完全一致）：
+
+| 标签 | 采样占比 | 接受率 | 实测占比 | 目标占比 |
+|---|---|---|---|---|
+| difficulty=easy | 19.9% | 0.148 | **28.0%** | 20% |
+| difficulty=medium | 60.3% | 0.112 | 64.4% | 60% |
+| difficulty=hard | 19.8% | **0.041** | **7.7%** | 20% |
+| mode=branch_heavy | 40.2% | 0.202 | **77.1%** | 40% |
+| mode=long_chain | 39.3% | **0.036** | **13.4%** | 40% |
+| mode=loop_detour | 20.5% | 0.049 | **9.5%** | 20% |
+
+采样本身没问题（20/60/20 与 40/40/20 都打得很准），偏差全部来自接受率：
+
+- **hard 最难通过**（0.041）：hard 要求 `gt_decisions ∈ (6,9)`，但大量 attempt 实际只
+  走出 3~4 个 decision（`gt_decisions=3/4 outside (5, 12)` 是第一大拒绝原因），
+  hop 预算与 K 的耦合又限制了 K 的上沿。
+- **long_chain 最难通过**（0.036）：它的 `candidates_per_decision=(2,3)` 让每个 junction
+  的出口更少，更容易跌破 `gt_decisions >= 5` 的下限。
+- **branch_heavy 最容易通过**（0.202），所以它从 40% 涨到 77%。
+
+**对评测的直接影响**：test split 只有 300 条，其中 hard 只有 21 条、`gt_decisions=9-11`
+只有 11 条（见第 14 节的逐 bucket 对比）。这两个 bucket 上的 delta 噪声约 ±0.1，
+下结论时必须看绝对条数而不是只看比例。
+
+**如果要"真正的 20/60/20"**：需要把难度/模式的采样提到重试循环之外（一个输出样本固定
+一个标签，只重试图结构），并给每个标签单独的 attempt 上限与兜底。这会改变数据集，
+所以要重新生成 + 重新训练，目前**没有做**。
 
 ## 12. 实现生成器时踩到的坑（新增）
 
