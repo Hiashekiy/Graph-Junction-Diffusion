@@ -109,8 +109,15 @@ def main() -> int:
                 print(f"{epoch:>6}  {value_a:>14.4f}  {value_b:>14.4f}  {value_b - value_a:>+10.4f}")
         payload["curves"][key] = rows
         if len(pairs) >= 2:
-            mean_delta = sum(row["delta"] for row in rows) / len(rows)
-            print(f"  mean delta ({args.label_b} - {args.label_a}) over common epochs: {mean_delta:+.4f}")
+            mean_a = sum(row["a"] for row in rows) / len(rows)
+            mean_b = sum(row["b"] for row in rows) / len(rows)
+            # 单点比对噪声很大（验证集只有 300 条，goal_hit 的标准差约 ±0.03），
+            # 所以同时给出共同 epoch 上的窗口均值：这才是能下结论的量。
+            print(
+                f"  windowed mean over {len(rows)} common epochs: "
+                f"{args.label_a}={mean_a:.4f}  {args.label_b}={mean_b:.4f}  "
+                f"delta={mean_b - mean_a:+.4f}"
+            )
 
     if args.out:
         import json
