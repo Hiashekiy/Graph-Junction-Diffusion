@@ -1,0 +1,12 @@
+# Windows 批处理必须是 CRLF：cmd.exe 逐行解析 .bat，LF 结尾的文件里非 ASCII 的
+# REM 注释会被错误地重新切分并当成命令执行（实测会打印
+# "'与计时必须在**没有别的任务占' is not recognized as an internal or external command"）。
+# 所以 .bat 强制 CRLF；源码/文档统一 LF，避免 diff 噪声。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.py text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf

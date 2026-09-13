@@ -1,11 +1,18 @@
 @echo off
-REM 训练结束后的评测流水线：test 集评测 -> 曲线/汇总 -> 分桶 -> 配对比较 -> 推理轮数 ablation
+REM Post-training evaluation pipeline:
+REM   test eval -> curve summary -> bucket breakdown -> paired tests -> validation paired -> ablation
 REM
-REM 用法：cmd /c tools\postprocess.bat [run_name] [baseline_run_name]
-REM   默认 run_name=v2_controlled_100ep_flow3、baseline_run_name=v2_controlled_100ep
+REM Usage: cmd /c tools\postprocess.bat [run_name] [baseline_run_name]
+REM   defaults: run_name=v2_controlled_100ep_flow3, baseline_run_name=v2_controlled_100ep
 REM
-REM 注意：ablation 与计时必须在**没有别的任务占 GPU** 的时候跑，否则 sec/query 会被
-REM 拖慢一倍（实测 0.022 -> 0.042）。所以这个脚本应当等训练进程结束后再执行。
+REM NOTE (why comments here are ASCII only): cmd.exe parses .bat files line by line and
+REM mishandles non-ASCII text in REM lines when the file has LF line endings -- the lines
+REM get re-split and cmd tries to execute fragments of them. Keep this file ASCII and keep
+REM it checked out with CRLF (see .gitattributes).
+REM
+REM NOTE: the ablation and the timing numbers must be measured with nothing else using the
+REM GPU, otherwise sec/query is inflated (measured 0.024 -> 0.042 s/query). Run this script
+REM after the training process has exited.
 setlocal
 set PYTHONIOENCODING=utf-8
 set PYTHONUNBUFFERED=1

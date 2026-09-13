@@ -589,3 +589,55 @@ python tools/visualize_paths.py \
 准确率看 pool 那一行（`pool result: goal=...`）或正式评测；另外**图里可能有多条等长的
 最短路**（实测 sample 170 有 2 条），模型走了另一条时标题会写"同代价最优（与标注 GT
 是另一条等长路）"，这不是错。
+
+## 16. 最终对照结论：多轮图信息交流到底有没有用
+
+两个 run 都是 100 epoch、同一份数据、同一套超参（`T=50`、`batch=48`、`lr=1e-4`），
+唯一差别是 `model.flow_steps`。各取**验证集最优** checkpoint（两个 run 恰好都是 epoch 80）：
+
+| | `flow_steps=1`（基线） | `flow_steps=3` |
+|---|---|---|
+| 参数量 | 348,162 | 348,546（+384，+0.11%） |
+| best val（epoch 80）goal_hit | 0.9067 | 0.8900 |
+| **test goal_hit** | 0.8933 | **0.9167** |
+| test optimal | 0.7333 | 0.7233 |
+| test broken | 0.1033 | 0.0833 |
+| 推理耗时（GPU 空闲实测） | **0.025 s/query** | 0.053 s/query（**≈2.1×**） |
+| train loss（80 个共同 epoch 的均值） | 0.3493 | **0.3004**（一致更低） |
+
+**统计检验（这才是关键）**
+
+1. 单次评测（300 条 test、seed 0）配对检验：goal_hit `+0.023`（p=0.32）、
+   optimal `−0.010`（p=0.78）、broken `−0.020`（p=0.41）—— **都不显著**。
+2. 5 个随机种子的配对检验（每个 query 取 5 次采样均值，再做配对 t 检验）：
+   flow1 = 0.8953、flow3 = 0.8873，**Δ = −0.0080**，p = 0.44，
+   bootstrap 95% CI `[−0.0287, +0.0120]`。单个种子的 delta 在 `[−0.0333, +0.0233]`
+   之间跳（std 0.0216）——**单跑一次得到的 ±2~3 个点全是采样噪声**。
+3. 验证集逐 epoch 配对比较是**混合**的：epoch 40 强烈支持 flow3（p=1e-4）、
+   epoch 45/50/100 也支持；但 epoch 75（p=0.006）、85（p=0.013）反过来支持基线。
+
+**结论：没有证据表明"每个 reverse step 内部多轮交流"提升了测试集泛化。**
+它把训练 loss 压得更低（−0.049，80 个共同 epoch 上无一例外），但这份额外的拟合能力
+没有转化成更好的测试表现；代价是推理约 2.1 倍、训练每 epoch 约 1.5 倍。
+
+**但多轮不是摆设**：同一个 `flow_steps=3` 的 checkpoint，推理时只跑 1/2/3 轮分别是
+`0.5167 / 0.8133 / 0.9167`（broken `48% / 19% / 8%`）—— 训练时按 3 轮学出来的表示，
+少跑一轮就崩。也就是说多轮传播在这套表示里承担了实际职责，只是"训练 3 轮 vs 训练 1 轮"
+没有拉开差距。
+
+**可能的原因与下一步（都还没做）**：`T=50` 本身已经提供了 50 轮传播，每步再多 3 轮的
+边际收益被稀释；更值得试的方向是**减少扩散步数 + 增加每步轮数**（例如 `T=10` +
+`flow_steps=5`，总传播量相近但推理更省），以及给多轮配置配套的正则/学习率调整
+（多轮增加了有效容量，训练 loss 更低而测试集没有变好，有轻微过拟合的迹象）。
+
+复现全部结论：
+
+```bash
+cmd /c tools\postprocess.bat v2_controlled_100ep_flow3 v2_controlled_100ep
+python tools/multiseed_eval.py --a outputs/runs/v2_controlled_100ep \
+    --b outputs/runs/v2_controlled_100ep_flow3 --seeds 0,1,2,3,4 --metric goal_hit
+```
+
+产物：`outputs/runs/v2_controlled_100ep_flow3/{eval_test.json, summary.txt,
+breakdown_test.json, paired_*.json, curves_vs_baseline.json, multiseed_goal_hit.json,
+ablation_flow_steps.json}`。
