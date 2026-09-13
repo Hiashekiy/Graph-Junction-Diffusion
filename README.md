@@ -246,6 +246,20 @@ epoch 300: train_loss=0.047  train_x0_acc=1.000  goal_hit=1.000  loop=0, broken=
    现在 splitter 会强制每个 split 非空，`build_datasets` 也会对空 split 直接报错。
 10. **AMP 下 `masked_scatter` 要求 self 与 source 同 dtype**。fp16 的 `H.new_zeros`
     配上 fp32 的 Linear 输出会报 "expected self and source to have same dtypes"。
+11. **`history.json` 丢了前 N 个 epoch 时，`index + 1` 会把所有 epoch 号报小**。
+    `v2_controlled_100ep` 的 history 只剩 epoch 21-100 的 80 条，于是
+    "best validation: epoch 60" 其实是 epoch 80。真实 epoch 只能从
+    `val_records_epoch{N}.json` 的文件名锚定（`tools/summarize_run.py::
+    reconstruct_epoch_offset` 会从末尾对齐并用 goal_hit 值核对，核对不过就警告，
+    不猜）。新 run 的每条记录都带 `epoch` 字段，不会再踩。
+12. **`history.index(record)` 不能用来找"最好那次验证的下标**：两条记录内容完全相同时
+    `list.index` 返回前一条，best epoch 会指错。改用 `enumerate`。
+13. **不要在训练还在跑的时候测推理时间**（`mean_elapsed` / `sec/query`）。
+    同一份基线 checkpoint 在训练占着 GPU 时测出来是 0.040 s/query，空闲时是
+    0.022 s/query —— 差了一倍，跟模型无关。跨 run 比较速度必须在同一个空闲窗口里测。
+14. **改 `model.flow_steps` 会改参数集合**（每轮一个 `flow_slot_embedding`），
+    所以 checkpoint 只能用**训练时那个** `flow_steps` 的配置加载；
+    想少跑几轮做 ablation 要用 `--eval-flow-steps`（推理期覆盖），不是改 config。
 
 ## 10. 第二轮修订（《当前实现修改清单》P0/P1/P2）
 
