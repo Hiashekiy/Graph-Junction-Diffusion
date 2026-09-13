@@ -110,6 +110,34 @@ class GraphFlowDenoiser(nn.Module):
         shared = "shared-cell" + ("+slot" if self.flow_slot_embedding is not None else "")
         return f"{self.flow_steps} round(s) per reverse step ({shared})"
 
+    @property
+    def max_flow_steps(self) -> int:
+        """推理时最多能跑几轮（受 slot embedding 的行数限制）。"""
+        if self.flow_slot_embedding is None:
+            return 1
+        return int(self.flow_slot_embedding.num_embeddings)
+
+    def set_inference_flow_steps(self, flow_steps: int) -> int:
+        """推理阶段的**提前退出**：用比训练更少的轮数跑，返回原来的值。
+
+        多轮交流的代价在推理时是线性的（实测 flow_steps=3 时 0.063 s/query，
+        单轮 0.022 s/query），而"训练时见识过多轮、推理时只跑一轮"是完全合法的
+        —— 第 0 轮用的 slot embedding 就是训练时第 0 轮那个。所以留一个口子，
+        方便做"多少轮才够"的 ablation，而不是硬编码训练时的轮数。
+        """
+        steps = int(flow_steps)
+        if steps < 1:
+            raise ValueError(f"flow_steps must be >= 1, got {steps}")
+        if steps > self.max_flow_steps:
+            raise ValueError(
+                f"flow_steps={steps} exceeds the trained slot embedding rows "
+                f"({self.max_flow_steps}); this model was trained with "
+                f"flow_steps={self.flow_steps}, inference can only use fewer rounds"
+            )
+        previous = int(self.flow_steps)
+        self.flow_steps = steps
+        return previous
+
     # ------------------------------------------------------------------
     def init_nodes(self, batch) -> Tensor:
         """H_T = TypeEmbedding(V)。整个 reverse chain 只调用一次。"""
@@ -132,14 +160,29 @@ class GraphFlowDenoiser(nn.Module):
         return tau
 
     # ------------------------------------------------------------------
-    def step(self, batch, H_t: Tensor, z_t: Tensor, t) -> DenoiserOutput:
-        """(H_t, z_t, t) -> (H_{t-1}, candidate distribution over z_0)。"""
+    def step(
+        self,
+        batch,
+        H_t: Tensor,
+        z_t: Tensor,
+        t,
+        flow_steps: Optional[int] = None,
+    ) -> DenoiserOutput:
+        """(H_t, z_t, t) -> (H_{t-1}, candidate distribution over z_0)。
+
+        ``flow_steps`` 给了就临时覆盖 ``self.flow_steps``（推理 ablation 用），
+        不给就用模型自己的设置 —— 训练路径永远走默认值，行为不变。
+        """
+        steps = self.flow_steps if flow_steps is None else int(flow_steps)
+        if steps < 1:
+            raise ValueError(f"flow_steps must be >= 1, got {steps}")
+
         tau_graph = self.time_embedding(t, batch.num_graphs)
         tau_decisions = broadcast_time_to_decisions(tau_graph, batch.decision_graph_id)
 
         edge_feat_t = self.edge_state_encoder(batch, z_t)
 
-        # 一个 reverse step 内部做 flow_steps 轮图信息交流（默认 1 轮 = 旧行为）。
+        # 一个 reverse step 内部做 steps 轮图信息交流（默认 1 轮 = 旧行为）。
         # 轮与轮之间 H 继续累积，且每轮带上"第几轮"的 embedding，避免同一个 Cell
         # 反复作用于同一输入退化成求不动点。
         flow_out = self.graph_flow.forward_multi(
@@ -149,7 +192,7 @@ class GraphFlowDenoiser(nn.Module):
             tau_t=tau_graph,
             fixed_mask=batch.start_goal_mask,
             graph_node_ptr=batch.graph_node_ptr,
-            flow_steps=self.flow_steps,
+            flow_steps=steps,
             slot_embedding=self.flow_slot_embedding,
             slot_scale=self.slot_scale,
         )
@@ -169,8 +212,10 @@ class GraphFlowDenoiser(nn.Module):
         )
 
     # 兼容旧调用写法：forward == step
-    def forward(self, batch, H_t: Tensor, z_t: Tensor, t) -> DenoiserOutput:
-        return self.step(batch, H_t, z_t, t)
+    def forward(
+        self, batch, H_t: Tensor, z_t: Tensor, t, flow_steps: Optional[int] = None
+    ) -> DenoiserOutput:
+        return self.step(batch, H_t, z_t, t, flow_steps=flow_steps)
 
     # ------------------------------------------------------------------
     def num_parameters(self) -> int:

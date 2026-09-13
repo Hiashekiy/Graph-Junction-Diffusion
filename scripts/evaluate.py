@@ -37,6 +37,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", required=True)
     parser.add_argument("--out", default=None, help="结果 json 的输出路径")
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--eval-flow-steps",
+        type=int,
+        default=None,
+        help=(
+            "推理时每个 reverse step 的图信息交流轮数（必须 <= 训练时的 round 数）。"
+            "用于做'训练多轮、推理提前退出'的 ablation；默认用配置里的值。"
+        ),
+    )
     parser.add_argument("--stochastic", action="store_true", help="强制随机采样")
     parser.add_argument("--deterministic", action="store_true", help="posterior argmax 采样")
     parser.add_argument("--baselines", action="store_true", help="顺带跑 shortest/greedy baseline")
@@ -75,6 +84,13 @@ def main() -> int:
         payload = load_checkpoint(args.checkpoint, model=model, map_location=device)
         model = model.to(device)
         print(f"loaded checkpoint {args.checkpoint} (epoch={payload.get('epoch')})")
+    if args.eval_flow_steps is not None:
+        previous = model.set_inference_flow_steps(args.eval_flow_steps)
+        print(
+            f"inference flow_steps overridden: {previous} -> {model.flow_steps} "
+            f"(trained with {model.max_flow_steps})"
+        )
+    print(f"model        : {model.flow_steps_label}")
 
     diffusion = build_diffusion(config)
     dataset = GraphQueryDataset.load(args.data)
@@ -101,6 +117,11 @@ def main() -> int:
     payload = {
         "metrics": report.metrics,
         "debug": report.debug,
+        "inference": {
+            "flow_steps": int(model.flow_steps),
+            "trained_flow_steps": int(model.max_flow_steps),
+            "label": model.flow_steps_label,
+        },
         "records": records_to_dicts(report.records),
     }
     if args.baselines:

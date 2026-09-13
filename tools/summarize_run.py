@@ -32,17 +32,65 @@ def load_history(run_dir: Path) -> List[Dict[str, Any]]:
         return json.load(handle)
 
 
-def curve(history: List[Dict[str, Any]], key: str) -> List[Dict[str, float]]:
+def _val_file_goal_hit(path: Path) -> float:
+    with open(path, "r", encoding="utf-8") as handle:
+        records = json.load(handle)
+    if not records:
+        raise ValueError(f"empty val records: {path}")
+    return sum(1 for r in records if r["goal_hit"]) / len(records)
+
+
+def reconstruct_epoch_offset(
+    run_dir: Path, history: List[Dict[str, Any]]
+) -> Optional[int]:
+    """给"没有 epoch 字段的老 history"找回真实 epoch 号。
+
+    老版本的 trainer 不往记录里写 ``epoch``，而 ``history.json`` 可能只保留了后一段
+    （例如 ``v2_controlled_100ep`` 只剩 epoch 21-100 的 80 条，前面 20 条丢了）。
+    这时 ``index + 1`` 会凭空少算 20 个 epoch —— 报出来的 "best validation: epoch 60"
+    其实是 epoch 80。
+
+    可靠的锚点是 ``val_records_epoch{N}.json``：文件名里带真实 epoch，内容能算出
+    goal_hit。做法是从**末尾**对齐：history 里第 j 个带验证的记录，对应最后
+    len(val_positions) 个 val 文件里的第 j 个，并用 goal_hit 值逐个核对。核对通过
+    才返回偏移量；对不上就返回 None（调用方退回 index+1 并打警告），绝不猜。
+    """
+    positions = [i for i, record in enumerate(history) if "goal_hit_rate" in record]
+    if not positions:
+        return None
+    files = sorted(
+        run_dir.glob("val_records_epoch*.json"),
+        key=lambda path: int(path.stem.replace("val_records_epoch", "")),
+    )
+    if len(files) < len(positions):
+        return None
+    files = files[-len(positions):]
+    for position, path in zip(positions, files):
+        expected = float(history[position]["goal_hit_rate"])
+        actual = _val_file_goal_hit(path)
+        if abs(expected - actual) > 1e-9:
+            return None
+    first_epoch = int(files[0].stem.replace("val_records_epoch", ""))
+    return first_epoch - (positions[0] + 1)
+
+
+def curve(
+    history: List[Dict[str, Any]], key: str, epoch_offset: int = 0
+) -> List[Dict[str, float]]:
     """从 history 抽一条曲线。
 
-    epoch 号优先用记录里的 ``epoch`` 字段（resume 之后列表下标 ≠ epoch 号，
-    老版本 history 里没有这个字段，就退化成下标 +1）。
+    epoch 号优先用记录里的 ``epoch`` 字段；老 history 没有这个字段，就用
+    ``index + 1 + epoch_offset``（``epoch_offset`` 由 :func:`reconstruct_epoch_offset`
+    用 val_records 文件名校准）。
     """
     out = []
     for index, record in enumerate(history, start=1):
         if key in record and record[key] == record[key]:  # 过滤 NaN
             out.append(
-                {"epoch": int(record.get("epoch", index)), "value": float(record[key])}
+                {
+                    "epoch": int(record.get("epoch", index + epoch_offset)),
+                    "value": float(record[key]),
+                }
             )
     return out
 
@@ -80,12 +128,25 @@ def main() -> int:
         config_source = args.config
         overrides = [item for group in args.overrides for item in group]
     config = load_config(config_source, overrides)
+    epoch_offset = reconstruct_epoch_offset(run_dir, history)
+    if epoch_offset:
+        print(
+            f"note: history.json has no 'epoch' field; reconstructed epoch offset "
+            f"+{epoch_offset} from val_records_epoch*.json (epoch labels were off by "
+            f"{epoch_offset})"
+        )
+    elif epoch_offset is None and history and "epoch" not in history[0]:
+        print(
+            "warning: history.json has no 'epoch' field and the val_records_epoch*.json "
+            "files could not be aligned; epoch labels below are index+1 and may be wrong"
+        )
     summary: Dict[str, Any] = {
         "run_dir": str(run_dir),
         "config_source": config_source,
         "epochs_completed": len(history),
+        "epoch_offset_reconstructed": epoch_offset,
         "curves": {
-            key: curve(history, key)
+            key: curve(history, key, epoch_offset or 0)
             for key in (
                 "train_loss",
                 "train_x0_acc",
@@ -119,22 +180,32 @@ def main() -> int:
     }
     del probe
 
-    validation = [r for r in history if "goal_hit_rate" in r]
+    # 用 enumerate 记住下标：`history.index(best)` 在出现两条完全相同的记录时会指到
+    # 前一条，best epoch 就会报错。
+    validation = [
+        (index, record)
+        for index, record in enumerate(history)
+        if "goal_hit_rate" in record
+    ]
     if validation:
-        best = max(validation, key=lambda r: r["goal_hit_rate"])
+        best_index, best = max(validation, key=lambda item: item[1]["goal_hit_rate"])
         best_epoch = int(
-            best.get("epoch", history.index(best) + 1)
+            best.get("epoch", best_index + 1 + (epoch_offset or 0))
         )
         summary["best_validation"] = {
             "epoch": best_epoch,
             "goal_hit_rate": best["goal_hit_rate"],
             "optimal_path_rate": best.get("optimal_path_rate"),
-            "avg_goal_hit_rate": sum(r["goal_hit_rate"] for r in validation)
+            "avg_goal_hit_rate": sum(r["goal_hit_rate"] for _, r in validation)
             / len(validation),
             "avg_optimal_path_rate": sum(
-                r.get("optimal_path_rate", 0.0) for r in validation
+                r.get("optimal_path_rate", 0.0) for _, r in validation
             )
             / len(validation),
+            "tail_goal_hit_rate": sum(
+                r["goal_hit_rate"] for _, r in validation[-5:]
+            )
+            / len(validation[-5:]),
         }
 
     if args.test_data and not args.skip_eval:
@@ -193,6 +264,11 @@ def main() -> int:
             f"validation average: goal_hit={best['avg_goal_hit_rate']:.4f}  "
             f"optimal={best['avg_optimal_path_rate']:.4f}"
         )
+        if "tail_goal_hit_rate" in best:
+            lines.append(
+                f"validation tail (last {min(5, summary['epochs_completed'])} checks): "
+                f"goal_hit={best['tail_goal_hit_rate']:.4f}"
+            )
     if "test" in summary:
         metrics = summary["test"]["metrics"]
         lines.append(f"test ({summary['test']['num_queries']} queries, "

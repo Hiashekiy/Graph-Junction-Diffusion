@@ -340,3 +340,62 @@ def test_denoiser_flow_steps_changes_the_update(manual_batch):
     out_one = one.step(manual_batch, H_t, z, 10)
     out_three = three.step(manual_batch, H_t, z, 10)
     assert not torch.allclose(out_one.H_next, out_three.H_next)
+
+
+# ---------------------------------------------------------------------------
+# 推理阶段的提前退出（训练 3 轮、推理只跑 1..3 轮）
+# ---------------------------------------------------------------------------
+def test_step_accepts_a_per_call_flow_steps_override(manual_batch):
+    from src.models.denoiser import GraphFlowDenoiser
+
+    model = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=3)
+    H_t = model.init_nodes(manual_batch)
+    z = manual_batch.target_candidate
+    one = model.step(manual_batch, H_t, z, 10, flow_steps=1)
+    three = model.step(manual_batch, H_t, z, 10, flow_steps=3)
+    assert one.flow_steps == 1 and len(one.attn_per_slot) == 1
+    assert three.flow_steps == 3
+    assert not torch.allclose(one.H_next, three.H_next)
+    # 逐调用覆盖不能改到模型自己的设置
+    assert model.flow_steps == 3
+
+
+def test_step_rejects_non_positive_flow_steps(manual_batch):
+    import pytest
+
+    from src.models.denoiser import GraphFlowDenoiser
+
+    model = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=3)
+    H_t = model.init_nodes(manual_batch)
+    with pytest.raises(ValueError):
+        model.step(manual_batch, H_t, manual_batch.target_candidate, 10, flow_steps=0)
+
+
+def test_set_inference_flow_steps_only_allows_fewer_rounds(manual_batch):
+    import pytest
+
+    from src.models.denoiser import GraphFlowDenoiser
+
+    model = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=3)
+    assert model.max_flow_steps == 3
+    assert model.set_inference_flow_steps(2) == 3
+    assert model.flow_steps == 2
+    out = model.step(
+        manual_batch, model.init_nodes(manual_batch), manual_batch.target_candidate, 10
+    )
+    assert out.flow_steps == 2  # 走的是模型自己的设置，不需要逐调用传参
+    with pytest.raises(ValueError):
+        model.set_inference_flow_steps(4)
+    with pytest.raises(ValueError):
+        model.set_inference_flow_steps(0)
+
+
+def test_single_round_model_cannot_go_beyond_one_round(manual_batch):
+    import pytest
+
+    from src.models.denoiser import GraphFlowDenoiser
+
+    model = GraphFlowDenoiser(d_model=16, ffn_hidden=32, flow_steps=1)
+    assert model.max_flow_steps == 1
+    with pytest.raises(ValueError):
+        model.set_inference_flow_steps(2)

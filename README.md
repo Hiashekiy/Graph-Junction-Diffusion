@@ -454,3 +454,21 @@ checkpoint 到底是几轮训出来的"必须能从 run 目录里读出来，否
       --data data/controlled_test.pkl --baselines \
       --out outputs/runs/v2_controlled_100ep/eval_test.json
   ```
+
+### 推理时的提前退出（"训练 3 轮、推理只跑 1 轮"）
+
+多轮交流的代价在推理时是线性的（实测 flow_steps=3 约 0.06 s/query，1 轮约 0.03 s/query）。
+"训练时见识过多轮、推理时少跑几轮"完全合法（第 k 轮用的 slot embedding 就是训练时
+那一行），所以留了一个口子做"多少轮才够"的 ablation：
+
+```bash
+python scripts/evaluate.py \
+    --config outputs/runs/v2_controlled_100ep_flow3/run_config.json \
+    --checkpoint outputs/runs/v2_controlled_100ep_flow3/best.pt \
+    --data data/controlled_test.pkl --eval-flow-steps 1 \
+    --out outputs/runs/v2_controlled_100ep_flow3/eval_test_flow1.json
+```
+
+约束（`GraphFlowDenoiser.set_inference_flow_steps`）：只能**减少**轮数，超过训练时的
+round 数会直接 `ValueError`（slot embedding 没有那么多行）；评测结果 json 里会写上
+`inference.flow_steps` 与 `inference.trained_flow_steps`，避免事后分不清这是几次前向的结果。
