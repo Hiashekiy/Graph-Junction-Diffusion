@@ -54,9 +54,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    # --set 可以重复出现；nargs='*' 版本的 argparse 会丢掉前面几次的值，
-    # 所以这里显式摊平（action='append' 给的是 [[...], [...]]）
-    overrides = [item for group in args.overrides for item in group]
+    # --set 可重复出现，argparse 的 action='append' 给的已经是扁平字符串列表
+    # （train.py 里那句展开是为了兼容 nargs='*' 的写法，这里不需要）
     overrides = list(args.overrides)
     if args.device:
         overrides.append(f"training.device={args.device}")
