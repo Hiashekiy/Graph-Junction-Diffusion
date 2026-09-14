@@ -10,19 +10,19 @@
 
     # 单条：看第 170 号 query
     python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled_test.pkl --index 170
+        --data data/controlled/controlled_test.pkl --index 170
 
     # 多条（逗号分隔或重复 --index），并导出 JSON
     python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled_test.pkl --index 0,47,170 --out-json paths.json
+        --data data/controlled/controlled_test.pkl --index 0,47,170 --out-json paths.json
 
     # 推理轮数 ablation：同一个 checkpoint 只跑 1 轮
     python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled_test.pkl --index 170 --flow-steps 1
+        --data data/controlled/controlled_test.pkl --index 170 --flow-steps 1
 
     # 换随机种子（采样是随机的，同一 query 换个种子可能走出不同路径）
     python tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled_test.pkl --index 170 --seed 3
+        --data data/controlled/controlled_test.pkl --index 170 --seed 3
 
 ``--index`` 就是数据集里的位置（``dataset[i]``），``tools/visualize_paths.py``
 标题里的 ``#170`` 也是这个编号。
@@ -47,7 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="generate paths with a trained checkpoint")
     parser.add_argument("--run", required=True, help="run 目录（含 run_config.json）")
     parser.add_argument("--checkpoint", default=None, help="默认 <run>/best.pt")
-    parser.add_argument("--data", required=True, help="数据集 pkl，如 data/controlled_test.pkl")
+    parser.add_argument("--data", required=True, help="数据集 pkl，如 data/controlled/controlled_test.pkl")
     parser.add_argument(
         "--index", action="append", default=None,
         help="query 下标，可重复或写成 0,47,170；默认 0",

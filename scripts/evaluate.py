@@ -3,7 +3,7 @@
 用法::
 
     python scripts/evaluate.py --config configs/graph_flow.yaml \
-        --checkpoint outputs/runs/graph_flow/best.pt --data data/er_256_test.pkl
+        --checkpoint outputs/runs/graph_flow/best.pt --data data/controlled/controlled_test.pkl
 
 输出主指标：Goal Hit / Optimal Path / Success Cost Ratio / Loop / Broken / 推理时间。
 另外会打印一个 **debug 用** 的 teacher-forced 单步 decision accuracy。

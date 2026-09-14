@@ -10,7 +10,7 @@ cd /d "%~dp0.."
 echo [run] start %DATE% %TIME%  args=%*
 "E:\CondaEnvData\envs\GGMPC\python.exe" scripts/train.py ^
   --config configs/graph_flow.yaml ^
-  --data data/controlled_train.pkl ^
-  --val-data data/controlled_val.pkl ^
+  --data data/controlled/controlled_train.pkl ^
+  --val-data data/controlled/controlled_val.pkl ^
   %*
 echo [run] exit code %ERRORLEVEL% at %DATE% %TIME%

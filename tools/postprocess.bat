@@ -28,28 +28,28 @@ echo [postprocess] run=%RUN% baseline=%BASE% start %DATE% %TIME%
 echo.
 echo [1/6] summarize %RUN% on the test split (writes eval_test.json + summary.json/txt)
 "%PY%" tools/summarize_run.py outputs/runs/%RUN% ^
-  --test-data data/controlled_test.pkl --baselines
+  --test-data data/controlled/controlled_test.pkl --baselines
 if errorlevel 1 goto :failed
 
 echo.
 echo [2/6] difficulty / mode breakdown
 "%PY%" tools/breakdown_eval.py outputs/runs/%RUN%/eval_test.json ^
-  --data data/controlled_test.pkl --out outputs/runs/%RUN%/breakdown_test.json
+  --data data/controlled/controlled_test.pkl --out outputs/runs/%RUN%/breakdown_test.json
 if errorlevel 1 goto :failed
 
 echo.
 echo [3/6] paired comparison vs %BASE% (goal_hit / optimal / broken)
 "%PY%" tools/paired_compare.py ^
   --a outputs/runs/%BASE%/eval_test.json --b outputs/runs/%RUN%/eval_test.json ^
-  --data data/controlled_test.pkl --metric goal_hit ^
+  --data data/controlled/controlled_test.pkl --metric goal_hit ^
   --label-a %BASE% --label-b %RUN% --out outputs/runs/%RUN%/paired_goal_hit.json
 "%PY%" tools/paired_compare.py ^
   --a outputs/runs/%BASE%/eval_test.json --b outputs/runs/%RUN%/eval_test.json ^
-  --data data/controlled_test.pkl --metric optimal ^
+  --data data/controlled/controlled_test.pkl --metric optimal ^
   --label-a %BASE% --label-b %RUN% --out outputs/runs/%RUN%/paired_optimal.json
 "%PY%" tools/paired_compare.py ^
   --a outputs/runs/%BASE%/eval_test.json --b outputs/runs/%RUN%/eval_test.json ^
-  --data data/controlled_test.pkl --metric broken ^
+  --data data/controlled/controlled_test.pkl --metric broken ^
   --label-a %BASE% --label-b %RUN% --out outputs/runs/%RUN%/paired_broken.json
 if errorlevel 1 goto :failed
 
@@ -61,7 +61,7 @@ for %%E in (25 30 35 40 45 50 55 60 65 70 75 80 85 90 95 100) do (
     "%PY%" tools/paired_compare.py ^
       --a outputs/runs/%BASE%/val_records_epoch%%E.json ^
       --b outputs/runs/%RUN%/val_records_epoch%%E.json ^
-      --data data/controlled_val.pkl --metric goal_hit ^
+      --data data/controlled/controlled_val.pkl --metric goal_hit ^
       --label-a %BASE% --label-b %RUN%
   )
 )
@@ -76,7 +76,7 @@ echo [5/6] training-curve comparison (aligned by true epoch)
 echo.
 echo [6/6] inference flow_steps ablation (1..trained rounds)
 "%PY%" tools/ablation_eval.py outputs/runs/%RUN% ^
-  --data data/controlled_test.pkl --no-progress
+  --data data/controlled/controlled_test.pkl --no-progress
 if errorlevel 1 goto :failed
 
 echo.

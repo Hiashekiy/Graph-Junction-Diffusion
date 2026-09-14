@@ -3,7 +3,7 @@
 用法::
 
     python tools/summarize_run.py outputs/runs/v2_controlled_100ep \
-        --config configs/graph_flow.yaml --test-data data/controlled_test.pkl
+        --config configs/graph_flow.yaml --test-data data/controlled/controlled_test.pkl
 
 输出 ``<run_dir>/summary.json`` 与 ``<run_dir>/summary.txt``，内容包括：
     * 每 epoch 的 train loss / x0 accuracy；

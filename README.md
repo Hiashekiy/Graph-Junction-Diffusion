@@ -31,29 +31,33 @@ z_t  ->  E_t = Psi(z_t)  ->  H_{t-1} = F_theta(H_t, E_t, tau_t)  ->  p_theta(z_0
 > 下面所有命令都是**单行**、不带 shell 变量、不带续行符，可以直接粘贴到 Git Bash 里执行。
 > 解释器统一写成 `E:/CondaEnvData/envs/GGMPC/python.exe`（PATH 里的 `python` 没装 torch）。
 
-### 0.1 数据集（都在 `data/`，被 .gitignore 忽略，不进版本库）
+### 0.1 数据集（`data/` 下按来源分 5 组，被 .gitignore 忽略，不进版本库）
+
+文件名一律保持不变——历史 `eval*.json` / `mp_*.json` 是按**文件名**记录数据集的，改名会让
+它们对不上号——只是按来源挪进子目录，逐份索引见 `data/README.md`。
 
 编号空间与语义见第 3 节；这里只说"每份文件是什么、多大规模、拿来干什么"。
 
-**A. 当前主力数据集（`controlled_junction` 生成器，骨架 + 干扰分支）**
+**A. 当前主力数据集 —— `data/controlled/`（`controlled_junction` 生成器，骨架 + 干扰分支）**
 
 | 文件 | 是什么 | 规模 | 用途 |
 |---|---|---|---|
-| `data/controlled_train.pkl` | 主训练集（3000 样本按图 8:1:1 切出来的 train） | 2400 条 / 每 query 6.53 决策 / 34.7 候选 | 旧版 run 的训练集 |
-| `data/controlled_val.pkl` | 主验证集 | 300 条 / 6.55 决策 | 旧版 run 的验证集 |
-| `data/controlled_test.pkl` | **标准测试集** | 300 条 / 6.49 决策 | 所有 run 都在这上面报 test 指标 |
-| `data/controlled_summary.json` | 上面三份的生成统计（决策数/候选数/长度分布） | — | 查数据分布 |
+| `controlled_train.pkl` | 主训练集（3000 样本按图 8:1:1 切出来的 train） | 2400 条 / 每 query 6.53 决策 / 34.7 候选 | 旧版 run 的训练集 |
+| `controlled_val.pkl` | 主验证集 | 300 条 / 6.55 决策 | 旧版 run 的验证集 |
+| `controlled_test.pkl` | **标准测试集** | 300 条 / 6.49 决策 | 所有 run 都在这上面报 test 指标 |
+| `controlled_summary.json` | 上面三份的生成统计（决策数/候选数/长度分布） | — | 查数据分布 |
 
-**B. 长链（决策数 ≥ 9）**
+**B. 长链（决策数 ≥ 9）—— `data/long/`**
 
 | 文件 | 是什么 | 规模 | 用途 |
 |---|---|---|---|
-| `data/controlled_long.pkl` | **长链专测集**（全 hard，9–11 决策） | 400 条 / 9.20 决策 / 26.0 跳 | 检验"多轮交流"和长链能力 |
-| `data/controlled_longpool.pkl` | 长链候选池（生成时只留 ≥9 决策） | 1050 条 / 9.22 决策 | 给训练集补长链样本 |
-| `data/controlled_longmix_train.pkl` | `controlled_train` + 池子里 900 条 | 3300 条 / 7.26 决策 / ≥9 决策占 30.9% | `v2_rev2_longmix` 的训练集 |
-| `data/controlled_longmix_val.pkl` | `controlled_val` + 池子里 150 条 | 450 条 / 7.44 决策 | 对应的验证集 |
+| `controlled_long.pkl` | **长链专测集**（全 hard，9–11 决策） | 400 条 / 9.20 决策 / 26.0 跳 | 检验"多轮交流"和长链能力 |
+| `controlled_longpool.pkl` | 长链候选池（生成时只留 ≥9 决策） | 1050 条 / 9.22 决策 | 给训练集补长链样本 |
+| `controlled_longmix_train.pkl` | `controlled_train` + 池子里 900 条 | 3300 条 / 7.26 决策 / ≥9 决策占 30.9% | `v2_rev2_longmix` 的训练集 |
+| `controlled_longmix_val.pkl` | `controlled_val` + 池子里 150 条 | 450 条 / 7.44 决策 | 对应的验证集 |
 
-**C. 旧 V1 数据（随机图 er/ba/ws/geometric，20–80 节点，候选=下一跳边）**
+**C. 旧 V1 数据 —— `data/oldv1/`（随机图 er/ba/ws/geometric，20–80 节点，候选=下一跳边；
+原始 `.pt` 在 `data/processed/v1/`）**
 
 | 文件 | 是什么 | 规模 | 用途 |
 |---|---|---|---|
@@ -62,23 +66,40 @@ z_t  ->  E_t = Psi(z_t)  ->  H_{t-1} = F_theta(H_t, E_t, tau_t)  ->  p_theta(z_0
 | `data/processed/v1/test.pt` | V1 原始 test | 500 图 / 2500 query | 同上 |
 | `data/processed/v1/ood_size.pt` | V1 规模外推集（**100–200 节点**） | 300 图 / 1500 query | 只做规模外推测试，**不进训练** |
 | `data/processed/v1/manifest.json`、`*_meta.json` | 上面四份的统计 | — | 查数据分布 |
-| `data/oldv1_train_sub.pkl` | V1 train 随机抽 2000 条转成 V2 格式（成功 1970） | 1970 条 / 37.9 决策 / 275 候选 | 混入训练集 |
-| `data/oldv1_val_sub.pkl` | V1 val 随机抽 400 条转 V2（成功 390） | 390 条 / 36.5 决策 | 混入验证集 |
-| `data/oldv1_test.pkl` | V1 test 转 V2（成功 2444 / 2500） | 2444 条 / 38.2 决策 / 268 候选 | **跨分布测试集**（旧数据上到底行不行） |
+| `oldv1_train_sub.pkl` | V1 train 随机抽 2000 条转成 V2 格式（成功 1970） | 1970 条 / 37.9 决策 / 275 候选 | 混入训练集 |
+| `oldv1_val_sub.pkl` | V1 val 随机抽 400 条转 V2（成功 390） | 390 条 / 36.5 决策 | 混入验证集 |
+| `oldv1_test.pkl` | V1 test 转 V2（成功 2444 / 2500） | 2444 条 / 38.2 决策 / 268 候选 | **跨分布测试集**（旧数据上到底行不行） |
+
+> 本机工作副本里没有保留 `data/processed/v1/*.pt`（V1 时代的归档件），需要时先从归档恢复，
+> 再跑第 18 节的转换命令。
 
 > V1 与 V2 的差别：V1 的候选是"下一跳的边"，V2 是"走到下一个 structural endpoint 的
 > branch segment"。所以 V1 的 `.pt` 必须先转换（`tools/convert_v1_dataset.py`）才能喂给
 > 现在的模型；约 2.2% 的 query 因为"两个 degree=2 节点构成的三角"无法用 V2 语义表示而被跳过。
 
-**D. 混合训练集（当前最新模型用的）**
+**D. 混合训练集 —— `data/mixed/`（当前最新模型用的）**
 
 | 文件 | 是什么 | 规模 | 用途 |
 |---|---|---|---|
-| `data/mixed_oldv1_train.pkl` | `controlled_longmix_train` + `oldv1_train_sub` | **5270 条** / 18.7 决策 / 127 候选 | `v2_rev2_mixed` 的训练集 |
-| `data/mixed_oldv1_val.pkl` | `controlled_longmix_val` + `oldv1_val_sub` | **840 条** / 20.9 决策 | 对应的验证集（模型选择用它） |
-| `data/mixed_oldv1_{train,val}_summary.json` | 合并统计（组成、决策数直方图、长链占比） | — | 查合并结果 |
+| `mixed_oldv1_train.pkl` | `controlled_longmix_train` + `oldv1_train_sub` | **5270 条** / 18.7 决策 / 127 候选 | `v2_rev2_mixed` 的训练集 |
+| `mixed_oldv1_val.pkl` | `controlled_longmix_val` + `oldv1_val_sub` | **840 条** / 20.9 决策 | 对应的验证集（模型选择用它） |
+| `mixed_oldv1_{train,val}_summary.json` | 合并统计（组成、决策数直方图、长链占比） | — | 查合并结果 |
 
-**E. 冒烟小数据集**：`data/smoke_{train,val,test}.pkl`（26 / 3 / 3 条），只用来快速跑通流程。
+**E. 冒烟小数据集 —— `data/smoke/`**：`smoke_{train,val,test}.pkl`（26 / 3 / 3 条），只用来快速跑通流程。
+
+**F. 公开图数据 —— `data/public_graphs/`**：由 `scripts/download_graph_datasets.py` 下载的
+DIMACS9/10 路网（`--profile recommended` 约 14 MB：rome99、Luxembourg OSM、NY / BAY / COL），
+另有 `--profile snap`（roadNet-CA/PA/TX）与 `--profile all`（再加 CLRS30）可选。
+
+DIMACS9 的 `.gr` 只有弧长、不带坐标，加 `--with-coords` 会连 `*.co.gz` / `*.xyz.bz2` 坐标
+伴随文件一起下；有了坐标 `tools/visualize_public_graphs.py` 才能把它们画成地图（没有坐标的
+rome99 退化成力导向布局）。文件清单见 `data/README.md`。
+
+```bash
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/download_graph_datasets.py --list
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/download_graph_datasets.py --with-coords
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
+```
 
 ### 0.2 训练好的模型（`outputs/runs/`，checkpoint 不进版本库）
 
@@ -131,41 +152,41 @@ z_t  ->  E_t = Psi(z_t)  ->  H_{t-1} = F_theta(H_t, E_t, tau_t)  ->  p_theta(z_0
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --tiny --name tiny --set diffusion.T=20 --set training.epochs=200 --set training.lr=3.0e-3
 
 # 正式训练：长链偏重（v2_rev2_longmix 用的这条）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_longmix --data data/controlled_longmix_train.pkl --val-data data/controlled_longmix_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_longmix --data data/long/controlled_longmix_train.pkl --val-data data/long/controlled_longmix_val.pkl
 
 # 正式训练：旧数据融合（v2_rev2_mixed，最新，100 epoch 约 5 小时）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed_oldv1_train.pkl --val-data data/mixed_oldv1_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl
 
 # 对照：降低 NULL 权重（混合集 NULL 占 68%，模型容易"该走却选 NULL"）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed_nw03 --data data/mixed_oldv1_train.pkl --val-data data/mixed_oldv1_val.pkl --set loss.null_weight=0.3
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed_nw03 --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl --set loss.null_weight=0.3
 
 # 续训（从 last.pt 再跑 30 轮；--extra-epochs 是"在已跑轮数之上再加多少"）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed_oldv1_train.pkl --val-data data/mixed_oldv1_val.pkl --resume outputs/runs/v2_rev2_mixed/last.pt --extra-epochs 30
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl --resume outputs/runs/v2_rev2_mixed/last.pt --extra-epochs 30
 ```
 
 **评测**
 
 ```bash
 # 标准测试集
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_rev2_mixed/eval_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_rev2_mixed/eval_test.json
 
 # 长链专测集
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled_long.pkl --device cuda --no-progress --out outputs/runs/v2_rev2_mixed/eval_long.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/long/controlled_long.pkl --device cuda --no-progress --out outputs/runs/v2_rev2_mixed/eval_long.json
 
 # 旧 V1 数据（跨分布）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/oldv1_test.pkl --device cuda --no-progress --out outputs/runs/v2_rev2_mixed/eval_oldv1_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/oldv1/oldv1_test.pkl --device cuda --no-progress --out outputs/runs/v2_rev2_mixed/eval_oldv1_test.json
 
 # 多分支（存活路径表）解码：主指标取累计概率最高的路径，额外报 coverage
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled_long.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --out outputs/runs/v2_rev2_mixed/eval_long_multi.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/long/controlled_long.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --out outputs/runs/v2_rev2_mixed/eval_long_multi.json
 
 # 三套口径一起出（单路径 / 多分支 best / coverage）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip --out outputs/runs/v2_rev2_mixed/mp_long_k2_skip.json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip --out outputs/runs/v2_rev2_mixed/mp_long_k2_skip.json
 
 # 多种子配对检验（A=基线 run，B=新 run；--decode multi 时两个 run 都用同一模式）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --data data/oldv1_test.pkl --seeds 0,1,2 --metric goal_hit --out outputs/runs/v2_rev2_mixed/multiseed_oldv1_vs_prev.json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --data data/oldv1/oldv1_test.pkl --seeds 0,1,2 --metric goal_hit --out outputs/runs/v2_rev2_mixed/multiseed_oldv1_vs_prev.json
 
 # 按难度 / 结构模式 / 决策数 / source 类型拆桶
-E:/CondaEnvData/envs/GGMPC/python.exe tools/breakdown_eval.py outputs/runs/v2_rev2_mixed/eval_oldv1_test.json --data data/oldv1_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/breakdown_eval.py outputs/runs/v2_rev2_mixed/eval_oldv1_test.json --data data/oldv1/oldv1_test.pkl
 
 # 训练曲线按真实 epoch 对齐比较
 E:/CondaEnvData/envs/GGMPC/python.exe tools/compare_curves.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --label-a longmix --label-b mixed --every 5
@@ -175,20 +196,20 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/compare_curves.py --a outputs/runs/v
 
 ```bash
 # 单路径：随机抽 16 张画图（不加 --select-seed 每次抽的不一样，实际种子会打印）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --num 16 --cols 2 --labels --select random --select-seed 0 --out outputs/figures/paths_mixed_long.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 16 --cols 2 --labels --select random --select-seed 0 --out outputs/figures/paths_mixed_long.png
 
 # 多分支：细线画出整张存活路径表，粗线是累计概率最高的那条
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --out outputs/figures/paths_mixed_long_multi.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --out outputs/figures/paths_mixed_long_multi.png
 
 # 只看失败样本（broken / loop / optimal / goal 任选）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --num 8 --cols 2 --labels --select broken --out outputs/figures/paths_mixed_long_broken.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select broken --out outputs/figures/paths_mixed_long_broken.png
 
 # 指定下标（最稳的复现方式）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/controlled_test.pkl --num 4 --cols 2 --labels --select indices --indices 3,7,42,101 --out outputs/figures/paths_mixed_indices.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/controlled/controlled_test.pkl --num 4 --cols 2 --labels --select indices --indices 3,7,42,101 --out outputs/figures/paths_mixed_indices.png
 
 # 只要路径文本 / JSON，不画图
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/oldv1_test.pkl --index 1242
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --index 111 --json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/oldv1/oldv1_test.pkl --index 1242
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --index 111 --json
 ```
 
 **数据（生成 / 转换 / 合并 / 查泄漏）**
@@ -198,19 +219,19 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml
 
 # 看数据语义（branch / z0 / batch 形状）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/inspect_dataset.py --data data/controlled_train.pkl --limit 3
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/inspect_dataset.py --data data/controlled/controlled_train.pkl --limit 3
 
 # V1 -> V2 转换（--sample 随机抽样；不能用 --limit，V1 的 query 按图类型分块存）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/test.pt --out data/oldv1_test.pkl
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/train.pt --out data/oldv1_train_sub.pkl --sample 2000 --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/val.pt --out data/oldv1_val_sub.pkl --sample 400 --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/test.pt --out data/oldv1/oldv1_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/train.pt --out data/oldv1/oldv1_train_sub.pkl --sample 2000 --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/val.pt --out data/oldv1/oldv1_val_sub.pkl --sample 400 --seed 0
 
 # 合并数据集（--sample N:INDEX 表示第 INDEX 份输入随机抽 N 条）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed_oldv1_train.pkl --input data/controlled_longmix_train.pkl --input data/oldv1_train_sub.pkl --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed_oldv1_val.pkl --input data/controlled_longmix_val.pkl --input data/oldv1_val_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_train.pkl --input data/long/controlled_longmix_train.pkl --input data/oldv1/oldv1_train_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_val.pkl --input data/long/controlled_longmix_val.pkl --input data/oldv1/oldv1_val_sub.pkl --seed 0
 
 # 图级泄漏检查（必须 0 重叠才能训；有任何一对重叠就退出码 1）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed_oldv1_train.pkl data/mixed_oldv1_val.pkl --pair data/mixed_oldv1_train.pkl data/oldv1_test.pkl --pair data/mixed_oldv1_train.pkl data/controlled_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
 ```
 
 **测试与静态检查**
@@ -315,12 +336,12 @@ Global Pool、Static Graph Encoder、旧 Routing-State Encoder。
 
 ```bash
 # 看数据语义 -> 训练 -> 评测（以当前最新的 run 名 v2_rev2_mixed 为例）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/inspect_dataset.py --data data/mixed_oldv1_train.pkl --limit 3
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed_oldv1_train.pkl --val-data data/mixed_oldv1_val.pkl
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_rev2_mixed/eval_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/inspect_dataset.py --data data/mixed/mixed_oldv1_train.pkl --limit 3
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_rev2_mixed/eval_test.json
 ```
 
-旧的示例（`data/er_256_train.pkl`、`outputs/runs/graph_flow`）是更早一版的数据与 run 名，
+旧的示例（`data/er_256_train.pkl`、`outputs/runs/graph_flow`）是更早一版的数据与 run 名（这些文件本机已不存在），
 现在都不存在了；完整的历史命令留在第 11–16 节的记录里，仅作过程留档。
 
 ## 6. 测试
@@ -491,20 +512,21 @@ epoch 200: train_loss=0.068  train_x0_acc=1.000  full-chain goal_hit=1.000（opt
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml
 ```
 
-输出 `data/controlled_{train,val,test}.pkl` + `data/controlled_summary.json`，后者包含
+输出 `data/controlled/controlled_{train,val,test}.pkl` + `data/controlled/controlled_summary.json`，后者包含
 指南第 16 节要求的全部指标（hops / decisions / branch factor 的 mean-std-min-max、NULL 比例、source-as-decision 比例、三类干扰分支占比、难度与模式配比）。
 
 两个为**专项评测集**加的参数（见第 16 节的长链实验）：
 
 ```bash
 # 只保留 GT 决策数 >= 9 的样本，且不划分 train/val/test（整份存成一个文件）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --data-dir data/long --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
 ```
 
 `--min-decisions N` 走 `build_controlled_dataset(min_decisions=N)`：难度过滤通过但决策数
 不够的样本会被丢掉，并在 summary 的 `filter.rejected_by_min_decisions` 里记数（长链集的
 接受率只有 0.39%，这个数说明"长链样本为什么稀少"）。`--no-split` 只写
-`data/<name>.pkl` + `_summary.json`，不碰现有的 train/val/test。
+`<data-dir>/<name>.pkl` + `_summary.json`（`--data-dir` 决定落进哪个组目录，默认取配置里的
+`paths.data_dir`），不碰现有的 train/val/test。
 
 ### 与指南表格的两处必要偏离
 
@@ -536,7 +558,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 采样**的（`generate_controlled_junction_graph` 内部采样，`build_controlled_dataset`
 的外层循环只判断 `accepted`）。被留下的样本带着"成功那次 attempt"的标签，于是
 **各标签的接受率不同会重新加权 mix**。实测（把生成器包一层计数器、用 seed=0 跑完整
-3000 条；attempts/accepted 与 `data/controlled_summary.json` 完全一致）：
+3000 条；attempts/accepted 与 `data/controlled/controlled_summary.json` 完全一致）：
 
 | 标签 | 采样占比 | 接受率 | 实测占比 | 目标占比 |
 |---|---|---|---|---|
@@ -581,7 +603,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 ## 13. 正式训练（100 epoch）
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_controlled_100ep --data data/controlled_train.pkl --val-data data/controlled_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_controlled_100ep --data data/controlled/controlled_train.pkl --val-data data/controlled/controlled_val.pkl
 ```
 
 第一版正式配置：`num_samples=3000`、`batch_size=48`、`T=50`、`d_model=128`、`amp=true`、
@@ -590,7 +612,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_fl
 评测：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/graph_flow.yaml --checkpoint outputs/runs/v2_controlled_100ep/best.pt --data data/controlled_test.pkl --baselines --out outputs/runs/v2_controlled_100ep/eval_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/graph_flow.yaml --checkpoint outputs/runs/v2_controlled_100ep/best.pt --data data/controlled/controlled_test.pkl --baselines --out outputs/runs/v2_controlled_100ep/eval_test.json
 ```
 
 ### 第一版单轮结果（flow_steps = 1，作为对照基线）
@@ -686,7 +708,7 @@ checkpoint 到底是几轮训出来的"必须能从 run 目录里读出来，否
   评测基线 checkpoint 时要显式换配置：
 
   ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_controlled_100ep/run_config.json --checkpoint outputs/runs/v2_controlled_100ep/best.pt --data data/controlled_test.pkl --baselines --out outputs/runs/v2_controlled_100ep/eval_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_controlled_100ep/run_config.json --checkpoint outputs/runs/v2_controlled_100ep/best.pt --data data/controlled/controlled_test.pkl --baselines --out outputs/runs/v2_controlled_100ep/eval_test.json
   ```
 
 - **曲线对比必须按真实 epoch 对齐**。基线 `v2_controlled_100ep` 的 `history.json`
@@ -704,7 +726,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/
 那一行），所以留了一个口子做"多少轮才够"的 ablation：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_controlled_100ep_flow3/run_config.json --checkpoint outputs/runs/v2_controlled_100ep_flow3/best.pt --data data/controlled_test.pkl --eval-flow-steps 1 --out outputs/runs/v2_controlled_100ep_flow3/eval_test_flow1.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_controlled_100ep_flow3/run_config.json --checkpoint outputs/runs/v2_controlled_100ep_flow3/best.pt --data data/controlled/controlled_test.pkl --eval-flow-steps 1 --out outputs/runs/v2_controlled_100ep_flow3/eval_test_flow1.json
 ```
 
 约束（`GraphFlowDenoiser.set_inference_flow_steps`）：只能**减少**轮数，超过训练时的
@@ -713,43 +735,44 @@ round 数会直接 `ValueError`（slot embedding 没有那么多行）；评测�
 
 ## 15. 结果可视化（预测路径 vs GT 路径）
 
-两个工具，分工不同：
+三个工具，分工不同：
 
 | 想干什么 | 用哪个 |
 |---|---|
 | 看图（预测路径 vs GT 画在一起） | `tools/visualize_paths.py` |
 | 要路径本身（节点序列、结局、分岔点、机器可读 JSON） | `tools/predict_path.py` |
+| 公开图数据（DIMACS9/10，`data/public_graphs/`）长什么样 | `tools/visualize_public_graphs.py` |
 
 ```bash
 # ---- 1) 只要路径本身（文本，不画图）------------------------------------------
 # 单条 query：--index 就是 dataset[i] 的编号，也是画图标题里的 #170
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --index 170
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --index 170
 
 # 多条（逗号分隔或重复 --index）+ 导出机器可读 json
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --index 0,47,170 --out-json paths.json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --index 0,47,170 --out-json paths.json
 
 # 换采样种子 / 要确定性输出（推理是随机的，见下文）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --index 170 --seed 3
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --index 170 --deterministic
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --index 170 --seed 3
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --index 170 --deterministic
 
 # 同一个 checkpoint 只跑 1 轮图信息交流（推理轮数 ablation）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --index 170 --flow-steps 1
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --index 170 --flow-steps 1
 
 # 换另一个 run（单轮基线）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep --data data/controlled_test.pkl --index 47
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_controlled_100ep --data data/controlled/controlled_test.pkl --index 47
 
 # ---- 2) 画图（预测路径 vs GT 路径）------------------------------------------
 # 自动抽样 8 条：覆盖 easy/medium/hard × 到达/断掉
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --num 8 --cols 2 --labels --out outputs/figures/paths_flow3_test.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --num 8 --cols 2 --labels --out outputs/figures/paths_flow3_test.png
 
 # 只看指定几条（便于复现同一组图，或与别的 run 画同一批 query 做对照）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --select indices --indices 170,47,79,140 --cols 2 --labels --out outputs/figures/paths_pick4.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --select indices --indices 170,47,79,140 --cols 2 --labels --out outputs/figures/paths_pick4.png
 
 # 只看 hard 难度
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --num 6 --only-difficulty hard --cols 2 --labels --out outputs/figures/paths_hard.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --num 6 --only-difficulty hard --cols 2 --labels --out outputs/figures/paths_hard.png
 
 # 换布局（默认 spring，见下表）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --num 4 --layout kamada_kawai --out outputs/figures/paths_kk.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --num 4 --layout kamada_kawai --out outputs/figures/paths_kk.png
 ```
 
 `predict_path.py` 的实测输出（`best.pt`，epoch 80）：
@@ -816,7 +839,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/run
 
 ```bash
 # 每次随机抽 8 条（打印 select_seed，可复现）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_test.pkl --num 8 --cols 2 --select random --out outputs/figures/paths_random.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_controlled_100ep_flow3 --data data/controlled/controlled_test.pkl --num 8 --cols 2 --select random --out outputs/figures/paths_random.png
 
 # 固定抽样种子 -> 每次都得到同一组随机样本
 ... --select random --select-seed 42 --out outputs/figures/paths_random42.png
@@ -851,7 +874,7 @@ from src.utils.seed import make_generator, set_seed
 
 run = "outputs/runs/v2_controlled_100ep_flow3"
 config = load_config(f"{run}/run_config.json")          # run 自己的配置，保证结构匹配
-dataset = GraphQueryDataset.load("data/controlled_test.pkl")
+dataset = GraphQueryDataset.load("data/controlled/controlled_test.pkl")
 
 set_seed(0)
 model = build_model(config, "cuda")
@@ -926,10 +949,10 @@ print(result.status, result.path, result.reason)        # 结局 / 节点序列 
 于是专门造了一个长链评测集：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --data-dir data/long --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
 ```
 
-生成结果（`data/controlled_long.pkl` + `_summary.json`）：**400 条 query / 400 张图**、
+生成结果（`data/long/controlled_long.pkl` + `_summary.json`）：**400 条 query / 400 张图**、
 决策数 9–10（均值 9.20）、GT hops 21–33（均值 26.0）、全部 hard 档；总共
 **102,678 次 attempt** 才凑出这 400 条（约 0.39% 的接受率——这就是长链样本稀少的根源）。
 用**图结构指纹**（排序后的边集合哈希）核对过：与 train / val / test 的交集都是 **0**，无泄漏。
@@ -961,7 +984,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 复现：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_controlled_100ep --b outputs/runs/v2_controlled_100ep_flow3 --data data/controlled_long.pkl --seeds 0,1,2,3,4 --metric goal_hit --bucket-data data/controlled_long.pkl --out outputs/runs/v2_controlled_100ep_flow3/multiseed_long_goal_hit.json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_controlled_100ep --b outputs/runs/v2_controlled_100ep_flow3 --data data/long/controlled_long.pkl --seeds 0,1,2,3,4 --metric goal_hit --bucket-data data/long/controlled_long.pkl --out outputs/runs/v2_controlled_100ep_flow3/multiseed_long_goal_hit.json
 ```
 
 ### 长链偏重的训练集已备好（**只造数据，尚未训练**）
@@ -971,20 +994,20 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v
 
 ```bash
 # 1) 先另外造一批长链样本（不要动现有 train/val/test）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --name controlled_longpool --no-split --min-decisions 9 --set data.num_samples=1050 --set seed=11
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --data-dir data/long --name controlled_longpool --no-split --min-decisions 9 --set data.num_samples=1050 --set seed=11
 # 实测：1050 条 / 1050 图，决策数 9–10（均值 9.22）、hops 16–33（均值 22.0），
 #       201,352 次 attempt 才凑出来（接受率 0.52%），耗时 ~10 分钟
 
 # 2) 与现有训练/验证集合并（graph_id 全局重编号 + 固定 seed 打乱）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/controlled_longmix_train.pkl --input data/controlled_train.pkl --input data/controlled_longpool.pkl --limit 900:1 --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/controlled_longmix_val.pkl --input data/controlled_val.pkl --input data/controlled_longpool.pkl --skip 900:1 --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/long/controlled_longmix_train.pkl --input data/controlled/controlled_train.pkl --input data/long/controlled_longpool.pkl --limit 900:1 --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/long/controlled_longmix_val.pkl --input data/controlled/controlled_val.pkl --input data/long/controlled_longpool.pkl --skip 900:1 --seed 0
 ```
 
 | 文件 | queries / graphs | 决策数直方图 | ≥9 占比 |
 |---|---|---|---|
-| `data/controlled_longmix_train.pkl` | 3300 / 3300 | 5:310, 6:1037, 7:669, 8:265, **9:807, 10:212** | **30.9%** |
-| `data/controlled_longmix_val.pkl` | 450 / 450 | 5:38, 6:131, 7:85, 8:28, **9:128, 10:40** | **37.3%** |
-| （原）`data/controlled_train.pkl` | 2400 / 2400 | 5:310, 6:1037, 7:669, 8:265, 9:101, 10:18 | 5.0% |
+| `controlled_longmix_train.pkl` | 3300 / 3300 | 5:310, 6:1037, 7:669, 8:265, **9:807, 10:212** | **30.9%** |
+| `controlled_longmix_val.pkl` | 450 / 450 | 5:38, 6:131, 7:85, 8:28, **9:128, 10:40** | **37.3%** |
+| （原）`data/controlled/controlled_train.pkl` | 2400 / 2400 | 5:310, 6:1037, 7:669, 8:265, 9:101, 10:18 | 5.0% |
 
 **无泄漏**（按图结构指纹即排序边集合的哈希核对）：longmix_train ↔ longmix_val = 0、
 longmix_train ↔ controlled_test = 0、longmix_train ↔ controlled_long = 0，
@@ -994,7 +1017,7 @@ longmix_val ↔ 两个 test 也都是 0。原来三个 split 与两个 test 集*
 **将来要（用户批准后）训练时**：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_longmix_100ep --data data/controlled_longmix_train.pkl --val-data data/controlled_longmix_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_longmix_100ep --data data/long/controlled_longmix_train.pkl --val-data data/long/controlled_longmix_val.pkl
 ```
 
 想验证的两件事（先记下来，免得事后凑解释）：
@@ -1104,19 +1127,19 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/semantic_check.py --strict   # check
 
 ```bash
 # 1) V1 -> V2（GT 沿用 V1 自己的 gt_path，decision/active 集合逐条核对为 0 不一致）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/test.pt --out data/oldv1_test.pkl
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/train.pt --out data/oldv1_train_sub.pkl --sample 2000 --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/val.pt --out data/oldv1_val_sub.pkl --sample 400 --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/test.pt --out data/oldv1/oldv1_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/train.pt --out data/oldv1/oldv1_train_sub.pkl --sample 2000 --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/val.pt --out data/oldv1/oldv1_val_sub.pkl --sample 400 --seed 0
 
 # 2) 与现有训练/验证集合并（不合并 test；"融入训练"只动 train/val）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed_oldv1_train.pkl --input data/controlled_longmix_train.pkl --input data/oldv1_train_sub.pkl --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed_oldv1_val.pkl --input data/controlled_longmix_val.pkl --input data/oldv1_val_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_train.pkl --input data/long/controlled_longmix_train.pkl --input data/oldv1/oldv1_train_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_val.pkl --input data/long/controlled_longmix_val.pkl --input data/oldv1/oldv1_val_sub.pkl --seed 0
 
 # 3) 图级泄漏检查（必须 0 重叠才能训）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed_oldv1_train.pkl data/mixed_oldv1_val.pkl --pair data/mixed_oldv1_train.pkl data/oldv1_test.pkl --pair data/mixed_oldv1_train.pkl data/controlled_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
 
 # 4) 训练
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed_oldv1_train.pkl --val-data data/mixed_oldv1_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl
 ```
 
 要点：
@@ -1167,22 +1190,32 @@ while frontier 非空:
 
 ```bash
 # 单独评测（三套口径对比：单路径 / 多分支 best / 多分支 coverage）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip
 
 # 接进主评测脚本（其余工具链不变：输出的 eval json 记录口径完全一致）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled_long.pkl --device cuda --decode multi --top-k 2 --null-policy skip --out outputs/runs/v2_rev2_mixed/eval_long_multi.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/long/controlled_long.pkl --device cuda --decode multi --top-k 2 --null-policy skip --out outputs/runs/v2_rev2_mixed/eval_long_multi.json
 
 # 多种子配对检验（两个 run 用同一模式评测，比较的才是同一件事）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --seeds 0,1,2 --metric goal_hit --decode multi --top-k 2 --null-policy skip
+E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --seeds 0,1,2 --metric goal_hit --decode multi --top-k 2 --null-policy skip
 
 # 可视化：细线 = 整张路径表，粗线 = 累计概率最高的那条
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --out outputs/figures/paths_mixed_long_multi_k2.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --multi-highlight 5 --out outputs/figures/paths_mixed_long_multi_k2.png
 ```
 
 `--decode multi` 时主指标取"累计概率最高的那条路径"（与单路径口径可直接对比），
 并额外报告集合语义的 `coverage_rate`（至少一条路径到终点）与
-`optimal_coverage_rate`（至少一条最短路），每张图标题里也会写
-`路径表 N 条（到终点 M 条）· coverage ✓/✗`。
+`optimal_coverage_rate`（至少一条最短路）。
+
+**图上怎么区分不同路径**（`--multi-k` 时）：按概率名次上色，而不是全画成橙色 ——
+
+| 画面元素 | 含义 |
+|---|---|
+| 粗橙线 | 第 1 名：累计 log 概率最高的路径 |
+| 蓝 / 绿 / 红 / 紫 细线 | 第 2..5 名备选（`--multi-highlight N` 控制给前几名上色，默认 4） |
+| 同色圆圈 + 数字 | 该备选**与主路径分叉的那个节点**（数字 = 名次） |
+| 淡灰细线 | 路径表里的其它路径 |
+| 蓝虚线 | GT 最短路 |
+| 标题末行 | `路径表 N 条（到终点 M）· coverage ✓/✗ · 最优 XX 跳 · 备选 a/b/c/d 跳` |
 
 ### 19.2 实测（`v2_rev2_mixed`，best.pt = epoch 90，seed 0）
 

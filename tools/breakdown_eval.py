@@ -1,7 +1,7 @@
 """按难度 / 结构模式拆分测试结果（用 eval 的逐 query 记录 + 数据集 meta）。
 
 用法：python tools/breakdown_eval.py outputs/runs/v2_controlled_100ep/eval_test.json \
-        --data data/controlled_test.pkl
+        --data data/controlled/controlled_test.pkl
 
 分桶口径集中在 ``src/evaluation/buckets.py``（tools/compare_runs.py 用的是同一套）。
 """

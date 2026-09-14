@@ -16,7 +16,7 @@ z_0 / active decision 与 V1 完全一致）。V1 的 `decision_nodes/z0` 只用
 
     python tools/convert_v1_dataset.py \
         --input data/processed/v1/test.pt \
-        --out data/oldv1_test.pkl [--limit 200] [--shortest-path] [--no-verify]
+        --out data/oldv1/oldv1_test.pkl [--limit 200] [--shortest-path] [--no-verify]
 """
 
 from __future__ import annotations

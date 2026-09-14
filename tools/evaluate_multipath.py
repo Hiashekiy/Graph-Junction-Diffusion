@@ -3,7 +3,7 @@
 用法::
 
     python tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed \
-        --data data/controlled_long.pkl --top-k 2 --beam-width 64
+        --data data/long/controlled_long.pkl --top-k 2 --beam-width 64
 
 它跑三套口径，全部用**同一套指标定义**（直接复用 evaluate_sample / aggregate）：
 

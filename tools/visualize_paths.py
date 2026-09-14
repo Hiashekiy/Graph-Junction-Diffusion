@@ -4,7 +4,7 @@
 
     python tools/visualize_paths.py \
         --run outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled_test.pkl \
+        --data data/controlled/controlled_test.pkl \
         --num 8 --out outputs/figures/paths_flow3.png
 
 面板里画什么：
@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="draw predicted vs ground-truth paths")
     parser.add_argument("--run", required=True, help="run 目录（含 run_config.json）")
     parser.add_argument("--checkpoint", default=None, help="默认 <run>/best.pt")
-    parser.add_argument("--data", default="data/controlled_test.pkl")
+    parser.add_argument("--data", default="data/controlled/controlled_test.pkl")
     parser.add_argument("--num", type=int, default=8, help="画几张")
     parser.add_argument(
         "--cols", type=int, default=2,
@@ -129,6 +129,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--multi-max-draw", type=int, default=60,
         help="--multi-k 时每张图最多画多少条细线路径（按概率从高到低），防画面糊掉",
+    )
+    parser.add_argument(
+        "--multi-highlight", type=int, default=4,
+        help="--multi-k 时给概率最高的前 N 名备选路径上不同颜色 + 分叉处圆圈编号"
+             "（第 1 名始终是粗橙线；其余画成淡灰细线）",
     )
     return parser.parse_args()
 
@@ -418,6 +423,28 @@ def _spine_layout(graph, gt_path: Sequence[int], seed: int = 0):
     return pos
 
 
+def _first_divergence(path: Sequence[int], reference: Sequence[int]) -> int:
+    """两条路径第一个不同的节点（返回分叉前的那个节点），用于标"分叉点"。"""
+    for index, (node, other) in enumerate(zip(path, reference)):
+        if node != other:
+            return int(path[index - 1]) if index > 0 else int(path[0])
+    return int(path[min(len(path), len(reference)) - 1])
+
+
+#: 路径表按名次上色：第 1 名是粗橙线（主路径），2..N 名用这些颜色，
+#: 颜色与"分叉处圆圈里的编号"一一对应
+_RANK_COLORS = [
+    "#ff8c00",  # 1（主路径，粗线）
+    "#1f77b4",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#17becf",
+]
+
+
 def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bool) -> None:
     import networkx as nx
 
@@ -440,25 +467,44 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
     multi_paths = row.get("multi_paths") or []
     if multi_paths:
         best_nodes = [int(v) for v in row["path"]]
-        colors = {"goal": "#ff9f40", "loop": "#9467bd", "broken": "#9e9e9e", "pruned": "#c7c7c7"}
+        # 按累计概率从高到低排；第 1 名就是粗橙线那条，其余按名次给不同颜色，
+        # 并在"它与主路径分叉的那个节点"上标一个同色圆圈编号 —— 这样一眼能看出
+        # "有几条路、每条在第几个路口分开、最后哪条活了"。
+        ordered = sorted(multi_paths, key=lambda item: item["log_prob"], reverse=True)
+        highlight = max(0, int(getattr(args, "multi_highlight", 4)))
         drawn = 0
-        for item in multi_paths:
+        forks: List[Tuple[int, int]] = []          # (名次-1, 分叉节点)
+        for rank, item in enumerate(ordered):
             nodes = [int(v) for v in item["nodes"]]
             if nodes == best_nodes:
-                continue                       # 最好那条最后用粗线画
+                continue                            # 第 1 名最后用粗线画
             if drawn >= getattr(args, "multi_max_draw", 60):
                 break
             edges = edge_list(nodes)
             if not edges:
                 continue
+            if 1 <= rank <= highlight:
+                color = _RANK_COLORS[rank % len(_RANK_COLORS)]
+                width, alpha, style = 2.6, 0.85, "solid"
+                forks.append((rank, _first_divergence(nodes, best_nodes)))
+            else:
+                color, width, alpha, style = "#c9c9c9", 1.5, 0.5, "solid"
             nx.draw_networkx_edges(
                 graph, pos, edgelist=edges, ax=ax,
-                edge_color=colors.get(item["status"], "#9e9e9e"),
-                width=2.2,
-                style="solid" if item["status"] == "goal" else (0, (2, 2)),
-                alpha=0.45,
+                edge_color=color, width=width, alpha=alpha, style=style,
             )
             drawn += 1
+        for rank, node in forks:
+            if node in pos:
+                ax.text(
+                    pos[node][0], pos[node][1], str(rank + 1),
+                    fontsize=6.5, color="white", ha="center", va="center", zorder=7,
+                    bbox=dict(
+                        boxstyle="circle,pad=0.16",
+                        facecolor=_RANK_COLORS[rank % len(_RANK_COLORS)],
+                        edgecolor="white", linewidth=0.6,
+                    ),
+                )
 
     # 画法约定：**预测路径是橙色粗实线**（它是这张图的主角），**GT 最短路是蓝色细虚线**
     # 盖在上面。两者一致时看到"橙底蓝虚线"；分岔之后橙色继续走模型选的路、蓝色虚线
@@ -527,17 +573,23 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
     multi_note = ""
     if multi_paths:
         cover = "✓" if row.get("coverage") else "✗"
+        ordered = sorted(multi_paths, key=lambda item: item["log_prob"], reverse=True)
+        alts = [item for item in ordered if [int(v) for v in item["nodes"]] != pred_path]
+        alt_hops = "/".join(
+            str(int(item["hops"])) for item in alts[: max(0, int(getattr(args, "multi_highlight", 4)))]
+        )
         multi_note = (
-            f"\n路径表 {row.get('num_paths', 0)} 条（到终点 {row.get('num_goal_paths', 0)} 条）"
+            f"\n路径表 {row.get('num_paths', 0)} 条（到终点 {row.get('num_goal_paths', 0)}）"
             f" · coverage {cover}"
-            + (f" · 最优路径 {int(row['best_goal_hops'])} 跳"
+            + (f" · 最优 {int(row['best_goal_hops'])} 跳"
                if row.get("best_goal_hops") is not None else "")
+            + (f" · 备选 {alt_hops} 跳" if alt_hops else "")
         )
     ax.set_title(
         f"#{row['index']}  {row['difficulty']}/{row['mode']}\n"
         f"GT {int(row['optimal_hops'])} 跳 / {row['decisions']} 决策 · "
         f"预测 {int(row['pred_hops'])} 跳 · {status_text}{extra}{multi_note}",
-        fontsize=9,
+        fontsize=8.2,
     )
     # 等比例：布局坐标是各向同性的，拉成椭圆会让人误判"哪条路更近"
     ax.set_aspect("equal")
@@ -546,11 +598,13 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
         from matplotlib.lines import Line2D
 
         handles = [
-            Line2D([], [], color="#ff8c00", lw=5.0, label="模型预测路径（橙实线）"),
-            Line2D([], [], color="#ff9f40", lw=2.2, alpha=0.45,
-                   label="存活路径表里的其它路径（细橙线，到了终点）"),
-            Line2D([], [], color="#9e9e9e", lw=2.2, linestyle=(0, (2, 2)), alpha=0.45,
-                   label="路径表中断掉/走进环的分支（细灰虚线）"),
+            Line2D([], [], color="#ff8c00", lw=5.0, label="第 1 名（累计概率最高，粗橙线）"),
+            Line2D([], [], color="#c9c9c9", lw=1.5, label="路径表里的其它路径（淡灰细线）"),
+            Line2D([], [], color="#1f77b4", lw=2.6,
+                   label="第 2 名备选（圆圈编号 = 与主路径的分叉点）"),
+            Line2D([], [], color="#2ca02c", lw=2.6, label="第 3 名备选"),
+            Line2D([], [], color="#d62728", lw=2.6, label="第 4 名备选"),
+            Line2D([], [], color="#9467bd", lw=2.6, label="第 5 名备选"),
             Line2D([], [], color="#1f4fd8", lw=2.4, linestyle=(0, (3, 2.4)),
                    label="GT 最短路（蓝虚线）"),
             Line2D([], [], color="#dcdcdc", lw=1.0, label="干扰分支"),
@@ -640,7 +694,7 @@ def main() -> int:
 
     cols = min(args.cols, len(positions))
     rows = int(np.ceil(len(positions) / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(6.4 * cols, 3.2 * rows))
+    fig, axes = plt.subplots(rows, cols, figsize=(7.2 * cols, 3.4 * rows))
     axes = np.atleast_1d(axes).ravel()
     table: List[Dict[str, Any]] = []
     legend_handles = None

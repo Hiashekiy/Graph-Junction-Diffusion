@@ -9,10 +9,13 @@
     python scripts/generate_dataset.py --config configs/graph_flow.yaml \
         --name debug --set data.num_samples=300
 
-输出（默认 ``data/``）::
+输出目录默认取配置里的 ``paths.data_dir``（``configs/graph_flow.yaml`` 指向 ``data/controlled``）::
 
-    data/<name>_train.pkl / _val.pkl / _test.pkl
-    data/<name>_summary.json      # 指南第 16 节的全部指标
+    <data-dir>/<name>_train.pkl / _val.pkl / _test.pkl
+    <data-dir>/<name>_summary.json      # 指南第 16 节的全部指标
+
+数据集按来源分组存放（``data/controlled`` / ``long`` / ``oldv1`` / ``mixed`` / ``smoke``），
+生成别的族时用 ``--data-dir`` 指定，例如长链集 ``--data-dir data/long``。
 
 ``--split-by-graph``（默认开）保证同一张底层图的所有 OD query 落在同一个 split。
 """

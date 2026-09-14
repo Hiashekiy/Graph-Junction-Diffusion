@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Graph Junction · Lab</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div>
+      <h1>Graph Junction <em>Lab</em></h1>
+      <p>模型路径推演与实验指标工作台</p>
+    </div>
+    <div class="connection" id="connection"><i></i><span>正在连接本地服务</span></div>
+  </header>
+
+  <main>
+    <nav class="tabs" aria-label="面板标签页" role="tablist">
+      <button class="tab active" id="path-tab" role="tab" aria-selected="true" aria-controls="path-panel">路径可视化</button>
+      <button class="tab" id="metrics-tab" role="tab" aria-selected="false" aria-controls="metrics-panel">测试指标可视化</button>
+    </nav>
+
+    <section id="path-panel" class="tab-panel" role="tabpanel" aria-labelledby="path-tab">
+      <div class="control-bar">
+        <label>模型<select id="path-model"></select></label>
+        <label>数据集<select id="path-dataset"></select></label>
+        <label>样本编号
+          <span class="sample-row">
+            <span class="number-input"><input id="sample-index" type="number" min="0" value="0"><small id="dataset-count">—</small></span>
+            <button id="random-sample" type="button" title="在当前数据集里随机抽一个样本并直接生成">随机</button>
+          </span>
+        </label>
+        <label>解码方式
+          <select id="decode-mode"><option value="single">单路径</option><option value="multi">多分支</option></select>
+        </label>
+        <button id="generate" class="primary">生成并播放</button>
+      </div>
+
+      <div class="advanced" id="multi-controls" hidden>
+        <label>每次分叉 <select id="top-k"><option>2</option><option>3</option><option>4</option></select></label>
+        <label>路径表上限 <input id="beam-width" type="number" min="1" max="256" value="64"></label>
+        <label>显示路线数 <input id="display-paths" type="number" min="1" max="24" value="8"></label>
+        <label>NULL 策略 <select id="null-policy"><option value="stop">停止</option><option value="skip">跳过</option></select></label>
+      </div>
+
+      <div class="workspace">
+        <aside class="run-info">
+          <div class="eyebrow">当前样本</div>
+          <h2 id="sample-title">等待生成</h2>
+          <dl id="sample-stats">
+            <div><dt>难度 / 模式</dt><dd>—</dd></div>
+            <div><dt>节点 / 决策</dt><dd>—</dd></div>
+            <div><dt>最短路径</dt><dd>—</dd></div>
+            <div><dt>覆盖情况</dt><dd>—</dd></div>
+          </dl>
+          <div class="legend" id="path-legend"></div>
+          <p class="hint" id="view-hint">分叉路线使用独立颜色；合流后仍保持紧凑的多色总线。</p>
+        </aside>
+
+        <div class="graph-shell">
+          <div class="graph-toolbar">
+            <div class="view-switch" role="group" aria-label="图形显示内容">
+              <button id="view-path" class="active" aria-pressed="true">路径生成</button>
+              <button id="view-diffusion" aria-pressed="false" disabled>扩散过程</button>
+            </div>
+            <div class="playback" id="path-playback">
+              <button id="replay" aria-label="重新播放" disabled>↺</button>
+              <button id="play-pause" disabled>暂停</button>
+              <label>速度 <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+            </div>
+            <label class="switch" id="gt-switch"><input id="show-gt" type="checkbox" checked><span></span>GT 最短路</label>
+          </div>
+          <div class="diffusion-toolbar" id="diffusion-toolbar" hidden>
+            <div class="state-switch" role="group" aria-label="选择扩散状态">
+              <button id="state-clean" class="active" aria-pressed="true">预测干净状态 <code>ẑ₀</code></button>
+              <button id="state-noisy" aria-pressed="false">去噪后带噪状态 <code>zₜ₋₁</code></button>
+            </div>
+            <div class="diffusion-scrubber">
+              <button id="diffusion-replay" aria-label="从头播放扩散过程" disabled>↺</button>
+              <button id="diffusion-play" disabled>播放</button>
+              <input id="diffusion-step" type="range" min="0" max="49" value="0" aria-label="扩散时间步">
+              <strong id="diffusion-step-label">t = —</strong>
+            </div>
+          </div>
+          <svg id="graph" viewBox="0 0 1000 620" role="img" aria-label="路径动态图">
+            <text x="500" y="310" text-anchor="middle" class="empty-state">选择模型和数据集后生成路径</text>
+          </svg>
+          <div class="timeline"><div id="timeline-progress"></div></div>
+          <div id="path-status" class="status-line" aria-live="polite">尚未运行推理</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="metrics-panel" class="tab-panel" role="tabpanel" aria-labelledby="metrics-tab" hidden>
+      <div class="control-bar metrics-controls">
+        <label>数据集<select id="metric-dataset"><option value="all">全部数据集</option></select></label>
+        <label>指标<select id="metric-name"></select></label>
+        <label>解码口径<select id="metric-decode"><option value="all">全部口径</option><option value="single">单路径</option><option value="multi">多分支</option></select></label>
+      </div>
+      <div class="model-filters" id="model-filters" aria-label="选择参与比较的模型"></div>
+      <div class="metric-summary">
+        <div><span>已有评测组合</span><strong id="metric-combinations">0</strong></div>
+        <div><span>参与模型</span><strong id="metric-model-count">0</strong></div>
+        <div><span>覆盖数据集</span><strong id="metric-dataset-count">0</strong></div>
+      </div>
+      <section class="chart-section">
+        <div class="section-heading">
+          <div><span class="eyebrow">横向对照</span><h2 id="chart-title">测试结果</h2></div>
+          <p>悬停柱形查看精确值；缺失组合不会补零。</p>
+        </div>
+        <div id="metric-chart" class="metric-chart"></div>
+      </section>
+      <section class="table-section">
+        <div class="section-heading"><div><span class="eyebrow">完整记录</span><h2>指标明细</h2></div></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>模型</th><th>数据集</th><th>口径</th><th>Goal hit</th><th>Optimal</th><th>Cost ratio</th><th>Loop</th><th>Broken</th><th>Coverage</th></tr></thead>
+            <tbody id="metrics-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="alert" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>

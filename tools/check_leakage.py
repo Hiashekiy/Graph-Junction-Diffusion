@@ -10,12 +10,12 @@
 用法::
 
     python tools/check_leakage.py \
-        --pair data/mixed_oldv1_train.pkl data/mixed_oldv1_val.pkl \
-        --pair data/mixed_oldv1_train.pkl data/oldv1_test.pkl \
-        --pair data/mixed_oldv1_train.pkl data/controlled_test.pkl
+        --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl \
+        --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl \
+        --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
 
     # 或者一次给多份，检查所有两两组合
-    python tools/check_leakage.py --all data/mixed_oldv1_train.pkl data/mixed_oldv1_val.pkl data/oldv1_test.pkl
+    python tools/check_leakage.py --all data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl data/oldv1/oldv1_test.pkl
 
 退出码：有任何一对存在重叠 -> 1（配合 --strict 用于流水线；默认也是 1，便于发现）。
 """

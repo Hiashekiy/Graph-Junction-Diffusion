@@ -7,8 +7,10 @@ pytest-cache-files-*/
 # 产物目录：必须用前导斜杠锚定到仓库根！
 # 不带斜杠的 `data/` 会在**任意层级**匹配，会把源码包 src/data/ 也一起忽略掉
 # （真实踩过：src/data 下 7 个文件因此没进版本库）。
+# `data/*` + `!/data/README.md`：数据集本身不进库，但保留 data/ 那份目录索引。
 /outputs/
-/data/
+/data/*
+!/data/README.md
 /data_old/
 
 # 权重 / 数据文件

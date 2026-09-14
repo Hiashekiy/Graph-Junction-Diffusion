@@ -17,7 +17,7 @@
     python tools/multiseed_eval.py \
         --a outputs/runs/v2_controlled_100ep \
         --b outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled_test.pkl --seeds 0,1,2,3,4 --metric goal_hit
+        --data data/controlled/controlled_test.pkl --seeds 0,1,2,3,4 --metric goal_hit
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--b", required=True, help="新 run 目录")
     parser.add_argument("--checkpoint-a", default=None, help="默认 <a>/best.pt")
     parser.add_argument("--checkpoint-b", default=None, help="默认 <b>/best.pt")
-    parser.add_argument("--data", default="data/controlled_test.pkl")
+    parser.add_argument("--data", default="data/controlled/controlled_test.pkl")
     parser.add_argument("--seeds", default="0,1,2,3,4", help="逗号分隔的采样种子")
     parser.add_argument(
         "--metric",

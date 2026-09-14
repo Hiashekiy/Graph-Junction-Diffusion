@@ -14,8 +14,8 @@
 
 用法::
 
-    python tools/merge_datasets.py --out data/controlled_longmix_train.pkl \
-        --input data/controlled_train.pkl --input data/controlled_longpool.pkl \
+    python tools/merge_datasets.py --out data/long/controlled_longmix_train.pkl \
+        --input data/controlled/controlled_train.pkl --input data/long/controlled_longpool.pkl \
         --limit 900:1 --seed 0
 
 ``--limit N:INDEX`` 表示"第 INDEX 份输入最多取 N 条"（``N:1`` = 第二份最多 900 条），

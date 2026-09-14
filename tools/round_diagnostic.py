@@ -14,7 +14,7 @@
 用法::
 
     python tools/round_diagnostic.py outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled_val.pkl --samples 8
+        --data data/controlled/controlled_val.pkl --samples 8
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="inspect per-round changes inside one reverse step")
     parser.add_argument("run_dir", help="含 run_config.json 与 last.pt 的 run 目录")
     parser.add_argument("--checkpoint", default=None, help="默认 <run_dir>/last.pt")
-    parser.add_argument("--data", default="data/controlled_val.pkl")
+    parser.add_argument("--data", default="data/controlled/controlled_val.pkl")
     parser.add_argument("--samples", type=int, default=8)
     parser.add_argument("--device", default="cpu")
     return parser.parse_args()

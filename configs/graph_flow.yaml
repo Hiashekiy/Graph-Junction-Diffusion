@@ -96,6 +96,8 @@ evaluation:
   max_steps: 0               # 只能为 0/None 或等于 diffusion.T
 
 paths:
-  data_dir: data
+  # 生成器（scripts/generate_dataset.py）的默认输出目录。数据集按来源分组：
+  # controlled / long / oldv1 / mixed / smoke，本配置生成的是主数据集 controlled。
+  data_dir: data/controlled
   output_dir: outputs/runs
   run_name: v2_controlled_100ep_flow3

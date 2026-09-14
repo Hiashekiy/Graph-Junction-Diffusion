@@ -2,7 +2,7 @@
 
 用法::
 
-    python scripts/inspect_dataset.py --data data/er_256_train.pkl --limit 3
+    python scripts/inspect_dataset.py --data data/controlled/controlled_train.pkl --limit 3
 
 对每个样本打印：
     - 节点类型分布 / decision set
