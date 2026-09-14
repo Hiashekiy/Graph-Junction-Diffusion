@@ -154,6 +154,9 @@ def format_metrics(metrics: Dict[str, float]) -> str:
         ("broken_rate", "broken"),
         # 可微的软可达性代理指标，和 Hard Goal Hit 并排报告（第二轮修订）
         ("soft_goal_reachability", "soft_goal"),
+        # 存活路径表（--decode multi）才有的集合语义指标：至少一条到终点 / 至少一条最短路
+        ("coverage_rate", "coverage"),
+        ("optimal_coverage_rate", "opt_cov"),
         ("mean_elapsed", "sec/query"),
     ]
     parts = []

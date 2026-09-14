@@ -23,6 +23,15 @@
 * ``goal`` / ``loop`` / ``broken``：只看某一类结局；
 * ``optimal``：只看预测恰好等于最短路的。
 
+多分支（存活路径表）可视化（``--multi-k K``，K>0）：
+
+* 改用多路径解码（见 :mod:`src.evaluation.multi_path_decoder`），每个 decision 保留
+  top-K 条 branch，终止的路径移出表；
+* 画面上：**细橙线** = 路径表里其它"到终点"的路径，**细灰虚线** = 断掉/走进环的分支，
+  **粗橙线** = 累计 log 概率最高的那条（主路径），蓝虚线仍是 GT 最短路；
+* 每张图标题里给出 `路径表 N 条（到终点 M 条）· coverage ✓/✗`，一眼看出"分叉在哪、
+  哪条活了"。``--null-policy skip`` 可以让 NULL 不停、继续在非 NULL 候选里分叉。
+
 布局：把 GT 路径上的节点固定成一条从左到右的"脊柱"，其余节点用 spring 布局挂在
 周围 —— Controlled Junction Graph 本身就是"骨架 + 干扰分支"，这样画出来的图能直接
 看出模型在哪一段拐错了。
@@ -98,6 +107,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dpi", type=int, default=130)
     parser.add_argument("--title", default=None)
     parser.add_argument("--json-out", default=None, help="把每张图的路径写成 json")
+    parser.add_argument(
+        "--multi-k",
+        "--top-k",
+        dest="multi_k",
+        type=int,
+        default=0,
+        help=">0 时改用**存活路径表**解码：每个 decision 保留 top-k 条 branch，"
+             "画面上把整张路径表用细线画出来、累计概率最高的那条仍用粗线。"
+             "0（默认）= 现在的单路径画法",
+    )
+    parser.add_argument(
+        "--beam-width", type=int, default=64,
+        help="--multi-k 时存活路径表的最大长度",
+    )
+    parser.add_argument(
+        "--null-policy", default="stop", choices=["stop", "skip"],
+        help="--multi-k 时 NULL 的处理：stop=选中即该路径终止（现状语义）；"
+             "skip=NULL 不停，只在非 NULL 候选里取 top-k",
+    )
+    parser.add_argument(
+        "--multi-max-draw", type=int, default=60,
+        help="--multi-k 时每张图最多画多少条细线路径（按概率从高到低），防画面糊掉",
+    )
     return parser.parse_args()
 
 
@@ -106,11 +138,16 @@ def parse_args() -> argparse.Namespace:
 # ---------------------------------------------------------------------------
 @torch.no_grad()
 def decode_pool(model, diffusion, dataset, device, generator, args) -> List[Dict[str, Any]]:
-    """在整个 pool 上解码，返回每个样本的预测路径与判定。"""
+    """在整个 pool 上解码，返回每个样本的预测路径与判定。
+
+    ``--multi-k K``（K>0）时改用存活路径表解码：主路径（画粗线）取累计 log 概率最高的
+    那条，同时把整张表（含每条路径的 status / 概率 / 跳数）带回去画细线。
+    """
     import networkx as nx
 
     from src.data.collate import collate_samples
     from src.diffusion.sampler import sample_reverse_chain
+    from src.evaluation.multi_path_decoder import decode_multi_path
     from src.evaluation.path_decoder import (
         candidate_offsets,
         decision_offsets,
@@ -134,12 +171,47 @@ def decode_pool(model, diffusion, dataset, device, generator, args) -> List[Dict
         offsets = decision_offsets(chunk)
         candidate_starts = candidate_offsets(chunk)
         for index, sample in enumerate(chunk):
-            result = decode_flat(
-                sample,
-                z0,
-                decision_offset=offsets[index],
-                candidate_offset=candidate_starts[index],
-            )
+            multi_info: Dict[str, Any] = {}
+            if getattr(args, "multi_k", 0) and args.multi_k > 0:
+                local = chain["candidate_prob"][
+                    candidate_starts[index] : candidate_starts[index] + sample.num_candidates
+                ]
+                multi = decode_multi_path(
+                    sample,
+                    local,
+                    top_k=args.multi_k,
+                    beam_width=args.beam_width,
+                    null_policy=args.null_policy,
+                )
+                best = multi.best
+                if best is None:  # pragma: no cover
+                    from src.evaluation.path_decoder import DecodeResult
+
+                    result = DecodeResult("broken", [sample.start], 0, "empty frontier")
+                else:
+                    result = best.to_decode_result()
+                multi_info = {
+                    "multi_paths": [
+                        {
+                            "nodes": list(path.nodes),
+                            "status": path.status,
+                            "log_prob": float(path.log_prob),
+                            "hops": int(path.cost),
+                        }
+                        for path in multi.finished
+                    ],
+                    "coverage": bool(multi.coverage),
+                    "num_paths": len(multi.finished),
+                    "num_goal_paths": len(multi.goal_paths),
+                    "best_goal_hops": multi.best_goal_cost,
+                }
+            else:
+                result = decode_flat(
+                    sample,
+                    z0,
+                    decision_offset=offsets[index],
+                    candidate_offset=candidate_starts[index],
+                )
             optimal_cost = float(
                 nx.shortest_path_length(sample.graph, sample.start, sample.goal)
             )
@@ -158,6 +230,7 @@ def decode_pool(model, diffusion, dataset, device, generator, args) -> List[Dict
                     "decisions": int(sample.num_decisions),
                     "nodes": int(sample.num_nodes),
                     "graph_id": sample.meta.get("graph_id"),
+                    **multi_info,
                 }
             )
     return results
@@ -361,6 +434,32 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
 
     predicted = edge_list(row["path"])
     ground_truth = edge_list(sample.gt_path)
+
+    # 存活路径表（--multi-k）：细线画出整张表，粗线仍是累计概率最高的那条。
+    # 颜色区分结局：到终点=橙、走进环=紫、断掉=灰（这样一眼能看出"哪条活了"）。
+    multi_paths = row.get("multi_paths") or []
+    if multi_paths:
+        best_nodes = [int(v) for v in row["path"]]
+        colors = {"goal": "#ff9f40", "loop": "#9467bd", "broken": "#9e9e9e", "pruned": "#c7c7c7"}
+        drawn = 0
+        for item in multi_paths:
+            nodes = [int(v) for v in item["nodes"]]
+            if nodes == best_nodes:
+                continue                       # 最好那条最后用粗线画
+            if drawn >= getattr(args, "multi_max_draw", 60):
+                break
+            edges = edge_list(nodes)
+            if not edges:
+                continue
+            nx.draw_networkx_edges(
+                graph, pos, edgelist=edges, ax=ax,
+                edge_color=colors.get(item["status"], "#9e9e9e"),
+                width=2.2,
+                style="solid" if item["status"] == "goal" else (0, (2, 2)),
+                alpha=0.45,
+            )
+            drawn += 1
+
     # 画法约定：**预测路径是橙色粗实线**（它是这张图的主角），**GT 最短路是蓝色细虚线**
     # 盖在上面。两者一致时看到"橙底蓝虚线"；分岔之后橙色继续走模型选的路、蓝色虚线
     # 继续走 GT，两条线分开，一眼能看出模型在哪一跳拐错了。
@@ -425,10 +524,19 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
         extra = ""
     if not same_as_gt and common >= 1:
         extra += f" · 第 {common} 跳与 GT 分开（X）"
+    multi_note = ""
+    if multi_paths:
+        cover = "✓" if row.get("coverage") else "✗"
+        multi_note = (
+            f"\n路径表 {row.get('num_paths', 0)} 条（到终点 {row.get('num_goal_paths', 0)} 条）"
+            f" · coverage {cover}"
+            + (f" · 最优路径 {int(row['best_goal_hops'])} 跳"
+               if row.get("best_goal_hops") is not None else "")
+        )
     ax.set_title(
         f"#{row['index']}  {row['difficulty']}/{row['mode']}\n"
         f"GT {int(row['optimal_hops'])} 跳 / {row['decisions']} 决策 · "
-        f"预测 {int(row['pred_hops'])} 跳 · {status_text}{extra}",
+        f"预测 {int(row['pred_hops'])} 跳 · {status_text}{extra}{multi_note}",
         fontsize=9,
     )
     # 等比例：布局坐标是各向同性的，拉成椭圆会让人误判"哪条路更近"
@@ -439,6 +547,10 @@ def draw_panel(ax, sample, row: Dict[str, Any], args, seed: int, show_legend: bo
 
         handles = [
             Line2D([], [], color="#ff8c00", lw=5.0, label="模型预测路径（橙实线）"),
+            Line2D([], [], color="#ff9f40", lw=2.2, alpha=0.45,
+                   label="存活路径表里的其它路径（细橙线，到了终点）"),
+            Line2D([], [], color="#9e9e9e", lw=2.2, linestyle=(0, (2, 2)), alpha=0.45,
+                   label="路径表中断掉/走进环的分支（细灰虚线）"),
             Line2D([], [], color="#1f4fd8", lw=2.4, linestyle=(0, (3, 2.4)),
                    label="GT 最短路（蓝虚线）"),
             Line2D([], [], color="#dcdcdc", lw=1.0, label="干扰分支"),
@@ -492,6 +604,13 @@ def main() -> int:
         f"loop={sum(1 for r in results if r['status'] == 'loop')}  "
         f"broken={sum(1 for r in results if r['status'] == 'broken')}"
     )
+    if getattr(args, "multi_k", 0) and args.multi_k > 0:
+        covered = sum(1 for row in results if row.get("coverage"))
+        print(
+            f"multi decode: top_k={args.multi_k} beam_width={args.beam_width} "
+            f"null_policy={args.null_policy}  ——  主路径=累计概率最高那条；"
+            f"coverage(至少一条到终点)={covered}/{len(results)}"
+        )
 
     args.resolved_select_seed = resolve_select_seed(args)
     positions = select_indices(results, args)
@@ -540,6 +659,10 @@ def main() -> int:
                                              "optimal", "reason")},
                 "path": row["path"],
                 "gt_path": list(sample.gt_path),
+                "num_paths": row.get("num_paths"),
+                "num_goal_paths": row.get("num_goal_paths"),
+                "coverage": row.get("coverage"),
+                "best_goal_hops": row.get("best_goal_hops"),
             }
         )
     for spare in range(len(positions), len(axes)):
@@ -554,6 +677,12 @@ def main() -> int:
         f"{run_dir.name}  ·  {model.flow_steps_label}  ·  "
         f"Checkpoint epoch {payload.get('epoch')}  ·  {Path(args.data).name}  ·  "
         f"{select_note}  ·  sample_seed={seed}"
+        + (
+            f"  ·  multi_k={args.multi_k}(beam={args.beam_width},"
+            f"null={args.null_policy})"
+            if getattr(args, "multi_k", 0) and args.multi_k > 0
+            else ""
+        )
     )
     fig.suptitle(title, fontsize=13, y=0.995)
     if legend_handles:
@@ -574,14 +703,22 @@ def main() -> int:
 
     header = (
         f"{'idx':>4}  {'difficulty':<10} {'mode':<12} {'dec':>3} {'gt_hops':>7} "
-        f"{'pred_hops':>9}  {'status':<7} {'optimal':<7} note"
+        f"{'pred_hops':>9}  {'status':<7} {'optimal':<7} {'paths':>5} {'to_goal':>7} "
+        f"{'cover':<5} note"
     )
     lines = [title, "", header, "-" * len(header)]
     for row in table:
+        paths = row.get("num_paths")
+        paths_text = f"{paths:>5}" if paths is not None else f"{'-':>5}"
+        goal_text = f"{row['num_goal_paths']:>7}" if paths is not None else f"{'-':>7}"
+        cover_text = (
+            ("yes" if row.get("coverage") else "no") if paths is not None else "-"
+        )
         lines.append(
             f"{row['index']:>4}  {row['difficulty']:<10} {row['mode']:<12} "
             f"{row['decisions']:>3} {int(row['optimal_hops']):>7} {int(row['pred_hops']):>9}  "
-            f"{row['status']:<7} {'yes' if row['optimal'] else 'no':<7} {row['reason']}"
+            f"{row['status']:<7} {'yes' if row['optimal'] else 'no':<7} {paths_text} "
+            f"{goal_text} {cover_text:<5} {row['reason']}"
         )
     report = "\n".join(lines)
     print(report)

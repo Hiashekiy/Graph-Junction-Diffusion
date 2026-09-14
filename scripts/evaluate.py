@@ -48,6 +48,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--stochastic", action="store_true", help="强制随机采样")
     parser.add_argument("--deterministic", action="store_true", help="posterior argmax 采样")
+    parser.add_argument(
+        "--decode",
+        default="single",
+        choices=["single", "multi"],
+        help="single：按采样 z_0 单路径解码（历史口径）；"
+        "multi：存活路径表解码（每个 decision 保留 top-k 条 branch，主指标取累计概率"
+        "最高的那条，并额外报告 coverage_rate / optimal_coverage_rate）",
+    )
+    parser.add_argument("--top-k", type=int, default=2, help="--decode multi 时每个路口的 branch 数")
+    parser.add_argument("--beam-width", type=int, default=64, help="--decode multi 时存活路径表上限")
+    parser.add_argument(
+        "--null-policy",
+        default="stop",
+        choices=["stop", "skip"],
+        help="stop：NULL 参与排名、选中即该路径终止；skip：NULL 不停，只在非 NULL 候选里取 top-k",
+    )
     parser.add_argument("--baselines", action="store_true", help="顺带跑 shortest/greedy baseline")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument(
@@ -89,6 +105,14 @@ def main() -> int:
             f"(trained with {model.max_flow_steps})"
         )
     print(f"model        : {model.flow_steps_label}")
+    if args.decode == "multi":
+        print(
+            f"decode       : multi (top_k={args.top_k}, beam_width={args.beam_width}, "
+            f"null_policy={args.null_policy})  —— 主指标取累计概率最高的路径，"
+            "额外报告 coverage_rate / optimal_coverage_rate"
+        )
+    else:
+        print("decode       : single（按采样 z_0 解码，历史口径）")
 
     diffusion = build_diffusion(config)
     dataset = GraphQueryDataset.load(args.data)
@@ -105,6 +129,10 @@ def main() -> int:
         max_steps=int(config.get("evaluation.max_steps", 0)) or None,
         progress=not args.no_progress,
         weights=None,
+        decode=args.decode,
+        top_k=args.top_k,
+        beam_width=args.beam_width,
+        null_policy=args.null_policy,
     )
 
     print("main metrics :", report.summary())
@@ -119,6 +147,10 @@ def main() -> int:
             "flow_steps": int(model.flow_steps),
             "trained_flow_steps": int(model.max_flow_steps),
             "label": model.flow_steps_label,
+            "decode": args.decode,
+            "top_k": int(args.top_k) if args.decode == "multi" else None,
+            "beam_width": int(args.beam_width) if args.decode == "multi" else None,
+            "null_policy": args.null_policy if args.decode == "multi" else None,
         },
         "records": records_to_dicts(report.records),
     }

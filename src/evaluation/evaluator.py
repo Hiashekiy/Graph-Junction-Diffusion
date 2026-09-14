@@ -25,6 +25,7 @@ from src.evaluation.metrics import (
     evaluate_sample,
     format_metrics,
 )
+from src.evaluation.multi_path_decoder import decode_multi_path
 from src.evaluation.path_decoder import (
     DecodeResult,
     candidate_offsets,
@@ -59,8 +60,23 @@ def evaluate_dataset(
     max_branches: int = 4096,
     progress: bool = True,
     weights: Optional[LossWeights] = None,
+    decode: str = "single",
+    top_k: int = 2,
+    beam_width: int = 64,
+    null_policy: str = "stop",
 ) -> EvaluationReport:
-    """在 dataset 上跑完整评测。"""
+    """在 dataset 上跑完整评测。
+
+    ``decode``：
+
+    * ``"single"``（默认）：按采样出来的 ``z_0`` 单路径解码，与历史结果口径一致；
+    * ``"multi"``：**存活路径表**解码（每个 decision 保留 ``top_k`` 条 branch，
+      见 :mod:`src.evaluation.multi_path_decoder`）。主指标取"累计概率最高的那条
+      路径"，同时额外报告集合语义的 ``coverage_rate`` / ``optimal_coverage_rate``
+      （至少有一条路径到终点 / 至少有一条最短路）。
+    """
+    if decode not in ("single", "multi"):
+        raise ValueError(f"decode={decode!r} is not supported (single | multi)")
     model.eval()
     device = torch.device(device)
 
@@ -69,6 +85,9 @@ def evaluate_dataset(
     debug_count = 0
     soft_goal_total = 0.0
     soft_goal_graphs = 0
+    coverage_hits = 0
+    optimal_coverage_hits = 0
+    finished_paths_total = 0
     start_time = time.time()
     batches = iter_batches(list(dataset), batch_size=batch_size, shuffle=False)
 
@@ -97,13 +116,35 @@ def evaluate_dataset(
         candidate_starts = candidate_offsets(samples)
         per_sample_time = elapsed / max(len(samples), 1)
         for index, sample in enumerate(samples):
-            result: DecodeResult = decode_flat(
-                sample,
-                z0,
-                decision_offset=offsets[index],
-                candidate_offset=candidate_starts[index],
-                max_branches=max_branches,
-            )
+            if decode == "multi":
+                local_prob = chain["candidate_prob"][
+                    candidate_starts[index] : candidate_starts[index] + sample.num_candidates
+                ]
+                multi = decode_multi_path(
+                    sample,
+                    local_prob,
+                    top_k=top_k,
+                    beam_width=beam_width,
+                    null_policy=null_policy,
+                )
+                best = multi.best
+                if best is None:  # pragma: no cover - frontier 非空，理论上不会发生
+                    result = DecodeResult("broken", [sample.start], 0, "empty frontier")
+                else:
+                    result = best.to_decode_result()
+                coverage_hits += int(multi.coverage)
+                optimal_coverage_hits += int(
+                    any(path.cost <= sample.gt_length for path in multi.goal_paths)
+                )
+                finished_paths_total += len(multi.finished)
+            else:
+                result = decode_flat(
+                    sample,
+                    z0,
+                    decision_offset=offsets[index],
+                    candidate_offset=candidate_starts[index],
+                    max_branches=max_branches,
+                )
             records.append(evaluate_sample(sample, result, per_sample_time))
 
         # debug metric（teacher-forced 单步），不参与模型选择
@@ -126,6 +167,11 @@ def evaluate_dataset(
     metrics["wall_time"] = time.time() - start_time
     if soft_goal_graphs:
         metrics["soft_goal_reachability"] = soft_goal_total / soft_goal_graphs
+    if decode == "multi":
+        total = max(len(records), 1)
+        metrics["coverage_rate"] = coverage_hits / total
+        metrics["optimal_coverage_rate"] = optimal_coverage_hits / total
+        metrics["mean_finished_paths"] = finished_paths_total / total
     debug = (
         {key: value / max(debug_count, 1) for key, value in debug_accum.items()}
         if debug_count

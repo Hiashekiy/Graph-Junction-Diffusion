@@ -50,6 +50,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--flow-steps-b", type=int, default=None,
                         help="评测 run B 时临时覆盖推理轮数（默认用它的 run_config）")
+    parser.add_argument(
+        "--decode", default="single", choices=["single", "multi"],
+        help="single：按采样 z_0 单路径解码（历史口径）；multi：存活路径表解码"
+             "（两个 run 都按同一模式评测，配对检验比的才是同一件事）",
+    )
+    parser.add_argument("--top-k", type=int, default=2, help="--decode multi 时每个路口的 branch 数")
+    parser.add_argument("--beam-width", type=int, default=64, help="--decode multi 时存活路径表上限")
+    parser.add_argument("--null-policy", default="stop", choices=["stop", "skip"],
+                        help="stop：NULL 参与排名、选中即该路径终止；skip：NULL 不停")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--bootstrap", type=int, default=5000)
@@ -75,6 +84,10 @@ def _evaluate_run(
     device,
     batch_size: int | None,
     flow_steps_override: int | None,
+    decode: str = "single",
+    top_k: int = 2,
+    beam_width: int = 64,
+    null_policy: str = "stop",
 ) -> np.ndarray:
     """返回 [num_seeds, num_queries] 的 0/1 矩阵。"""
     from src.data.dataset import GraphQueryDataset
@@ -109,6 +122,10 @@ def _evaluate_run(
             max_steps=int(config.get("evaluation.max_steps", 0)) or None,
             progress=False,
             weights=None,
+            decode=decode,
+            top_k=top_k,
+            beam_width=beam_width,
+            null_policy=null_policy,
         )
         rows.append([1.0 if flag(record.to_dict(), metric) else 0.0 for record in report.records])
         print(
@@ -153,17 +170,27 @@ def main() -> int:
         f"checkpoint={checkpoint_b.name}"
         + (f"  (inference overridden to {args.flow_steps_b})" if args.flow_steps_b else "")
     )
-    print(f"data = {args.data}   seeds = {seeds}   metric = {args.metric}\n")
+    print(
+        f"data = {args.data}   seeds = {seeds}   metric = {args.metric}   "
+        f"decode = {args.decode}"
+        + (f" (top_k={args.top_k}, beam_width={args.beam_width}, null_policy={args.null_policy})"
+           if args.decode == "multi" else "")
+        + "\n"
+    )
 
     print("evaluating A:")
     hits_a = _evaluate_run(
         run_a, checkpoint_a, args.data, seeds, args.metric, device,
         args.batch_size, None,
+        decode=args.decode, top_k=args.top_k, beam_width=args.beam_width,
+        null_policy=args.null_policy,
     )
     print("evaluating B:")
     hits_b = _evaluate_run(
         run_b, checkpoint_b, args.data, seeds, args.metric, device,
         args.batch_size, args.flow_steps_b,
+        decode=args.decode, top_k=args.top_k, beam_width=args.beam_width,
+        null_policy=args.null_policy,
     )
 
     per_seed_a = hits_a.mean(axis=1)
