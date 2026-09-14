@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, Sequence
 
@@ -109,7 +110,8 @@ def evaluate_sample(
     return SampleRecord(
         status="goal",
         goal_hit=True,
-        optimal=abs(pred_cost - optimal_cost) < 1e-6,
+        # 相对 + 绝对容差：weighted 图的 cost 可以到 O(1e2)，纯绝对阈值不够稳
+        optimal=math.isclose(pred_cost, optimal_cost, rel_tol=1e-6, abs_tol=1e-6),
         pred_cost=pred_cost,
         optimal_cost=optimal_cost,
         cost_ratio=ratio,
@@ -157,6 +159,10 @@ def format_metrics(metrics: Dict[str, float]) -> str:
         # 存活路径表（--decode multi）才有的集合语义指标：至少一条到终点 / 至少一条最短路
         ("coverage_rate", "coverage"),
         ("optimal_coverage_rate", "opt_cov"),
+        # weighted 图上按真实 cost 判定的同一件事（名字点明口径，值 = opt_cov）
+        ("weighted_optimal_coverage_rate", "w_opt_cov"),
+        ("mean_goal_paths", "goal_paths"),
+        ("mean_filtered_dead_branches", "dead_filtered"),
         ("mean_elapsed", "sec/query"),
     ]
     parts = []

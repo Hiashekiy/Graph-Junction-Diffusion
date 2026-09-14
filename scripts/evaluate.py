@@ -7,6 +7,18 @@
 
 输出主指标：Goal Hit / Optimal Path / Success Cost Ratio / Loop / Broken / 推理时间。
 另外会打印一个 **debug 用** 的 teacher-forced 单步 decision accuracy。
+
+``--decode multi`` 时，同一个存活路径表会按《Multi-Path Decoder 增强修改指南》第 8 节
+并排输出三条口径（都走同一套 ``evaluate_sample``）：
+
+    multi_best            累计 log 概率最高（历史口径，= 主指标）
+    multi_best_goal       Goal 路径里概率最高
+    multi_best_goal_cost  Goal 路径里真实 cost 最低
+
+额外的集合语义指标：``coverage_rate`` / ``optimal_coverage_rate``
+（weighted 数据集上后者按 Dijkstra 最小 cost 判定，并额外暴露
+``weighted_optimal_coverage_rate`` 这个名字）/ ``mean_goal_paths`` /
+``mean_filtered_dead_branches``。结果 JSON 里放在 ``multi`` 键下。
 """
 
 from __future__ import annotations
@@ -54,9 +66,16 @@ def parse_args() -> argparse.Namespace:
         choices=["single", "multi"],
         help="single：按采样 z_0 单路径解码（历史口径）；"
         "multi：存活路径表解码（每个 decision 保留 top-k 条 branch，主指标取累计概率"
-        "最高的那条，并额外报告 coverage_rate / optimal_coverage_rate）",
+        "最高的那条，并额外输出 multi_best_goal / multi_best_goal_cost 两条口径与"
+        "coverage_rate / optimal_coverage_rate）",
     )
     parser.add_argument("--top-k", type=int, default=2, help="--decode multi 时每个路口的 branch 数")
+    parser.add_argument(
+        "--filter-dead-branches",
+        action="store_true",
+        help="--decode multi 时，top-k 之前剔除「终点既不是 Goal 也不是 decision "
+        "node」的非 NULL branch（默认关 = 历史多分支结果逐位可复现）",
+    )
     parser.add_argument("--beam-width", type=int, default=64, help="--decode multi 时存活路径表上限")
     parser.add_argument(
         "--null-policy",
@@ -133,9 +152,20 @@ def main() -> int:
         top_k=args.top_k,
         beam_width=args.beam_width,
         null_policy=args.null_policy,
+        filter_dead_branches=args.filter_dead_branches,
     )
 
     print("main metrics :", report.summary())
+    if report.multi:
+        # 指南第 8 节：同一个存活路径表，三条口径并排看（multi_best 是历史口径）
+        for label in ("multi_best", "multi_best_goal", "multi_best_goal_cost"):
+            row = report.multi.get(label, {})
+            if not row:
+                continue
+            print(f"  {label:<20s} goal_hit={row.get('goal_hit_rate', float('nan')):.4f}"
+                  f"  optimal={row.get('optimal_path_rate', float('nan')):.4f}"
+                  f"  cost_ratio={row.get('success_cost_ratio', float('nan')):.4f}"
+                  f"  broken={row.get('broken_rate', float('nan')):.4f}")
     if report.debug:
         print(f"debug metric : one_step_x0_acc={report.debug.get('accuracy', float('nan')):.4f} "
               f"(只作诊断，不作模型选择)")
@@ -151,9 +181,14 @@ def main() -> int:
             "top_k": int(args.top_k) if args.decode == "multi" else None,
             "beam_width": int(args.beam_width) if args.decode == "multi" else None,
             "null_policy": args.null_policy if args.decode == "multi" else None,
+            "filter_dead_branches": bool(args.filter_dead_branches)
+            if args.decode == "multi"
+            else None,
         },
         "records": records_to_dicts(report.records),
     }
+    if report.multi:
+        payload["multi"] = report.multi
     if args.baselines:
         payload["baselines"] = baseline_summary(dataset)
         print("baselines    :", json.dumps(payload["baselines"], ensure_ascii=False))

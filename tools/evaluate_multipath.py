@@ -38,6 +38,7 @@ from src.evaluation.metrics import (  # noqa: E402
     aggregate,
     evaluate_sample,
 )
+from src.evaluation.evaluator import optimal_coverage  # noqa: E402
 from src.evaluation.multi_path_decoder import decode_multi_path  # noqa: E402
 from src.evaluation.path_decoder import (  # noqa: E402
     candidate_offsets,
@@ -64,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="stop：NULL 参与排名、选中即该路径终止（现状语义）；skip：NULL 不停，"
              "只在非 NULL 候选里取 top-k",
     )
+    parser.add_argument(
+        "--filter-dead-branches",
+        action="store_true",
+        help="top-k 之前剔除「终点既不是 Goal 也不是 decision node」的非 NULL branch"
+        "（默认关 = 历史行为逐位可复现）",
+    )
     parser.add_argument("--seeds", default="0", help="逗号分隔的采样种子（模型分布随种子变）")
     parser.add_argument("--limit", type=int, default=0, help="只评测前 N 条（0 = 全部）")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -87,8 +94,12 @@ def evaluate_seed(
 
     single_records: List[SampleRecord] = []
     best_records: List[SampleRecord] = []
+    best_goal_records: List[SampleRecord] = []
+    best_goal_cost_records: List[SampleRecord] = []
     coverage = 0
-    optimal_coverage = 0
+    optimal_coverage_hits = 0
+    weighted_seen = False
+    filtered_total = 0
     goal_path_counts: List[int] = []
     finished_counts: List[int] = []
     pruned_total = 0
@@ -122,6 +133,7 @@ def evaluate_seed(
                 top_k=args.top_k,
                 beam_width=args.beam_width,
                 null_policy=args.null_policy,
+                filter_dead_branches=args.filter_dead_branches,
             )
             best = multi.best
             if best is None:  # pragma: no cover - 理论上不会发生
@@ -132,10 +144,35 @@ def evaluate_seed(
                 best_result = best.to_decode_result()
             best_records.append(evaluate_sample(sample, best_result))
 
+            # 指南第 8 节：Goal 路径里"概率最高"与"真实 cost 最低"各自单独评测
+            for records, path in (
+                (best_goal_records, multi.best_goal),
+                (best_goal_cost_records, multi.best_goal_cost_path),
+            ):
+                if path is None:
+                    from src.evaluation.path_decoder import DecodeResult
+
+                    records.append(
+                        evaluate_sample(
+                            sample,
+                            DecodeResult(
+                                "broken",
+                                [sample.start],
+                                0,
+                                "no goal path in the surviving table",
+                            ),
+                        )
+                    )
+                else:
+                    records.append(evaluate_sample(sample, path.to_decode_result()))
+
             hit = multi.coverage
             coverage += int(hit)
-            optimal_cov = any(path.cost <= sample.gt_length for path in multi.goal_paths)
-            optimal_coverage += int(optimal_cov)
+            # 集合语义：路径表里至少有一条**真实最优**（weighted = 最小 cost；
+            # 无权图退化成跳数，与旧口径等价）
+            optimal_coverage_hits += int(optimal_coverage(sample, multi))
+            weighted_seen = weighted_seen or bool(sample.graph.graph.get("weighted", False))
+            filtered_total += int(multi.num_filtered_dead_branches)
             goal_path_counts.append(len(multi.goal_paths))
             finished_counts.append(len(multi.finished))
             pruned_total += multi.pruned
@@ -150,9 +187,12 @@ def evaluate_seed(
                         "gt_length": sample.gt_length,
                         "single": single.status,
                         "best": best.status if best else None,
-                        "best_cost": best.cost if best else None,
+                        "best_hops": best.cost if best else None,
+                        "best_path_cost": best.path_cost if best else None,
+                        "best_goal_path_cost": multi.best_goal_path_cost,
                         "coverage": hit,
-                        "goal_paths": [(p.cost, round(p.log_prob, 3)) for p in multi.goal_paths[:5]],
+                        "goal_paths_by_prob": multi.goal_paths_by_prob_dicts(3),
+                        "goal_paths_by_cost": multi.goal_paths_by_cost_dicts(3),
                         **multi.summary(),
                     }
                 )
@@ -163,15 +203,23 @@ def evaluate_seed(
         "num_queries": len(single_records),
         "single_path": aggregate(single_records),
         "multi_best": aggregate(best_records),
+        "multi_best_goal": aggregate(best_goal_records),
+        "multi_best_goal_cost": aggregate(best_goal_cost_records),
         "coverage_rate": coverage / n,
-        "optimal_coverage_rate": optimal_coverage / n,
+        "optimal_coverage_rate": optimal_coverage_hits / n,
         "mean_goal_paths": statistics.fmean(goal_path_counts) if goal_path_counts else 0.0,
         "mean_finished_paths": statistics.fmean(finished_counts) if finished_counts else 0.0,
+        "mean_filtered_dead_branches": filtered_total / n,
         "mean_pruned": pruned_total / n,
         "mean_expanded": expanded_total / n,
         "max_depth": depth_max,
+        "filter_dead_branches": bool(args.filter_dead_branches),
+        "dataset_is_weighted": bool(weighted_seen),
         "wall_time": time.time() - start_time,
     }
+    if weighted_seen:
+        # 名字点明按真实 cost 判定；无权图上它与 optimal_coverage_rate 是同一件事
+        out["weighted_optimal_coverage_rate"] = optimal_coverage_hits / n
     if args.show:
         out["details"] = details
     return out
@@ -207,7 +255,8 @@ def main() -> int:
     print(f"checkpoint   : {checkpoint} (epoch={payload.get('epoch')})")
     print(f"data         : {args.data}  ({len(samples)} queries)")
     print(f"mode         : top_k={args.top_k} beam_width={args.beam_width} "
-          f"null_policy={args.null_policy} seeds={seeds}")
+          f"null_policy={args.null_policy} "
+          f"filter_dead_branches={bool(args.filter_dead_branches)} seeds={seeds}")
     print()
 
     results = []
@@ -217,10 +266,18 @@ def main() -> int:
         print(f"--- seed {seed} ({result['wall_time']:.1f}s)")
         print(_line("  单路径(采样 z0，现状)", result["single_path"]))
         print(_line("  多分支 best(累计概率最高)", result["multi_best"]))
+        print(_line("  best_goal(Goal 里概率最高)", result["multi_best_goal"]))
+        print(_line("  best_goal_cost(Goal 里 cost 最低)", result["multi_best_goal_cost"]))
         print(f"  多分支 coverage(>=1 条到终点) : {result['coverage_rate']:.4f}")
-        print(f"  多分支 optimal coverage       : {result['optimal_coverage_rate']:.4f}")
+        coverage_label = (
+            "  多分支 weighted optimal coverage(>=1 条最小 cost 路)"
+            if result.get("dataset_is_weighted")
+            else "  多分支 optimal coverage(>=1 条最短路)"
+        )
+        print(f"{coverage_label} : {result['optimal_coverage_rate']:.4f}")
         print(f"  平均：终止路径 {result['mean_finished_paths']:.1f} 条 / 到终点 "
               f"{result['mean_goal_paths']:.1f} 条 / 剪枝 {result['mean_pruned']:.1f} 条 / "
+              f"被预筛选的必死 branch {result['mean_filtered_dead_branches']:.1f} 条 / "
               f"最大深度 {result['max_depth']}")
         if args.show:
             print("  样例：")

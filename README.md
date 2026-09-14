@@ -101,6 +101,18 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/download_graph_datasets.py --with-
 E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
 ```
 
+**G. Weighted 数据集 —— `data/weighted_controlled/`（第 20 节的带权扩展）**
+
+| 文件 | 是什么 | 规模 | 用途 |
+|---|---|---|---|
+| `weighted_controlled_train.pkl` | 加权主训练集（3000 条按图 8:1:1 切出来的 train） | 2400 条 | `v2_weighted_controlled` 的训练集 |
+| `weighted_controlled_val.pkl` | 加权验证集 | 300 条 | 模型选择 |
+| `weighted_controlled_test.pkl` | 加权标准测试集 | 300 条 | 带权能力的主指标 |
+| `weighted_controlled_summary.json` | 生成统计 + **weighted sanity check**（conflict rate / bfs cost ratio / 权重分布） | — | 判断这份数据到底难不难 |
+
+每条边 w ~ U(1, 10)（可用 `data.edge_weight.distribution` 换 loguniform），GT 是 Dijkstra 最小 cost 路径。
+实测：conflict rate 0.460、bfs cost ratio 1.034、`gt_path_is_weighted_optimal_fraction` 1.0。
+
 ### 0.2 训练好的模型（`outputs/runs/`，checkpoint 不进版本库）
 
 | run 目录 | 网络/推理 | 训练集 | 训练规模 | best epoch | val goal_hit | `controlled_test`(300) goal / optimal | `controlled_long`(400) goal / optimal | `oldv1_test`(2444) goal / optimal |
@@ -109,6 +121,12 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
 | `outputs/runs/v2_controlled_100ep_flow3` | 旧 attention，flow_steps=3 | `controlled_train` | 100 epoch | 80 | 0.8900 | 0.9167 / 0.7233 | 0.6685 / 0.5335（5 种子） | 0.604 / 0.367 |
 | `outputs/runs/v2_rev2_longmix/v2_rev2_longmix` | 新 attention（node+edge K）+ Soft Goal，flow_steps=3 | `controlled_longmix_train` | 100 epoch（52 s/ep） | 75 | 0.9444 | 0.9300 / 0.9033 | 0.9125 / 0.8850 | 0.2275 / 0.1911 |
 | **`outputs/runs/v2_rev2_mixed`**（最新） | 新 attention + Soft Goal + horizon cap=24，flow_steps=3 | `mixed_oldv1_train` | 100 epoch（183 s/ep） | **90** | **0.9548** | 0.9300 / 0.8833 | 0.8950 / 0.7900 | **0.9763 / 0.9677** |
+| **`outputs/runs/v2_weighted_controlled`**（第 20 节，带权） | 新 attention + Soft Goal + **Edge Cost Encoder**，flow_steps=3 | `weighted_controlled_train`（w~U(1,10)） | 100 epoch（~120 s/ep） | 95 | 0.8233 | — | — | — |
+| `outputs/runs/v2_weighted_controlled_cost_ablated`（第 20 节的 cost 消融） | 新 attention + Soft Goal，**看不到 edge cost** | 同一份带权训练集 | 100 epoch（~120 s/ep） | 75 | 0.8033 | — | — | — |
+
+> 两个 weighted run 的评测集不是上面三个（那些是无权图），而是 `data/weighted_controlled/weighted_controlled_test.pkl`：
+> 见第 20.8 节 —— Ours `goal 0.8400 / optimal 0.6800 / cost_ratio 1.0074`，cost 消融 `0.7600 / 0.2867 / 1.0666`，
+> Greedy-BFS `1.0000 / — / 1.0350`，Dijkstra oracle `1.0000 / 1.0000 / 1.0000`（逐条配对 p=7e-23）。
 
 > 上表是**单次评测（seed 0）** 的数字；括号里注明的行是 5 种子均值。多种子配对检验的
 > 结论（`multiseed_*.json`）：
@@ -121,7 +139,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
 > 也就是说：把旧数据混进来，**旧数据上从"灾难性退化"变成"几乎全对"，代价是长链上
 > "恰好走最短路"的比例掉了 6.7 个点**。
 >
-> 推理侧还有一招**多分支（存活路径表）解码**（第 19 节）：`v2_rev2_mixed` 在
+> 推理侧还有一招**多分支（存活路径表）解码**（第 19 节，增强版见第 21 节）：`v2_rev2_mixed` 在
 > controlled_test 上 goal_hit 0.930 → **1.000**、optimal 0.883 → **0.973**（k=2 + NULL 不停），
 > controlled 两个测试集的 coverage 都是 **1.0000**（路径表里必有一条能到终点）。
 
@@ -160,6 +178,12 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_fl
 # 对照：降低 NULL 权重（混合集 NULL 占 68%，模型容易"该走却选 NULL"）
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed_nw03 --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl --set loss.null_weight=0.3
 
+# Weighted 扩展：主实验（weighted GT + Edge Cost Encoder；命令细节见第 20 节）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl
+
+# Weighted 扩展：关键消融（同一份 weighted GT，但不给模型 edge cost）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled_cost_ablated --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl --set model.use_edge_cost=false
+
 # 续训（从 last.pt 再跑 30 轮；--extra-epochs 是"在已跑轮数之上再加多少"）
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl --resume outputs/runs/v2_rev2_mixed/last.pt --extra-epochs 30
 ```
@@ -178,6 +202,9 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/
 
 # 多分支（存活路径表）解码：主指标取累计概率最高的路径，额外报 coverage
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/long/controlled_long.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --out outputs/runs/v2_rev2_mixed/eval_long_multi.json
+
+# 多分支增强（第 21 节）：必死 branch 预筛选 + 三条口径（best / best_goal / best_goal_cost）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_weighted_controlled/run_config.json --checkpoint outputs/runs/v2_weighted_controlled/best.pt --data data/weighted_controlled/weighted_controlled_test.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --filter-dead-branches --out outputs/runs/v2_weighted_controlled/eval_test_multi.json
 
 # 三套口径一起出（单路径 / 多分支 best / coverage）
 E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip --out outputs/runs/v2_rev2_mixed/mp_long_k2_skip.json
@@ -1251,3 +1278,324 @@ coverage 0.9988（optimal coverage 0.9939）。
 `tests/test_multi_path_decoder.py`（10 个）：k=1 等价贪心、k=2 救回 k=1 丢掉的路、
 NULL stop/skip 的差异、loop 路径被剪掉但不影响其它路径、beam 截断只丢低概率分支、
 finished 按概率排序、可复现、参数校验、`to_decode_result` 的口径转换。
+
+---
+
+## 20. Weighted 扩展（带权图：BFS -> Dijkstra，可选、零破坏）
+
+目标是把任务从
+
+```
+(G, s, g) -> minimum-hop path        # 旧的无权 V2
+(G, w, s, g) -> minimum-cost path    # 新的 Weighted 扩展
+```
+
+并且**只做加法**：`weighted=false` 时模型结构、参数集合（state_dict 的 key 逐个相同）、
+数值路径、旧 checkpoint、旧数据集、旧训练曲线全部照旧可用。
+
+### 20.1 两个开关
+
+| 开关 | 作用 | 缺省 |
+|---|---|---|
+| `data.weighted` | 给边赋正 cost，并把 GT 从 BFS 换成 Dijkstra | `false` |
+| `model.use_edge_cost` | 实例化 `EdgeCostEncoder` / `k_cost_proj` / `v_cost_proj`，让 cost 真的进网络 | `false`（老配置里没这个键，读出来就是 False） |
+
+`model.use_edge_cost=false` 时**不会创建任何** cost 参数，所以老 checkpoint 的 key 集合
+与现在的无权模型逐 key 相同（`tests/test_weighted.py::test_legacy_checkpoint_still_loads_with_the_unweighted_config`
+就是拿 `outputs/runs/v2_rev2_mixed/best.pt` 直接验的）。
+
+配置：`configs/graph_flow.yaml`（无权，行为一个字节没改）与 **`configs/graph_flow_weighted.yaml`**（新增，加权）。
+
+### 20.2 模型：cost 作为第三路 Key / 第二路 Value
+
+```
+无权：K_uv = (W_{K,n} h_u + W_{K,e} e^state_uv) / sqrt(2)      V_uv = W_V h_u
+加权：K_uv = (W_{K,n} h_u + W_{K,e} e^state_uv + W_{K,c} e^cost_uv) / sqrt(3)
+      V_uv = (W_V h_u + W_{V,c} e^cost_uv) / sqrt(2)
+```
+
+`e^cost_uv = MLP(w_hat_uv)`，`w_hat = w / mean_G(w)`（**per-graph mean 归一化**）。
+之所以只允许 graph_mean：目标函数是 edge cost 的累加，纯比例缩放不改变 `argmin_P sum w_e`；
+min-max / z-score 带平移，会把"不同跳数路径"之间的排序改掉，所以配了就直接报错。
+
+### 20.3 数据：先拓扑验收，再赋权，最后重算 GT
+
+```
+生成 topology -> 难度过滤（hops / decisions / branch factor，拓扑层面）
+             -> attach_edge_weights(w ~ U(1,10)) -> graph.graph["weighted"]=True
+             -> build_sample() 里用 nx.shortest_path(weight="weight") 重算 GT
+             -> decision field / target candidate（不变）
+```
+
+Batch 里新增四个 tensor（`src/data/collate.py`）：`physical_edge_cost` / `physical_edge_cost_norm`
+（`[E_phys]`）与 `candidate_branch_cost` / `candidate_branch_cost_norm`（`[C]`，NULL=0）。
+物理边编号沿用 `graph.edges()` 顺序，message 方向靠现成的 `msg_to_phys_edge` 映射，
+所以一条无向边的两个方向必然拿到同一个 cost，**Branch Segment 的编号系统一行没改**。
+`candidate_branch_cost` 第一版只用于统计/诊断，没有接进 Branch Scorer（一次只改一个模块）。
+
+### 20.4 数据有效性自检（写进 dataset summary）
+
+实测 3000 条 `data/weighted_controlled`（U(1,10)）：
+
+| 指标 | 实测 | 含义 |
+|---|---|---|
+| `weighted_conflict_rate` | **0.4597** | 加权最优 != 跳数最优的样本比例（越高越说明"必须看 cost"） |
+| `bfs_cost_ratio` | 1.0344 | `C(P*_hop) / C(P*_weighted)` 的均值（方案里的参考值是 1.2+） |
+| `bfs_cost_ratio_p90` | 1.1140 | 同上，90 分位 |
+| `dijkstra_cost_ratio` | 1.0 | oracle 自证 |
+| `gt_path_is_weighted_optimal_fraction` | 1.0 | GT 确实就是 Dijkstra 解 |
+| `weight_mean / std / min / max` | 5.49 / 2.60 / 1.00 / 10.00 | 权重分布 |
+
+`bfs_cost_ratio` 只有 1.03：controlled 图的"绕行/环路"候选大多比主干更长，
+i.i.d. U(1,10) 下跳数最优路径的 cost 通常只贵几个百分点。**冲突率 46% 说明监督信号是够的**
+（近一半样本的决定目标与"只看拓扑"不同），但 `success_cost_ratio` 这个指标本身区分度有限。
+想要更陡的 cost 信号就把分布换成 loguniform（实测 conflict 0.71 / cost ratio 1.19）：
+
+```bash
+# 生成时换分布（同一套代码，只是把 U(1,10) 换成 exp(U(log 0.1, log 10))）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow_weighted.yaml --data-dir data/weighted_controlled_logu --set data.edge_weight.distribution=loguniform --set data.edge_weight.range=[0.1,10.0]
+```
+
+生成脚本会在 `bfs_cost_ratio < 1.05` 或 `weighted_conflict_rate < 0.20` 时打印
+`[weighted WARNING] ...`（U(1,10) 会触发前者，这是**如实报警**，不是 bug）。
+
+### 20.5 命令
+
+```bash
+# 1) 生成加权数据集（3000 条，U(1,10)；约 50 秒）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow_weighted.yaml --name weighted_controlled --data-dir data/weighted_controlled
+
+# 2) 主实验：weighted GT + Edge Cost Encoder
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl
+
+# 3) 关键消融：同一份 weighted GT，但**不给模型 edge cost**（应当明显变差）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled_cost_ablated --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl --set model.use_edge_cost=false
+
+# 4) 评测（Dijkstra baseline 的 cost_ratio 必须是 1.0）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_weighted_controlled/run_config.json --checkpoint outputs/runs/v2_weighted_controlled/best.pt --data data/weighted_controlled/weighted_controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_weighted_controlled/eval_test.json
+```
+
+评测侧的两处修正：`baselines.shortest_path()` 在 weighted 图上用 `weight="weight"`（否则它根本不是
+cost ratio 的 oracle），`metrics.evaluate_sample()` 的 optimal 判定从绝对阈值改成
+`math.isclose(rel_tol=1e-6, abs_tol=1e-6)`。
+
+### 20.6 零破坏验证（本轮实测）
+
+```bash
+# 旧 checkpoint + 旧数据集 + 旧 config：路径级指标与改动前逐位相同
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/graph_flow.yaml --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled/controlled_test.pkl --baselines --no-progress --out outputs/runs/v2_rev2_mixed/eval_after_weighted_extension.json
+```
+
+结论见 `outputs/runs/v2_rev2_mixed/regression_after_weighted_extension.json`：
+
+* `goal_hit 0.9300 / optimal 0.8833 / cost_ratio 1.0030 / broken 0.0700 / soft_goal 0.9110` ——
+  与改动前的 `eval_test.json` 逐位一致（`records` 去掉 `elapsed` 后完全相同）；
+* `soft_goal_reachability` 相差 4.5e-8，**小于同一份代码连跑两次的噪声（5.4e-8）**，是 GPU 浮点累加噪声；
+* 旧数据集 `controlled / long / oldv1 / mixed` 全部 `load -> collate -> loss.backward()` 正常，
+  无权 batch 的 `physical_edge_cost` 恒为 1.0；
+* `data/smoke/*.pkl` 是 2026-09-13 生成的旧格式（缺 `source_forced_edge_ids`），与本次改动无关。
+
+### 20.7 已知限制（第一版故意没做的东西）
+
+* `--decode multi`（存活路径表）里的 `optimal_coverage_rate` 仍然按**跳数**算
+  （`multi_path_decoder.PathResult.cost` 是 hop count），所以在 weighted 数据集上它衡量的是
+  "至少有一条跳数最短路"，不是"至少有一条最小 cost 路"。第一轮故意不改它，
+  weighted 的主指标看 `--decode single` 的 `optimal_path_rate` / `success_cost_ratio`。
+* `candidate_branch_cost` 只进了 Batch 与统计，没有进 Branch Scorer（方案第 8 节：
+  先只做 EdgeCost -> GraphFlow 一条链路，提升归因才干净）。
+* 没有 cost-aware loss（expected cost / path length loss），loss 仍然是 `CE + 0.1 * SoftGoal`。
+* Edge cost 只按 `msg_to_phys_edge` 映射进 message，Branch Segment 的编号系统一行没改。
+
+### 20.8 实测结果（3000 条 U(1,10) 数据，T=50，flow_steps=3，100 epoch，CE + 0.1 SoftGoal）
+
+两个 run 只差一个开关（`model.use_edge_cost`），数据、seed、超参完全相同：
+
+| 口径 | `goal_hit` | `optimal` | `success_cost_ratio` | `broken` | 说明 |
+|---|---|---|---|---|---|
+| **Ours weighted**（best.pt = ep95） | **0.8400** | **0.6800** | **1.0074** | 0.1533 | weighted GT + Edge Cost Encoder |
+| Ours，cost 消融（best.pt = ep75） | 0.7600 | 0.2867 | 1.0666 | 0.2367 | 同一份 weighted GT，但模型看不到 edge cost |
+| Greedy-BFS（按跳数贪心） | 1.0000 | — | 1.0350 | — | 永远能到终点，但路线不最优 |
+| **Dijkstra oracle** | **1.0000** | **1.0000** | **1.0000** | — | `baselines.shortest_path()`（oracle 口径自证） |
+
+逐条配对（同一批 300 条 query，McNemar 精确检验，`outputs/weighted_paired_*.json`）：
+
+* `optimal`：**+0.393**（0.287 → 0.680），只有消融达标 20 条、只有 weighted 达标 138 条，**p = 7.0e-23**；
+* `goal_hit`：+0.080（0.760 → 0.840），p = 0.0138（可达性受 Soft Goal 保护，差距远小于最优性）；
+* 分桶（`difficulty=easy/medium/hard`、三种 `mode`、`source=forced/decision`、`gt_decisions=3-5/6-8`）
+  全部同向且 p ≤ 0.002，只有 `gt_decisions=9-11` 那一格 n=16、两边打平。
+
+换 `last.pt`（不做 best-checkpoint 选择）结论不变：weighted `optimal 0.6833 / cost_ratio 1.0042`，
+消融 `optimal 0.2867 / cost_ratio 1.0615`。
+
+**结论**：Edge Cost Encoder 不是装饰 —— 拿掉它以后，同一个模型在同一个数据集上"恰好走最小 cost 路"
+的比例从 68% 掉到 29%，cost ratio 从 1.007 退化到 1.067（比 Greedy-BFS 的 1.035 还差）。
+这直接证明模型真的在用 edge weight，而不是靠拓扑猜答案。
+
+复现命令见 20.5；一键复跑收尾评测：
+
+```bash
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_weighted_experiment.py            # 立刻评测
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_weighted_experiment.py --wait     # 等训练跑完再评测
+```
+
+### 20.9 新增测试（`tests/test_weighted.py`，18 个）
+
+weighted GT = Dijkstra（`S-1-A-1-G` vs `S-10-G` 必须是 `S-A-G`）、贵桥被绕开、
+两个 message 方向同 cost、`[2,4,6] -> [0.5,1.0,1.5]` 与 argmin 不变、branch cost = 边权和、
+无权 batch 的 cost 恒为 1、改一条边的 cost 必须改变 weighted 模型输出而无权模型逐位不变、
+`edge_cost_encoder / k_cost_proj / v_cost_proj` 有非零梯度、拿不到 cost 时显式报错、
+无权 GraphFlow 拒绝 cost 输入、Dijkstra baseline 是完美 oracle、weighted summary 字段齐备、
+`weighted=false` 模型没有任何 cost 参数、老配置缺 `use_edge_cost` 时为 False、
+weighted 配置真的启用、非 graph_mean 归一化被拒、旧 checkpoint 逐 key 加载。
+
+---
+
+## 21. 多分支解码增强（必死 branch 预筛选 + 多条 Goal 路径 + 真实 path cost）
+
+来源：《Graph-Junction-Diffusion：Multi-Path Decoder 增强修改指南》。本轮只改**推理解码与评测**，
+没有重新训练、没有动 GraphFlow / Edge Cost Encoder / Branch Scorer / Soft Goal / diffusion / 单路径解码。
+
+### 21.1 新增的三件事
+
+| 能力 | 开关 / 接口 | 默认 | 说明 |
+|---|---|---|---|
+| 必死 branch 预筛选 | `decode_multi_path(..., filter_dead_branches=True)` / `--filter-dead-branches` | **关** | top-k 之前剔除「终点既不是 Goal 也不是 decision node」的非 NULL branch（走完必然 broken，却白占名额）。NULL 不参与筛选，loop 也不在预筛选里处理 |
+| 真实 path cost | `PathCandidate.path_cost` | — | `sum_{(u,v) in P} w_uv`；无权图没有 `weight` 属性 → 自动退化成跳数。**只用于记录/排序/评测，绝不参与 beam 剪枝** |
+| 多条 Goal 路径 | `best_goal_cost_path` / `goal_paths_by_prob` / `goal_paths_by_cost` / `to_dict()` | — | Goal 里真实 cost 最低（同 cost 取概率更高者）；另有两种排序的 top-N 导出 |
+
+历史语义一个都没改：`multi.best` 仍然是「finished 中累计 log probability 最高的路径」（broken 也能是 best），
+`multi.best_goal` 仍然是「Goal 路径里概率最高」，`PathCandidate.cost`（跳数）保留，beam 仍然只看累计 log 概率。
+
+### 21.2 输出口径
+
+`scripts/evaluate.py --decode multi` 与 `tools/evaluate_multipath.py` 现在并排给三条口径
+（同一个存活路径表，都走 `evaluate_sample`，所以指标定义完全一致）：
+
+```
+multi_best            = multi.best                （历史口径，= metrics 里的主指标）
+multi_best_goal       = multi.best_goal           （Goal 里概率最高）
+multi_best_goal_cost  = multi.best_goal_cost_path （Goal 里真实 cost 最低）
+```
+
+额外集合语义指标：`coverage_rate`（表里至少有一条到终点）、`optimal_coverage_rate`
+（表里至少有一条**真实最优**：weighted 按 Dijkstra 最小 cost，无权图退化成跳数，与旧口径等价）、
+`mean_goal_paths` / `mean_finished_paths` / `mean_filtered_dead_branches`。
+weighted 数据集上额外暴露 `weighted_optimal_coverage_rate`（同一个值，名字点明口径）。
+`scripts/evaluate.py` 的结果 JSON 里放在 `multi` 键下；`format_metrics` 增加了
+`w_opt_cov` / `goal_paths` / `dead_filtered` 三个短标签。
+
+```bash
+# weighted 模型 + 新解码器（4 个组合：null_policy × filter_dead_branches）
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_weighted_controlled --data data/weighted_controlled/weighted_controlled_test.pkl --top-k 2 --beam-width 64 --null-policy skip --filter-dead-branches --out outputs/runs/v2_weighted_controlled/mp_weighted_skip_on.json
+```
+
+### 21.3 实测（唯一权威表；300 条 weighted test，top_k=2，beam_width=64，seed 0）
+
+两个模型（weighted = 带 Edge Cost Encoder，ablated = 同一份数据但看不到 cost）、
+两种 NULL 策略、4 种解码器，全部同一批 query：
+
+| model | null_policy | decoder | goal_hit | optimal | cost_ratio |
+|---|---|---|---|---|---|
+| weighted | stop | single | 0.8400 | 0.6800 | 1.0074 |
+| weighted | stop | multi_best | 0.8667 | 0.6933 | 1.0070 |
+| weighted | stop | best_goal | 1.0000 | 0.7833 | 1.0081 |
+| weighted | stop | best_goal_cost | 1.0000 | 0.9133 | 1.0026 |
+| weighted | skip | single | 0.8400 | 0.6800 | 1.0074 |
+| weighted | skip | **multi_best** | **1.0000** | 0.7800 | 1.0081 |
+| weighted | skip | best_goal | 1.0000 | 0.7800 | 1.0081 |
+| weighted | skip | **best_goal_cost** | **1.0000** | **0.9867** | **1.0002** |
+| ablated | stop | single | 0.7600 | 0.2867 | 1.0666 |
+| ablated | stop | multi_best | 0.8400 | 0.3733 | 1.0548 |
+| ablated | stop | best_goal | 1.0000 | 0.4500 | 1.0551 |
+| ablated | stop | best_goal_cost | 1.0000 | 0.7833 | 1.0158 |
+| ablated | skip | single | 0.7600 | 0.2867 | 1.0666 |
+| ablated | skip | multi_best | 0.9967 | 0.4367 | 1.0558 |
+| ablated | skip | best_goal | 1.0000 | 0.4367 | 1.0558 |
+| ablated | skip | best_goal_cost | 1.0000 | 0.9300 | 1.0036 |
+
+上表是 `filter_dead_branches=False`（历史默认）。同一批 query 的**集合语义**与搜索统计：
+
+| model | null_policy | filter | coverage | w_opt_cov | mean_goal_paths | mean_finished | mean_filtered |
+|---|---|---|---|---|---|---|---|
+| weighted | stop | off | 1.0000 | 0.9133 | 3.33 | 10.44 | 0.00 |
+| weighted | stop | on | 1.0000 | 0.9133 | 3.34 | 10.02 | 12.12 |
+| weighted | skip | off | 1.0000 | 0.9867 | 6.13 | 13.83 | 0.00 |
+| weighted | skip | on | 1.0000 | 0.9867 | 6.14 | 13.05 | 16.08 |
+| ablated | stop | off | 1.0000 | 0.7833 | 3.64 | 10.29 | 0.00 |
+| ablated | stop | on | 1.0000 | 0.7867 | 3.64 | 9.85 | 12.21 |
+| ablated | skip | off | 1.0000 | 0.9300 | 7.42 | 13.99 | 0.00 |
+| ablated | skip | on | 1.0000 | 0.9233 | 7.51 | 13.32 | 16.55 |
+
+**`filter_dead_branches` 的开关效应**（on − off，只有非零的才列出来）：
+
+| model | null_policy | decoder | Δgoal_hit | Δoptimal | Δcost_ratio |
+|---|---|---|---|---|---|
+| ablated | stop | multi_best | +0.0000 | −0.0167 | +0.0014 |
+| ablated | stop | best_goal | +0.0000 | −0.0200 | +0.0012 |
+| ablated | stop | best_goal_cost | +0.0000 | +0.0033 | −0.0002 |
+| ablated | skip | multi_best | +0.0000 | −0.0033 | +0.0005 |
+| ablated | skip | best_goal | +0.0000 | −0.0033 | +0.0005 |
+| ablated | skip | best_goal_cost | +0.0000 | −0.0067 | +0.0001 |
+
+* **weighted 模型：所有 outcome 指标逐位相同**（表格里没有它的行），预筛选是纯安全网；
+* **ablated 模型：有 ±0.3~2pt 的抖动**，因为预筛选会腾出 top-k 名额、让原本被 dead branch
+  挤掉的**可行**分支也进入展开，于是表里的 goal 路径集合会变（`mean_goal_paths` 7.42 → 7.51）。
+  这不是随机噪声：`single` 那一列在所有 8 次运行里完全相同，证明评测链本身是确定性的。
+* 不变量自检（`outputs/multipath_weighted_summary.json` 生成时跑）：每个 run 都满足
+  `best_goal_cost.optimal ≤ weighted_optimal_coverage_rate`，`single` 与 filter 无关 —— 0 violations。
+
+### 21.4 这条链路把「模型能力」拆成了三层
+
+以 weighted 模型（skip）为例：
+
+```
+single 0.6800  ->  multi_best 0.7800  ->  best_goal_cost 0.9867
+   ↑ 采样丢路        ↑ 确定性贪心           ↑ 表里有最优路（上界）
+weighted optimal coverage = 0.9867
+```
+
+两个模型的同一指标对照（skip，取自 21.3 的表）：
+
+| decoder | 带 edge cost | cost 消融 | 差值 |
+|---|---|---|---|
+| single optimal | **0.6800** | 0.2867 | +0.393 |
+| multi_best optimal | **0.7800** | 0.4367 | +0.343 |
+| best_goal optimal | **0.7800** | 0.4367 | +0.343 |
+| best_goal_cost optimal | 0.9867 | 0.9300 | +0.057 |
+| weighted optimal coverage（**不是解码器**，是表级集合语义） | 0.9867 | 0.9300 | +0.057 |
+
+**必须注意**：`best_goal_cost` / `weighted_optimal_coverage_rate` 在消融模型上也有 0.93，
+因为它们衡量的是「表里有没有一条最优路」，而 beam 会把每个 decision 的 top-2 分支都展开、
+hop-最优与 cost-最优通常只差一两个 decision —— 表里自然容易包含最优路。而且
+`best_goal_cost` 本身就是**按真值 cost 选择**的，已经用了答案。
+所以**判断模型是否真的在用 edge weight，要看概率排名那几个口径**（single / multi_best / best_goal，
+差距 34~39 个点），不能拿 best_goal_cost 当证据。
+
+### 21.5 零破坏验证
+
+同一个未加权历史产物（`v2_rev2_mixed` × `controlled_long` × top_k=2 skip）**逐位复现**：
+
+```
+coverage_rate 1.0000 / optimal_coverage_rate 0.9975 / mean_goal_paths 7.0275
+mean_finished_paths 21.455 / mean_expanded 40.91 / max_depth 10
+multi_best: goal_hit 1.0000 / optimal 0.9450 / cost_ratio 1.0024
+本轮重跑的每一项 delta = 0.0
+```
+
+### 21.6 新增测试（`tests/test_multi_path_decoder.py` 24 个，其中 14 个是本轮加的）
+
+对应指南第 11 节：dead 不占 top-k、关筛选逐位复现旧行为、全部候选被筛掉判 broken 不崩、
+loop 逻辑不变、beam 剪枝不变、weighted path cost（26.0 / 10.0）、无权退化成跳数、
+`best` 保持旧语义（broken 也能是 best）、`best_goal` 取概率最高、
+`best_goal_cost_path` 取真实 cost 最低（2 跳 cost=21 vs 3 跳 cost=6 → 后者）、
+weighted optimal coverage 需要真正的最小 cost 路。另外加了 3 个 evaluator 接线测试
+（`report.multi` 三条口径 + 无权不暴露 weighted 别名 + weighted 上暴露）。
+全部测试：`pytest tests -q` → **306 passed**；`semantic_check.py --strict` → **0 problems**。
+
+### 21.7 复现用的产物
+
+```
+outputs/multipath_weighted_summary.json                        # 6 次评测的汇总表
+outputs/runs/v2_weighted_controlled/mp_weighted_{stop,skip}_{off,on}.json
+outputs/runs/v2_weighted_controlled_cost_ablated/mp_weighted_{stop_off,skip_on}.json
+```

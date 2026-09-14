@@ -50,6 +50,18 @@ def build_diffusion(config: Config) -> CategoricalDiffusion:
 def model_kwargs(config: Config) -> Dict[str, Any]:
     model_cfg = config.section("model")
     time_cfg = config.get("time", {})
+    # Weighted 扩展：model.use_edge_cost 控制 EdgeCostEncoder / k_cost_proj /
+    # v_cost_proj 是否被实例化。老配置里没有这个键 -> False -> 参数集合与改动前
+    # 完全一致（这是必须写死的 backward-compatible default）。
+    edge_cost_cfg = model_cfg.get("edge_cost", {}) or {}
+    normalization = str(edge_cost_cfg.get("normalization", "graph_mean"))
+    if normalization != "graph_mean":
+        raise NotImplementedError(
+            f"model.edge_cost.normalization={normalization!r} is not implemented "
+            "(only graph_mean). Do NOT use min-max / z-score here: any normalisation "
+            "with a shift changes the ordering of paths with different hop counts, "
+            "while the objective is the plain sum of edge costs."
+        )
     return {
         "d_model": int(model_cfg.get("d_model", 128)),
         "num_node_types": int(model_cfg.get("node_types", 4)),
@@ -65,11 +77,26 @@ def model_kwargs(config: Config) -> Dict[str, Any]:
         "flow_steps": int(model_cfg.get("flow_steps", 1)),
         "slot_embedding": bool(model_cfg.get("flow_slot_embedding", True)),
         "slot_scale": float(model_cfg.get("flow_slot_scale", 1.0)),
+        "use_edge_cost": bool(model_cfg.get("use_edge_cost", False)),
+        "edge_cost_hidden": int(
+            edge_cost_cfg.get("hidden_dim", model_cfg.get("d_model", 128))
+        ),
     }
 
 
 def build_model(config: Config, device: Optional[torch.device] = None) -> GraphFlowDenoiser:
-    model = GraphFlowDenoiser(**model_kwargs(config))
+    kwargs = model_kwargs(config)
+    model = GraphFlowDenoiser(**kwargs)
+    # weighted 数据集 + 不接受 cost 输入的模型 = 方案第 17 节要求的"cost 消融"，
+    # 这是合法配置（它正是用来证明模型真的在利用 edge weight 的对照），但必须显式
+    # 提示，否则很容易被误当成一次正常的 weighted 实验。
+    if not kwargs["use_edge_cost"] and bool(config.get("data.weighted", False)):
+        print(
+            "[build_model] data.weighted=true but model.use_edge_cost=false -> "
+            "this is the COST-ABLATED configuration (the model cannot see edge "
+            "cost); it is only meaningful as an ablation baseline.",
+            flush=True,
+        )
     if device is not None:
         model = model.to(device)
     return model
@@ -124,6 +151,16 @@ def generator_config(data_cfg: Config) -> Dict[str, Any]:
     return cfg
 
 
+def edge_weight_config(data_cfg: Config) -> Dict[str, Any]:
+    """把 ``data.edge_weight`` 节取成普通 dict（缺省 = 生成器的默认 U(1, 10)）。"""
+    value = data_cfg.get("edge_weight", None)
+    if value is None:
+        return {}
+    if isinstance(value, Config):
+        return value.to_dict()
+    return dict(value)
+
+
 def build_datasets(
     config: Config, progress_every: int = 500
 ) -> Dict[str, GraphQueryDataset]:
@@ -147,6 +184,7 @@ def build_datasets(
         weighted=bool(data_cfg.get("weighted", False)),
         component_fallback=bool(data_cfg.get("component_fallback", True)),
         progress_every=progress_every,
+        edge_weight=edge_weight_config(data_cfg),
     )
     splits = split_dataset(dataset, fractions, seed=int(config.get("seed", 0)))
     empty = [name for name, split in splits.items() if len(split) == 0]

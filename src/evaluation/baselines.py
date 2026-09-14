@@ -15,7 +15,16 @@ import networkx as nx
 
 
 def shortest_path(graph: nx.Graph, start: int, goal: int) -> List[int]:
-    return [int(v) for v in nx.shortest_path(graph, int(start), int(goal))]
+    """最优路径的节点序列。
+
+    weighted 图上必须是 **Dijkstra**（``weight="weight"``），否则它就不是 cost
+    ratio 的 oracle：方案第 13 节要求 Dijkstra baseline 的 CostRatio 恒等于 1.0。
+    无权图保持原来的 BFS（``weight=None``），行为逐字不变。
+    """
+    weight = "weight" if graph.graph.get("weighted", False) else None
+    return [
+        int(v) for v in nx.shortest_path(graph, int(start), int(goal), weight=weight)
+    ]
 
 
 def shortest_path_cost(graph: nx.Graph, start: int, goal: int) -> float:

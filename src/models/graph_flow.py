@@ -22,6 +22,21 @@ attention 必然相等，sender 的节点身份（例如 Start / Goal 的独立 
 ``1/sqrt(2)`` 只是让 ``k_node + k_edge`` 的初始方差与单路 Key 一致（两路独立、
 各自方差相同，相加后方差翻倍，除以 sqrt(2) 抵消），不改变表达能力。
 
+Weighted 扩展（方案第 3、4 节）在这条公式上**再加一路** edge cost：
+
+    K_uv = (W_{K,n} h_u + W_{K,e} e^state_uv + W_{K,c} e^cost_uv) / sqrt(3)
+    V_uv = (W_V h_u + W_{V,c} e^cost_uv) / sqrt(2)
+
+* 只有 ``use_edge_cost=True`` 才创建 ``k_cost_proj`` / ``v_cost_proj``；
+* ``use_edge_cost=False`` 时 forward 里仍然是
+  ``k = (k_node + k_edge) * k_pair_scale`` 与 ``v = v_proj(h_src)`` 两条
+  **逐字不变**的表达式，参数集合也完全不变（旧 checkpoint 必须继续能加载）；
+* 绝不为"统一代码"给无权模型也喂一个全 1 的 cost embedding：那会同时改变参数集合
+  与数值路径，破坏向后兼容。
+
+``1/sqrt(3)`` 同理：cost 与 state 两路相互独立、方差相同，三路相加后方差是单路的
+3 倍，除以 sqrt(3) 抵消。
+
 三条硬约束：
 
 1. **Start / Goal 只出不进**：所有 dst 是 start/goal 的 message edge 在 softmax
@@ -52,10 +67,14 @@ class GraphFlowBlock(nn.Module):
         dropout: float = 0.0,
         d_head: Optional[int] = None,
         ffn_layers: int = 2,
+        use_edge_cost: bool = False,
     ):
         super().__init__()
         self.d_model = int(d_model)
         self.ffn_hidden = int(ffn_hidden)
+        # Weighted 扩展的总开关。False 时**不创建任何** cost 相关参数，
+        # state_dict 的 key 集合与改动前逐字一致。
+        self.use_edge_cost = bool(use_edge_cost)
         # 第一版固定单头，且 d_head == d_model（实施指南第 10.3 节写明 q/k/v 都是
         # [E_msg, d]）。不做 multi-head。
         self.d_head = int(d_head or self.d_model)
@@ -72,6 +91,20 @@ class GraphFlowBlock(nn.Module):
         self.o_proj = nn.Linear(self.d_head, self.d_model)
         # k = (k_node + k_edge) / sqrt(2)：保持初始 Key 方差与单路一致
         self.k_pair_scale = 1.0 / math.sqrt(2.0)
+
+        # Weighted：cost 作为第三路 Key / 第二路 Value（方案第 3 节）。
+        # 只在 use_edge_cost=True 时创建 —— 旧 checkpoint 的参数集合因此保持不变。
+        if self.use_edge_cost:
+            self.k_cost_proj = nn.Linear(self.d_model, self.d_head)
+            self.v_cost_proj = nn.Linear(self.d_model, self.d_head)
+            # 三路相加 / 两路相加的方差补偿
+            self.k_triple_scale = 1.0 / math.sqrt(3.0)
+            self.v_pair_scale = 1.0 / math.sqrt(2.0)
+        else:
+            self.k_cost_proj = None
+            self.v_cost_proj = None
+            self.k_triple_scale = 1.0
+            self.v_pair_scale = 1.0
 
         # 两个 residual 子层各用一套 LayerNorm 参数（修改清单 P1-3）：
         #   h~      = LN_1(h + W_O m)
@@ -90,12 +123,15 @@ class GraphFlowBlock(nn.Module):
         )
 
         # 让 Q / K / V 的初始尺度与 d_model 匹配
-        for projection in (
+        projections = [
             self.q_proj,
             self.k_node_proj,
             self.k_edge_proj,
             self.v_proj,
-        ):
+        ]
+        if self.use_edge_cost:
+            projections += [self.k_cost_proj, self.v_cost_proj]
+        for projection in projections:
             nn.init.normal_(projection.weight, std=self.d_model ** -0.5)
             nn.init.zeros_(projection.bias)
 
@@ -109,6 +145,7 @@ class GraphFlowBlock(nn.Module):
         fixed_mask: Tensor,          # [N] bool, Start/Goal
         graph_node_ptr: Tensor,      # [B+1]
         slot_tau: Optional[Tensor] = None,   # [B, d] 本轮（step 内第几轮）的 embedding
+        edge_cost_feat: Optional[Tensor] = None,   # [E_msg, d] edge cost embedding
     ) -> Dict[str, Any]:
         """一次 Graph Flow：``H_next = F_theta(H_t, E_t, tau_t [+ slot_tau])``。
 
@@ -128,12 +165,32 @@ class GraphFlowBlock(nn.Module):
         beta = broadcast_time(beta, graph_node_ptr)
         H_hat = (1.0 + gamma) * self.node_norm(H_t) + beta
 
-        # ---- Q = receiver, K = sender node + edge state, V = sender ---
+        # ---- Q = receiver, K = sender node + edge state [+ edge cost], V = sender ---
         q = self.q_proj(H_hat[dst])                                # [E_msg, d_head]
-        k_node = self.k_node_proj(H_hat[src])                      # [E_msg, d_head]
-        k_edge = self.k_edge_proj(edge_feat)                       # [E_msg, d_head]
-        k = (k_node + k_edge) * self.k_pair_scale                  # [E_msg, d_head]
-        v = self.v_proj(H_hat[src])
+        if not self.use_edge_cost:
+            # 无权路径：与改动前**逐字一致**（方案第 4 节的硬要求）。
+            if edge_cost_feat is not None:
+                raise ValueError(
+                    "edge_cost_feat was passed to a GraphFlowBlock built with "
+                    "use_edge_cost=False; the unweighted model must never see edge cost"
+                )
+            k_node = self.k_node_proj(H_hat[src])                  # [E_msg, d_head]
+            k_edge = self.k_edge_proj(edge_feat)                   # [E_msg, d_head]
+            k = (k_node + k_edge) * self.k_pair_scale              # [E_msg, d_head]
+            v = self.v_proj(H_hat[src])
+        else:
+            if edge_cost_feat is None:
+                raise ValueError(
+                    "this GraphFlowBlock was built with use_edge_cost=True but no "
+                    "edge_cost_feat was provided"
+                )
+            k_node = self.k_node_proj(H_hat[src])                  # [E_msg, d_head]
+            k_edge = self.k_edge_proj(edge_feat)                   # [E_msg, d_head]
+            k_cost = self.k_cost_proj(edge_cost_feat)              # [E_msg, d_head]
+            k = (k_node + k_edge + k_cost) * self.k_triple_scale   # [E_msg, d_head]
+            # cost 同时进 Value：message 里因此携带 cost 信息，模型更容易学到
+            # 类似 d(v) ~ min_u [d(u) + w_uv] 的 cost-to-go。
+            v = (self.v_proj(H_hat[src]) + self.v_cost_proj(edge_cost_feat)) * self.v_pair_scale
         score = (q * k).sum(-1) * self.attn_scale                  # [E_msg]
 
         # ---- Start / Goal 只出不进 -----------------------------------
@@ -180,6 +237,7 @@ class GraphFlowBlock(nn.Module):
         flow_steps: int = 1,
         slot_embedding: Optional[nn.Embedding] = None,
         slot_scale: float = 1.0,
+        edge_cost_feat: Optional[Tensor] = None,
     ) -> Dict[str, Any]:
         """在一个 reverse step 内部连续做 ``flow_steps`` 轮图信息交流。
 
@@ -211,6 +269,7 @@ class GraphFlowBlock(nn.Module):
                 fixed_mask=fixed_mask,
                 graph_node_ptr=graph_node_ptr,
                 slot_tau=slot_tau,
+                edge_cost_feat=edge_cost_feat,
             )
             H = out["H_next"]
             attentions.append(out["attn"])

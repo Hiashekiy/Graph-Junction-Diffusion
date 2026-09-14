@@ -26,7 +26,10 @@ data:
     ordinary_nodes_per_segment: [1, 4]   # 骨架段之间插入的 degree=2 普通节点数
     candidates_per_decision: [2, 5]      # 每个 decision 的总出口数
 
-  weighted: false            # 只能填 false：V2 不编码 edge cost，true 会直接报错
+  # 无权 V2：模型看不到 edge cost，GT 就是 BFS 最少跳数路径。
+  # 带权扩展用独立配置 configs/graph_flow_weighted.yaml
+  # （data.weighted=true + model.use_edge_cost=true），不改这里的行为。
+  weighted: false
   component_fallback: true
   generator: {}
 

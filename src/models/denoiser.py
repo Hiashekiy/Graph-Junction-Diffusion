@@ -11,6 +11,14 @@
     z_t -> E_t -> H_{t-1} -> BranchScore
 
 注意 Branch Scorer 用的是**更新之后**的 ``H_{t-1}``，不是更新之前的 ``H_t``。
+
+Weighted 扩展（方案第 7 节）只在这条链上多接一路输入：
+
+    weighted=false:  edge_state_encoder(z_t)                        -> GraphFlow
+    weighted=true :  edge_state_encoder(z_t) + EdgeCostEncoder(w)   -> GraphFlow
+
+``EdgeCostEncoder`` **只在 ``use_edge_cost=True`` 时创建**，所以无权模型的参数集合
+（以及数值路径）与改动前完全一致。
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ import torch
 from torch import Tensor, nn
 
 from src.models.branch_scorer import BranchScorer
+from src.models.edge_cost import EdgeCostEncoder
 from src.models.edge_state import EdgeStateEncoder
 from src.models.graph_flow import GraphFlowBlock
 from src.models.node_embedding import NodeTypeEmbedding
@@ -58,6 +67,8 @@ class GraphFlowDenoiser(nn.Module):
         flow_steps: int = 1,
         slot_embedding: bool = True,
         slot_scale: float = 1.0,
+        use_edge_cost: bool = False,
+        edge_cost_hidden: Optional[int] = None,
     ):
         super().__init__()
         self.d_model = int(d_model)
@@ -65,6 +76,10 @@ class GraphFlowDenoiser(nn.Module):
         self.num_edge_states = int(num_edge_states)
         self.flow_steps = max(1, int(flow_steps))
         self.slot_scale = float(slot_scale)
+        # Weighted 扩展开关（方案第 7 节）：只有 True 才实例化 EdgeCostEncoder，
+        # 因此 weighted=false 的模型参数集合与改动前完全相同。
+        self.use_edge_cost = bool(use_edge_cost)
+        self.edge_cost_hidden = edge_cost_hidden
 
         # P2-2：这两个配置项现在就真的控制行为，选到未实现的取值会立刻报错，
         # 而不是被静默忽略。
@@ -89,7 +104,15 @@ class GraphFlowDenoiser(nn.Module):
             ffn_hidden=ffn_hidden,
             dropout=dropout,
             d_head=d_head,
+            use_edge_cost=self.use_edge_cost,
         )
+        # 连续 edge cost 编码器（方案第 6 节）。None = 这个模型不接受 cost 输入。
+        if self.use_edge_cost:
+            self.edge_cost_encoder: Optional[EdgeCostEncoder] = EdgeCostEncoder(
+                self.d_model, hidden_dim=edge_cost_hidden
+            )
+        else:
+            self.edge_cost_encoder = None
         self.branch_scorer = BranchScorer(
             d_model=self.d_model, hidden_dim=branch_hidden, dropout=dropout
         )
@@ -109,6 +132,13 @@ class GraphFlowDenoiser(nn.Module):
     def flow_steps_label(self) -> str:
         shared = "shared-cell" + ("+slot" if self.flow_slot_embedding is not None else "")
         return f"{self.flow_steps} round(s) per reverse step ({shared})"
+
+    @property
+    def edge_cost_label(self) -> str:
+        """打印用：这个模型到底看不看得到 edge cost。"""
+        if not self.use_edge_cost or self.edge_cost_encoder is None:
+            return "disabled (unweighted V2)"
+        return f"enabled (EdgeCostEncoder hidden={self.edge_cost_encoder.hidden_dim})"
 
     @property
     def max_flow_steps(self) -> int:
@@ -190,6 +220,13 @@ class GraphFlowDenoiser(nn.Module):
 
         edge_feat_t = self.edge_state_encoder(batch, z_t)
 
+        # Weighted：把物理边 cost 广播到 message 方向，再过连续编码器。
+        # 同一条物理边的两个方向共用同一个 cost（走 msg_to_phys_edge 映射），
+        # 所以 u->v 与 v->u 拿到的一定是同一个数值。
+        edge_cost_feat = None
+        if self.use_edge_cost:
+            edge_cost_feat = self.edge_cost_encoder(batch.message_edge_cost())
+
         # 一个 reverse step 内部做 steps 轮图信息交流（默认 1 轮 = 旧行为）。
         # 轮与轮之间 H 继续累积，且每轮带上"第几轮"的 embedding，避免同一个 Cell
         # 反复作用于同一输入退化成求不动点。
@@ -203,6 +240,7 @@ class GraphFlowDenoiser(nn.Module):
             flow_steps=steps,
             slot_embedding=self.flow_slot_embedding,
             slot_scale=self.slot_scale,
+            edge_cost_feat=edge_cost_feat,
         )
         H_next = flow_out["H_next"]
 

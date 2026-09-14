@@ -39,7 +39,7 @@ from src.data.dataset_builder import (  # noqa: E402
     split_dataset,
 )
 from src.data.dataset_builder import CONTROLLED_JUNCTION  # noqa: E402
-from src.training.setup import generator_config  # noqa: E402
+from src.training.setup import edge_weight_config, generator_config  # noqa: E402
 from src.utils.config import flatten_overrides, load_config  # noqa: E402
 from src.utils.seed import set_seed  # noqa: E402
 
@@ -106,6 +106,8 @@ def main() -> int:
         component_fallback=bool(data_cfg.get("component_fallback", True)),
         progress_every=max(200, num_samples // 10),
         min_decisions=int(args.min_decisions),
+        # Weighted 扩展：data.edge_weight（分布 + 范围）；无权配置这里是 {}
+        edge_weight=edge_weight_config(data_cfg),
     )
     elapsed = time.time() - start
     print(
@@ -117,6 +119,10 @@ def main() -> int:
     stats = dataset_statistics(dataset)
     print("=== dataset statistics（指南第 16 节）===", flush=True)
     print(json.dumps(stats, indent=1, ensure_ascii=False))
+    # Weighted sanity check（方案第 11 节）：数据集太容易必须当场喊出来，
+    # 否则"模型其实无视了 edge weight"这件事要等到实验做完才会被发现。
+    for warning in stats.get("weighted", {}).get("warnings", []):
+        print(f"[weighted WARNING] {warning}", flush=True)
 
     data_dir = Path(args.data_dir or str(config.get("paths.data_dir", "data")))
     name = args.name or f"{graph_type}_{num_samples}"

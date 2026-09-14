@@ -87,6 +87,25 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/m
 E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
 ```
 
+## weighted_controlled/ —— 带权图（Weighted 扩展，README 第 20 节）
+
+| 文件 | 大小 | 规模 | 用途 |
+|---|---|---|---|
+| `weighted_controlled_train.pkl` | 12 MB | 2400 条 | 加权主训练集 |
+| `weighted_controlled_val.pkl` | 1.6 MB | 300 条 | 加权验证集（模型选择用它） |
+| `weighted_controlled_test.pkl` | 1.6 MB | 300 条 | 加权标准测试集 |
+| `weighted_controlled_summary.json` | 4 KB | 3000 条 | 生成统计 + weighted sanity check |
+
+```bash
+# 3000 条，w ~ U(1,10)，GT = Dijkstra 最小 cost 路径（约 50 秒）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow_weighted.yaml --name weighted_controlled --data-dir data/weighted_controlled
+```
+
+实测（`weighted_controlled_summary.json` 的 `weighted` 节）：`weighted_conflict_rate` 0.460、
+`bfs_cost_ratio` 1.034、`gt_path_is_weighted_optimal_fraction` 1.0，权重 5.49 ± 2.60（1.00–10.00）。
+拓扑难度契约（hops ∈ [15,35]、decisions ∈ [5,12]、branch factor ∈ [2,5]）与无权数据集完全一致 ——
+赋权只改变"哪条路最优"，不改变拓扑验收。
+
 ## smoke/ —— 冒烟小数据集
 
 | 文件 | 大小 | 规模 | 用途 |

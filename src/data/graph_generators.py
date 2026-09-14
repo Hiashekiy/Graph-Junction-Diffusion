@@ -32,6 +32,10 @@ import numpy as np
 
 GRAPH_TYPES = ("er", "ba", "ws", "geometric", "grid")
 
+# 边权的取值分布。uniform 是方案第 10 节的默认实现；loguniform 只是同一个接口上
+# 的另一个可选分布（跨度更大 => BFS 路径的 cost ratio 更高、任务更难）。
+WEIGHT_DISTRIBUTIONS = ("uniform", "loguniform")
+
 
 # ----------------------------------------------------------------------------
 # single-family generators
@@ -236,6 +240,7 @@ def generate_connected_graph(
     component_fallback: bool = False,
     weighted: bool = False,
     weight_range: Tuple[float, float] = (1.0, 10.0),
+    weight_distribution: str = "uniform",
 ) -> Tuple[nx.Graph, Dict[str, float]]:
     """Generate a connected graph that can host an OD pair of the required length.
 
@@ -264,6 +269,7 @@ def generate_connected_graph(
                 rng,
                 weight_range=weight_range,
                 from_positions=graph_type in ("geometric", "grid"),
+                distribution=weight_distribution,
             )
         if min_od_distance is not None and not graph_admits_distance(
             graph, int(min_od_distance), rng
@@ -292,6 +298,7 @@ def attach_edge_weights(
     rng: np.random.Generator,
     weight_range: Tuple[float, float] = (1.0, 10.0),
     from_positions: bool = False,
+    distribution: str = "uniform",
 ) -> nx.Graph:
     """Give every edge a positive cost, turning the task from BFS into Dijkstra.
 
@@ -300,15 +307,61 @@ def attach_edge_weights(
     no longer produces a minimum-cost route, and the *only* way to answer is to
     actually compare path costs.  ``from_positions`` uses the euclidean edge
     length instead (meaningful for geometric / grid graphs).
+
+    ``distribution``:
+
+    * ``"uniform"``     —— w ~ U(lo, hi)，方案第 10 节的默认实现（[1, 10]）；
+    * ``"loguniform"``  —— w = exp(U(log lo, log hi))，跨度更大，weighted 任务明显
+      更难（实测 BFS 路径的 cost ratio 从 ~1.03 抬到 ~1.19）。
+
+    权重只乘在边上、不加平移，所以后续的 per-graph mean 归一化不会改变
+    ``argmin_P sum w_e``。
     """
     lo, hi = float(weight_range[0]), float(weight_range[1])
+    if distribution not in WEIGHT_DISTRIBUTIONS:
+        raise ValueError(
+            f"unknown weight distribution {distribution!r} "
+            f"(supported: {WEIGHT_DISTRIBUTIONS})"
+        )
+    if lo <= 0.0 or hi < lo:
+        raise ValueError(
+            f"weight_range must satisfy 0 < lo <= hi, got {(lo, hi)}"
+        )
     if from_positions:
         weights = edge_weight_from_positions(graph)
         for edge, value in weights.items():
             # keep weights in the same numerical range as the uniform case
             graph.edges[edge]["weight"] = float(lo + (hi - lo) * value)
-    else:
+    elif distribution == "uniform":
         for u, v in graph.edges():
             graph.edges[u, v]["weight"] = float(rng.uniform(lo, hi))
+    else:  # loguniform：跨度更大，weighted 任务更难（bfs_cost_ratio 更高）
+        log_lo, log_hi = math.log(lo), math.log(hi)
+        for u, v in graph.edges():
+            graph.edges[u, v]["weight"] = float(math.exp(rng.uniform(log_lo, log_hi)))
     graph.graph["weighted"] = True
     return graph
+
+
+def resolve_edge_weight_spec(
+    edge_weight_cfg: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """把 config 的 ``data.edge_weight`` 节翻译成 attach_edge_weights 的 kwargs。
+
+    只在这里做一次校验，生成器、数据集构造、脚本拿到的都是同一份已校验的取值，
+    不会出现"配置写错了却被静默忽略"。
+    """
+    cfg = dict(edge_weight_cfg or {})
+    distribution = str(cfg.get("distribution", "uniform")).lower()
+    if distribution not in WEIGHT_DISTRIBUTIONS:
+        raise ValueError(
+            f"data.edge_weight.distribution={distribution!r} is not supported "
+            f"(supported: {WEIGHT_DISTRIBUTIONS})"
+        )
+    bounds = cfg.get("range", (1.0, 10.0)) or (1.0, 10.0)
+    lo, hi = float(bounds[0]), float(bounds[1])
+    if lo <= 0.0 or hi < lo:
+        raise ValueError(
+            f"data.edge_weight.range must satisfy 0 < lo <= hi, got {(lo, hi)}"
+        )
+    return {"weight_range": (lo, hi), "distribution": distribution}

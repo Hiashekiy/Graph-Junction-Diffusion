@@ -12,6 +12,16 @@
 所有编号空间都在 batch 级：节点、decision、candidate 加各自的 offset，
 **物理边 ID 同样加 per-graph offset**（`segment` 内部保持局部 ID，collate 时平移）。
 
+Weighted 扩展（方案第 5 节）：Batch 额外带两类 cost tensor，形状分别是
+
+    physical_edge_cost / physical_edge_cost_norm   [E_phys]
+    candidate_branch_cost / candidate_branch_cost_norm   [C]
+
+cost 的读取顺序与 physical edge ID **完全一致**（都是 ``graph.edges()`` 的顺序，
+见 ``branch_segments.build_edge_tables``），所以不需要改任何编号系统。归一化用
+**每张图的平均边权**（纯比例缩放不改变 argmin sum w_e）。无权数据集的边取默认
+1.0，归一化后恒为 1.0；只有 ``use_edge_cost=True`` 的模型才会去读这些 tensor。
+
 Branch membership 采用 **扁平 + 定长 padding** 的布局：
 
     branch_node_ids      [C, max_nodes_per_branch]  padded
@@ -24,6 +34,7 @@ padding 位置用 length mask 清零，不会污染 mean。
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Sequence
 
@@ -81,6 +92,26 @@ class Batch:
     )                                  # [F] batch 级物理边 ID
     num_source_forced_edges: int = 0
 
+    # -- weighted 扩展（方案第 5 节）：物理边 cost --------------------------
+    # 形状都是 [E_phys]，与 branch membership 共用同一套 batch 级物理边编号。
+    # 缺省是空 tensor（老代码 / 手工构造的 Batch 仍然能跑）：weighted 模型拿到空
+    # cost 时会**显式报错**，而不是静默喂 0。
+    physical_edge_cost: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.float32)
+    )                                  # [E_phys] 原始 cost
+    physical_edge_cost_norm: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.float32)
+    )                                  # [E_phys] 除以本图平均边权
+    # 每个 candidate branch 的 cost 之和（NULL = 0）。第一版只用于统计 / 诊断，
+    # 还没有接进 Branch Scorer（方案第 8 节：一次只改一个模块，便于归因）。
+    candidate_branch_cost: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.float32)
+    )                                  # [C]
+    candidate_branch_cost_norm: Tensor = field(
+        default_factory=lambda: torch.zeros(0, dtype=torch.float32)
+    )                                  # [C]
+    is_weighted: bool = False
+
     # -- 软可达性拓扑（第二轮修订 B 项）-------------------------------------
     # 「从 decision i 出发走 candidate c 会到哪里」在 batch 张量层面直接查表，
     # Soft Goal 的 value iteration 因此不需要任何 NetworkX 遍历。
@@ -127,6 +158,29 @@ class Batch:
             mask[self.goals] = True
         return mask
 
+    @property
+    def has_edge_cost(self) -> bool:
+        """cost tensor 是否真的覆盖了全部物理边。"""
+        return int(self.physical_edge_cost.numel()) == int(self.num_physical_edges)
+
+    def message_edge_cost(self, normalized: bool = True) -> Tensor:
+        """[E_msg]：把物理边 cost 广播到两个 message 方向。
+
+        ``msg_to_phys_edge`` 是现成的映射，所以同一条无向物理边的 u->v 与 v->u
+        永远拿到同一个 cost。weighted 模型拿不到 cost 时**显式报错**：静默喂 0 会
+        让"忘了开 weighted / 忘了重新 collate"变成一个查不出来的 bug。
+        """
+        if not self.has_edge_cost:
+            raise ValueError(
+                "this Batch carries no edge cost (physical_edge_cost is empty); "
+                "it was either built by hand or by an older collate. Re-collate the "
+                "dataset before running a model with use_edge_cost=True."
+            )
+        source = (
+            self.physical_edge_cost_norm if normalized else self.physical_edge_cost
+        )
+        return source[self.msg_to_phys_edge]
+
     def to(self, device: torch.device | str) -> "Batch":
         device = torch.device(device)
         moved = {}
@@ -150,6 +204,8 @@ class Batch:
             "branch_node_slots": int(self.branch_node_ids.numel()),
             "branch_edge_slots": int(self.branch_edge_ids.numel()),
             "num_source_forced_edges": self.num_source_forced_edges,
+            "is_weighted": bool(self.is_weighted),
+            "num_physical_edges_with_cost": int(self.physical_edge_cost.numel()),
             "num_goal_candidates": int(self.candidate_hits_goal.sum().item())
             if self.candidate_hits_goal.numel()
             else 0,
@@ -199,6 +255,13 @@ def collate_samples(
     branch_edge_ids: List[List[int]] = []
     source_forced_edges: List[int] = []
 
+    # weighted：逐图累加（归一化是 per-graph 的，不能跨图做）
+    physical_cost: List[float] = []
+    physical_cost_norm: List[float] = []
+    branch_cost: List[float] = []
+    branch_cost_norm: List[float] = []
+    any_weighted = False
+
     # 软可达性拓扑（每图一条 reach_start，每个 candidate 一条 branch endpoint）
     candidate_next_decision: List[int] = []
     candidate_hits_goal: List[bool] = []
@@ -212,6 +275,31 @@ def collate_samples(
     for graph_index, sample in enumerate(samples):
         segments = sample.segments
         node_offset = graph_node_ptr[-1]
+
+        # ---- weighted：物理边 cost -------------------------------------
+        # 物理边 ID 就是 graph.edges() 的顺序（branch_segments.build_edge_tables
+        # 与 physical_edge_lookup 都按这个顺序编号），所以按同样顺序读一遍即可得到
+        # 逐边对齐的 cost。无权图的边没有 weight 属性 -> 1.0。
+        raw_cost = [
+            float(sample.graph.edges[u, v].get("weight", 1.0))
+            for u, v in sample.graph.edges()
+        ]
+        if len(raw_cost) != segments.num_physical_edges:
+            raise ValueError(
+                f"graph has {len(raw_cost)} edges but its segments declare "
+                f"{segments.num_physical_edges} physical edges; the sample is stale"
+            )
+        mean_cost = (sum(raw_cost) / len(raw_cost)) if raw_cost else 0.0
+        if raw_cost and (not math.isfinite(mean_cost) or mean_cost <= 0.0):
+            raise ValueError(
+                f"edge weights must be positive and finite; got mean={mean_cost} "
+                f"over {len(raw_cost)} edges"
+            )
+        physical_cost.extend(raw_cost)
+        physical_cost_norm.extend(
+            [value / mean_cost for value in raw_cost] if raw_cost else []
+        )
+        any_weighted = any_weighted or bool(sample.graph.graph.get("weighted", False))
 
         node_type.extend(
             segments.node_type[node] for node in range(segments.num_nodes)
@@ -267,16 +355,23 @@ def collate_samples(
         )
         reach_start_is_goal.append(bool(start_is_goal))
 
-        # branch membership（排除 owner；NULL 留空）
+        # branch membership（排除 owner；NULL 留空）+ branch cost 求和
         for branch in candidates.candidate_branch:
             if branch is None:
                 branch_node_ids.append([])
                 branch_edge_ids.append([])
+                # C(NULL) = 0（方案第 8 节）
+                branch_cost.append(0.0)
+                branch_cost_norm.append(0.0)
                 continue
             branch_node_ids.append([node_offset + int(v) for v in branch.nodes[1:]])
             branch_edge_ids.append(
                 [physical_edge_offset + int(edge) for edge in branch.physical_edges]
             )
+            # branch.physical_edges 是**本图局部**编号，直接索引 raw_cost
+            raw_branch = sum(raw_cost[int(edge)] for edge in branch.physical_edges)
+            branch_cost.append(raw_branch)
+            branch_cost_norm.append(raw_branch / mean_cost if mean_cost > 0 else 0.0)
 
         physical_edge_offset += segments.num_physical_edges
 
@@ -319,6 +414,17 @@ def collate_samples(
             source_forced_edges, dtype=torch.long, device=device
         ),
         num_source_forced_edges=len(source_forced_edges),
+        physical_edge_cost=torch.tensor(physical_cost, dtype=torch.float32, device=device),
+        physical_edge_cost_norm=torch.tensor(
+            physical_cost_norm, dtype=torch.float32, device=device
+        ),
+        candidate_branch_cost=torch.tensor(
+            branch_cost, dtype=torch.float32, device=device
+        ),
+        candidate_branch_cost_norm=torch.tensor(
+            branch_cost_norm, dtype=torch.float32, device=device
+        ),
+        is_weighted=bool(any_weighted),
         candidate_next_decision=torch.tensor(
             candidate_next_decision, dtype=torch.long, device=device
         ),

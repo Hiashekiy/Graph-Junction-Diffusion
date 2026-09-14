@@ -10,14 +10,17 @@ decision node、off-path junction 为 NULL）。不满足语义的 OD 对直接�
 修改清单落地：
 - **P0-2**：同一张底层图的所有 OD query 共享一个 ``graph_id``，``split_dataset``
   按 graph_id 划分，保证 train/val/test 的图集合两两不相交（无 topology leakage）。
-- **P1-1**：``weighted=True`` 直接抛 NotImplementedError —— 模型当前只能看到
-  selected/unselected，看不到 edge cost，带权任务在信息上不可辨识。
+- **P1-1（Weighted 扩展后解除）**：``weighted=True`` 现在**不再**报错。模型侧的
+  EdgeCostEncoder 让 edge cost 真正进入网络，所以带权任务在信息上变得可辨识；
+  但这条链是**可选扩展**：``weighted=false`` 时模型结构、参数集合、checkpoint
+  语义与改动前完全一致。
 - **P1-2**：``build_sample`` 一进来就把 graph / start / goal 统一 relabel 到
   0..N-1，之后 graph / gt_path / segments 全部共用同一套编号。
 """
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -33,7 +36,11 @@ from src.data.controlled_graph import (
 )
 from src.data.dataset import GraphQueryDataset, GraphSample, validate_sample
 from src.data.decision_field import build_decision_field, validate_decision_field
-from src.data.graph_generators import generate_connected_graph
+from src.data.graph_generators import (
+    attach_edge_weights,
+    generate_connected_graph,
+    resolve_edge_weight_spec,
+)
 
 CONTROLLED_JUNCTION = "controlled_junction"
 
@@ -111,7 +118,14 @@ def build_sample(
     graph = bs.set_od(graph, start, goal)
     segments = bs.extract_segments(graph, start, goal, relabel=False)
 
-    gt_path = [int(v) for v in nx.shortest_path(graph, int(start), int(goal))]
+    # GT：无权 = BFS 最少跳数路径；加权 = Dijkstra 最小 cost 路径。
+    # weighted 标记由生成器写进 graph.graph（见 attach_edge_weights），所以这里
+    # 用的是同一份事实来源，不存在"图带权但 GT 仍按跳数算"的错配。
+    weight_key = "weight" if graph.graph.get("weighted", False) else None
+    gt_path = [
+        int(v)
+        for v in nx.shortest_path(graph, int(start), int(goal), weight=weight_key)
+    ]
     field = build_decision_field(segments, gt_path)
     validate_decision_field(segments, field, gt_path)
 
@@ -146,6 +160,7 @@ def build_dataset(
     max_rejects: int = 5000,
     progress_every: int = 0,
     min_decisions: int = 0,
+    edge_weight: Optional[Dict[str, Any]] = None,
 ) -> GraphQueryDataset:
     """生成 ``num_samples`` 个 (G, s, g) 样本。
 
@@ -159,16 +174,15 @@ def build_dataset(
 
     ``min_decisions`` > 0 时只保留 GT 路径决策数 >= 该值的样本（用于造"长决策链"
     专项评测集；对随机图生成器无意义，会被忽略）。
+
+    ``weighted=True`` 启用带权扩展（方案第 1、5、9、10 节）：
+
+    * 每条边拿到正 cost（``edge_weight`` 决定分布与范围，默认 U(1, 10)）；
+    * GT 从 BFS 最少跳数路径换成 **Dijkstra 最小 cost 路径**；
+    * 数据集**仍然**按拓扑难度契约（hops / decisions / branch factor）验收 —— 这个
+      契约是拓扑层面的，赋权不会改变它。
     """
-    if weighted:
-        # P1-1：模型边输入只有 selected/unselected，看不到 edge cost。
-        # 拓扑/OD/edge-state 相同但 cost 不同的两个样本，模型输入完全一样而最优路径
-        # 可能不同 —— 信息上不可辨识，所以第一版直接禁用。
-        raise NotImplementedError(
-            "V2 baseline does not encode edge cost yet: "
-            "weighted=True would make the task unidentifiable from the model's "
-            "inputs. Keep weighted=false until an Edge Cost Encoder is implemented."
-        )
+    weight_spec = resolve_edge_weight_spec(edge_weight)
 
     if graph_type == CONTROLLED_JUNCTION:
         return build_controlled_dataset(
@@ -182,6 +196,8 @@ def build_dataset(
             branch_cfg=(generator_cfg or {}).get("branch"),
             progress_every=progress_every,
             min_decisions=int(min_decisions),
+            weighted=weighted,
+            edge_weight=edge_weight,
         )
 
     rng = np.random.default_rng(seed)
@@ -202,7 +218,9 @@ def build_dataset(
             generator_cfg=generator_cfg,
             min_od_distance=min_od_distance,
             component_fallback=component_fallback,
-            weighted=False,
+            weighted=bool(weighted),
+            weight_range=weight_spec["weight_range"],
+            weight_distribution=weight_spec["distribution"],
         )
         accepted = 0
         for _ in range(queries_per_graph * 4):
@@ -250,6 +268,8 @@ def build_controlled_dataset(
     progress_every: int = 0,
     max_attempts_per_sample: int = 300,
     min_decisions: int = 0,
+    weighted: bool = False,
+    edge_weight: Optional[Dict[str, Any]] = None,
 ) -> GraphQueryDataset:
     """用 Controlled Junction Graph 生成样本。
 
@@ -259,8 +279,12 @@ def build_controlled_dataset(
     ``min_decisions`` > 0 时只保留 GT 决策数 >= 该值的样本。这一条是给**长决策链
     专项评测集**用的：正常采样下 decisions >= 9 的样本只占 ~3.7%（hard 档接受率
     只有 4.1%），所以长链桶在 300 条测试集里只有 11 条，统计上什么都说明不了。
+
+    ``weighted=True`` 时每张**已经通过拓扑验收**的图会被赋上正边权，然后 GT 用
+    Dijkstra 重算（方案第 10 节）。
     """
     rng = np.random.default_rng(seed)
+    weight_spec = resolve_edge_weight_spec(edge_weight)
     samples: List[GraphSample] = []
     attempts = 0
     rejected_by_min_decisions = 0
@@ -293,6 +317,13 @@ def build_controlled_dataset(
                 )
             continue
 
+        if weighted:
+            # 顺序是硬要求（方案第 10 节）：拓扑验收 -> attach_edge_weights ->
+            # Dijkstra 重算 GT。先在无权图上算好 GT、之后才给边加 weight，会得到
+            # "GT 是跳数最短路、但图是带权图"的自相矛盾样本。
+            # 难度契约（hops / decisions / branch factor）在拓扑层面验收，赋权不改它。
+            attach_edge_weights(candidate.graph, rng, **weight_spec)
+
         graph_id = len(samples)
         try:
             sample = build_sample(
@@ -307,6 +338,8 @@ def build_controlled_dataset(
                     "target_hops": int(candidate.metrics.get("target_hops", -1)),
                     "distractors": _distractor_counts(candidate.distractors),
                     "num_nodes": candidate.graph.number_of_nodes(),
+                    "weighted": bool(weighted),
+                    "edge_weight": dict(weight_spec),
                 },
                 graph_id=graph_id,
             )
@@ -333,6 +366,8 @@ def build_controlled_dataset(
     dataset.filter_info = {
         "min_decisions": int(min_decisions),
         "rejected_by_min_decisions": int(rejected_by_min_decisions),
+        "weighted": bool(weighted),
+        "edge_weight": dict(weight_spec),
     }
     del rng, attempts, t0, branch_kwargs
     return dataset
@@ -356,6 +391,104 @@ def _stats(values: Sequence[float]) -> Dict[str, float]:
         "max": float(array.max()),
     }
 
+
+# ---------------------------------------------------------------------------
+# Weighted sanity check（方案第 11 节）
+# ---------------------------------------------------------------------------
+# 这两个阈值是"报警线"，不是验收标准：如果 weighted 数据集的 conflict rate 只有
+# 3%，那说明模型即使完全忽略 edge weight 也能蒙对，这份数据证明不了任何事情。
+WEIGHTED_CONFLICT_WARN = 0.20
+WEIGHTED_BFS_COST_RATIO_WARN = 1.05
+
+
+def _path_cost(graph: nx.Graph, path: Sequence[int]) -> float:
+    """路径 cost = sum of edge weights（不是跳数）。"""
+    total = 0.0
+    for u, v in zip(path[:-1], path[1:]):
+        if not graph.has_edge(u, v):
+            return float("inf")
+        total += float(graph.edges[u, v].get("weight", 1.0))
+    return total
+
+
+def weighted_statistics(dataset: GraphQueryDataset) -> Dict[str, Any]:
+    """weighted 数据集的有效性自检："忽略 edge weight 会怎样"。
+
+        ConflictRate = P(P*_weighted != P*_hop)
+        BFSCostRatio = C(P*_hop) / C(P*_weighted)
+
+    另外顺带验证 GT 本身确实就是 Dijkstra 解（gt_path == 加权最短路），这是
+    "GT 与权重必须同时生成"这条要求在数据侧的落地检查。
+    """
+    weights: List[float] = []
+    hop_ratios: List[float] = []
+    conflicts = 0
+    gt_matches_optimal = 0
+    counted = 0
+    for sample in dataset:
+        graph = sample.graph
+        if not graph.graph.get("weighted", False):
+            continue
+        counted += 1
+        weights.extend(
+            float(data.get("weight", 1.0)) for _, _, data in graph.edges(data=True)
+        )
+        start, goal = int(sample.start), int(sample.goal)
+        hop_path = [int(v) for v in nx.shortest_path(graph, start, goal, weight=None)]
+        cost_path = [
+            int(v) for v in nx.shortest_path(graph, start, goal, weight="weight")
+        ]
+        conflicts += int(hop_path != cost_path)
+        gt_matches_optimal += int(list(sample.gt_path) == cost_path)
+        optimal = _path_cost(graph, cost_path)
+        hop = _path_cost(graph, hop_path)
+        if optimal > 0 and math.isfinite(hop) and math.isfinite(optimal):
+            hop_ratios.append(hop / optimal)
+    if not counted:
+        return {}
+
+    weight_stats = _stats(weights)
+    stats: Dict[str, Any] = {
+        "num_weighted_samples": counted,
+        # 权重本身的长相（方案第 11 节要求逐项报出来）
+        "weight_mean": weight_stats["mean"],
+        "weight_std": weight_stats["std"],
+        "weight_min": weight_stats["min"],
+        "weight_max": weight_stats["max"],
+        "weighted_conflict_rate": conflicts / counted,
+        "bfs_cost_ratio": (
+            sum(hop_ratios) / len(hop_ratios) if hop_ratios else float("nan")
+        ),
+        "bfs_cost_ratio_p90": (
+            float(np.percentile(np.asarray(hop_ratios), 90))
+            if hop_ratios
+            else float("nan")
+        ),
+        # Dijkstra 对自己恒等于 1：这一项是 oracle 口径的自证（方案第 13 节）
+        "dijkstra_cost_ratio": 1.0,
+        "gt_path_is_weighted_optimal_fraction": gt_matches_optimal / counted,
+    }
+    warnings: List[str] = []
+    if stats["weighted_conflict_rate"] < WEIGHTED_CONFLICT_WARN:
+        warnings.append(
+            f"weighted_conflict_rate={stats['weighted_conflict_rate']:.3f} < "
+            f"{WEIGHTED_CONFLICT_WARN}: 忽略 edge weight 也能蒙对绝大多数 decision，"
+            "这份数据集证明不了 weighted 能力"
+        )
+    if stats["bfs_cost_ratio"] < WEIGHTED_BFS_COST_RATIO_WARN:
+        warnings.append(
+            f"bfs_cost_ratio={stats['bfs_cost_ratio']:.3f} < "
+            f"{WEIGHTED_BFS_COST_RATIO_WARN}: 加权最优与跳数最优的 cost 差距很小，"
+            "success_cost_ratio 会很难区分模型（可把 data.edge_weight.distribution "
+            "换成 loguniform 拉大跨度）"
+        )
+    if gt_matches_optimal != counted:
+        warnings.append(
+            f"{counted - gt_matches_optimal}/{counted} 个样本的 gt_path 不是加权最短路"
+            "（GT 与权重不是同一次生成的）"
+        )
+    stats["warnings"] = warnings
+    return stats
 
 def dataset_statistics(dataset: GraphQueryDataset) -> Dict[str, Any]:
     """输出指南第 16 节要求的数据集指标。"""
@@ -422,6 +555,12 @@ def dataset_statistics(dataset: GraphQueryDataset) -> Dict[str, Any]:
         "decisions": list(ACCEPT_DECISIONS),
         "branch_factor": list(ACCEPT_BRANCH_FACTOR),
     }
+
+    # Weighted 扩展：把 sanity check 一并写进 summary（方案第 11 节）。
+    # 无权数据集这里返回 {}，summary 的结构与改动前完全一致。
+    weight_stats = weighted_statistics(dataset)
+    if weight_stats:
+        stats["weighted"] = weight_stats
     return stats
 
 

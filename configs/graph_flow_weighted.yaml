@@ -1,0 +1,123 @@
+# Graph-Junction-Diffusion V2：Weighted 扩展配置（实施方案第 14 节）
+#
+# 这是一份**新增的独立配置**，configs/graph_flow.yaml 的默认无权行为一个字节都没改：
+#
+#     data.weighted       = true   边权真的进入任务（GT 用 Dijkstra）
+#     model.use_edge_cost = true   实例化 EdgeCostEncoder / k_cost_proj / v_cost_proj
+#
+# 老配置里没有 model.use_edge_cost 这个键 -> 读出来是 False（backward-compatible
+# default），所以旧 checkpoint、旧数据集、旧训练曲线都还能照常加载与评测。
+#
+# 与无权配置相比只有三处差别：
+#   1. data.weighted: true + data.edge_weight（每条边的正 cost 分布）
+#   2. model.use_edge_cost: true + model.edge_cost（连续 cost 编码器）
+#   3. paths.data_dir / run_name 指向 weighted 数据集与 run
+#
+# GT 从 BFS 最少跳数路径换成 Dijkstra 最小 cost 路径；
+# loss 不变，仍然是 L = CE + 0.1 * SoftGoal（方案第 12 节：第一轮不加 cost loss）。
+#
+# 消融（方案第 17 节）：同一份数据、把 model.use_edge_cost 改成 false 再训一次，
+# 就是"weighted GT + 不给模型 edge cost"的对照，理论上它应该明显变差。
+
+seed: 0
+
+data:
+  graph_type: controlled_junction
+  num_samples: 3000          # 总样本数（再按 graph 划分 80/10/10）
+  min_od_distance: 5
+  num_queries_per_graph: 1
+
+  difficulty_mix:
+    easy: 0.20
+    medium: 0.60
+    hard: 0.20
+  structure_mix:
+    branch_heavy: 0.40
+    long_chain: 0.40
+    loop_detour: 0.20
+  source:
+    forced_probability: 0.70
+  branch:
+    ordinary_nodes_per_segment: [1, 4]
+    candidates_per_decision: [2, 5]
+
+  # ---- Weighted 扩展（方案第 10 节）--------------------------------------
+  weighted: true
+  edge_weight:
+    # uniform    : w ~ U(lo, hi)，方案第 10 节的默认实现
+    # loguniform : w = exp(U(log lo, log hi))，跨度更大、weighted 任务更难
+    #              （实测 BFS 路径的 cost ratio 从 ~1.03 抬到 ~1.19）
+    distribution: uniform
+    range: [1.0, 10.0]
+  component_fallback: true
+  generator: {}
+
+split:
+  train: 0.8
+  val: 0.1
+  test: 0.1
+  split_by_graph: true
+
+model:
+  d_model: 128
+  node_types: 4
+  edge_states: 2
+  ffn_hidden: 256
+  dropout: 0.0
+  flow_steps: 3
+  flow_slot_embedding: true
+  flow_slot_scale: 1.0
+
+  # ---- Weighted 扩展（方案第 3、6 节）------------------------------------
+  use_edge_cost: true
+  edge_cost:
+    # 只实现 graph_mean：纯比例缩放不改变 argmin sum w_e。
+    # min-max / z-score 会带平移，改变不同 hop 数路径之间的排序，直接报错。
+    normalization: graph_mean
+    hidden_dim: 128
+
+time:
+  encoding: sinusoidal
+  d_time: 128
+  conditioning: adaln
+
+diffusion:
+  T: 50
+  schedule: linear
+  beta_start: 0.02
+  beta_end: 0.20
+  base_noise: uniform
+
+training:
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  amp: true
+  batch_size: 48
+  epochs: 100
+  max_bptt_steps: 0
+  log_every: 5
+  eval_every: 5
+  device: auto
+
+loss:
+  # 第一轮**不改 loss**：CE 的标签换成 weighted-optimal path，Soft Goal 仍然只管
+  # reachability。等出现 GoalHit~1 但 CostRatio >> 1 再考虑 cost-aware loss。
+  x0_ce: 1.0
+  null_weight: 1.0
+  active_weight: 1.0
+  goal_reach_weight: 0.1
+  goal_reach_eps: 1.0e-8
+  goal_timestep_weighting: alpha_bar
+  goal_horizon_cap: 24
+
+evaluation:
+  stochastic_sampling: true
+  batch_size: 16
+  max_steps: 0
+
+paths:
+  data_dir: data/weighted_controlled
+  output_dir: outputs/runs
+  run_name: v2_weighted_controlled

@@ -163,17 +163,65 @@ def test_allocate_group_shares_sums_to_total():
 
 
 # ---------------------------------------------------------------------------
-# P1-1：weighted 暂时禁用
+# P1-1（Weighted 扩展后解除）：weighted 数据集现在真的能生成
 # ---------------------------------------------------------------------------
-def test_weighted_dataset_is_rejected():
-    with pytest.raises(NotImplementedError):
-        build_dataset(num_samples=4, graph_type="er", num_nodes=20, weighted=True)
+def test_weighted_dataset_is_no_longer_rejected():
+    """方案第 15 节：删掉 weighted 禁用；GT 必须是 Dijkstra 解。"""
+    dataset = build_dataset(num_samples=4, graph_type="er", num_nodes=20, weighted=True)
+    assert len(dataset) == 4
+    for sample in dataset:
+        assert sample.graph.graph.get("weighted") is True
+        assert all(
+            float(data["weight"]) > 0 for _, _, data in sample.graph.edges(data=True)
+        )
 
 
-def test_weighted_error_message_points_at_the_edge_cost_encoder():
-    with pytest.raises(NotImplementedError) as info:
-        build_dataset(num_samples=4, num_nodes=20, weighted=True)
-    assert "edge cost" in str(info.value).lower()
+def test_weighted_gt_equals_dijkstra_optimum():
+    dataset = build_dataset(num_samples=4, graph_type="er", num_nodes=20, weighted=True)
+    for sample in dataset:
+        optimal = [
+            int(v)
+            for v in nx.shortest_path(
+                sample.graph, sample.start, sample.goal, weight="weight"
+            )
+        ]
+        assert list(sample.gt_path) == optimal
+
+
+def test_unweighted_gt_still_comes_from_bfs():
+    """无权数据集一个字节都没变：GT 仍然是最少跳数路径。"""
+    dataset = build_dataset(num_samples=4, graph_type="er", num_nodes=20)
+    for sample in dataset:
+        hop = [
+            int(v)
+            for v in nx.shortest_path(
+                sample.graph, sample.start, sample.goal, weight=None
+            )
+        ]
+        assert list(sample.gt_path) == hop
+        assert not sample.graph.graph.get("weighted", False)
+
+
+def test_unknown_weight_distribution_is_rejected():
+    with pytest.raises(ValueError):
+        build_dataset(
+            num_samples=2,
+            graph_type="er",
+            num_nodes=20,
+            weighted=True,
+            edge_weight={"distribution": "nope", "range": [1.0, 10.0]},
+        )
+
+
+def test_non_positive_weight_range_is_rejected():
+    with pytest.raises(ValueError):
+        build_dataset(
+            num_samples=2,
+            graph_type="er",
+            num_nodes=20,
+            weighted=True,
+            edge_weight={"range": [0.0, 10.0]},
+        )
 
 
 # ---------------------------------------------------------------------------
