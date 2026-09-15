@@ -125,7 +125,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
 | `outputs/runs/v2_weighted_controlled_cost_ablated`（第 20 节的 cost 消融） | 新 attention + Soft Goal，**看不到 edge cost** | 同一份带权训练集 | 100 epoch（~120 s/ep） | 75 | 0.8033 | — | — | — |
 
 > 两个 weighted run 的评测集不是上面三个（那些是无权图），而是 `data/weighted_controlled/weighted_controlled_test.pkl`：
-> 见第 20.8 节 —— Ours `goal 0.8400 / optimal 0.6800 / cost_ratio 1.0074`，cost 消融 `0.7600 / 0.2867 / 1.0666`，
+> 见第 20.8 节 —— Ours `goal 0.8633 / optimal 0.6900 / cost_ratio 1.0070`，cost 消融 `0.8767 / 0.3667 / 1.0557`，
 > Greedy-BFS `1.0000 / — / 1.0350`，Dijkstra oracle `1.0000 / 1.0000 / 1.0000`（逐条配对 p=7e-23）。
 
 > 上表是**单次评测（seed 0）** 的数字；括号里注明的行是 5 种子均值。多种子配对检验的
@@ -238,6 +238,18 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/run
 E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/oldv1/oldv1_test.pkl --index 1242
 E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --index 111 --json
 ```
+
+**交互看板（加权模型 + 报告页签）**
+
+```bash
+# 启动（默认 http://127.0.0.1:8765/，自动打开浏览器；--no-browser 则不打开）
+E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py
+```
+
+看板有三个页签：路径可视化 / 测试指标可视化 / **实验报告**。指标页含 `multi`、
+`multi · best_goal`、`multi · best_goal_cost` 与 `multi k=N / stop|skip` 等口径，并对每个模型标出
+**带权 / 带权·无cost / 无权**；报告页直接读 `docs/REPORT_multipath_and_weighted.md` 与
+`outputs/*summary*.json`。细节见第 22 节与 `dashboard/README.md`。
 
 **数据（生成 / 转换 / 合并 / 查泄漏）**
 
@@ -1412,8 +1424,8 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/graph
 
 | 口径 | `goal_hit` | `optimal` | `success_cost_ratio` | `broken` | 说明 |
 |---|---|---|---|---|---|
-| **Ours weighted**（best.pt = ep95） | **0.8400** | **0.6800** | **1.0074** | 0.1533 | weighted GT + Edge Cost Encoder |
-| Ours，cost 消融（best.pt = ep75） | 0.7600 | 0.2867 | 1.0666 | 0.2367 | 同一份 weighted GT，但模型看不到 edge cost |
+| **Ours weighted**（best.pt = ep95） | **0.8633** | **0.6900** | **1.0070** | 0.1367 | weighted GT + Edge Cost Encoder（single = 最终 argmax readout，见第 23 节） |
+| Ours，cost 消融（best.pt = ep75） | 0.8767 | 0.3667 | 1.0557 | 0.1233 | 同一份 weighted GT，但模型看不到 edge cost |
 | Greedy-BFS（按跳数贪心） | 1.0000 | — | 1.0350 | — | 永远能到终点，但路线不最优 |
 | **Dijkstra oracle** | **1.0000** | **1.0000** | **1.0000** | — | `baselines.shortest_path()`（oracle 口径自证） |
 
@@ -1496,19 +1508,19 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/
 
 | model | null_policy | decoder | goal_hit | optimal | cost_ratio |
 |---|---|---|---|---|---|
-| weighted | stop | single | 0.8400 | 0.6800 | 1.0074 |
+| weighted | stop | single（新 readout） | **0.8633** | **0.6900** | 1.0070 |
 | weighted | stop | multi_best | 0.8667 | 0.6933 | 1.0070 |
 | weighted | stop | best_goal | 1.0000 | 0.7833 | 1.0081 |
 | weighted | stop | best_goal_cost | 1.0000 | 0.9133 | 1.0026 |
-| weighted | skip | single | 0.8400 | 0.6800 | 1.0074 |
+| weighted | skip | single（新 readout） | **0.8633** | **0.6900** | 1.0070 |
 | weighted | skip | **multi_best** | **1.0000** | 0.7800 | 1.0081 |
 | weighted | skip | best_goal | 1.0000 | 0.7800 | 1.0081 |
 | weighted | skip | **best_goal_cost** | **1.0000** | **0.9867** | **1.0002** |
-| ablated | stop | single | 0.7600 | 0.2867 | 1.0666 |
+| ablated | stop | single（新 readout） | **0.8767** | **0.3667** | 1.0557 |
 | ablated | stop | multi_best | 0.8400 | 0.3733 | 1.0548 |
 | ablated | stop | best_goal | 1.0000 | 0.4500 | 1.0551 |
 | ablated | stop | best_goal_cost | 1.0000 | 0.7833 | 1.0158 |
-| ablated | skip | single | 0.7600 | 0.2867 | 1.0666 |
+| ablated | skip | single（新 readout） | **0.8767** | **0.3667** | 1.0557 |
 | ablated | skip | multi_best | 0.9967 | 0.4367 | 1.0558 |
 | ablated | skip | best_goal | 1.0000 | 0.4367 | 1.0558 |
 | ablated | skip | best_goal_cost | 1.0000 | 0.9300 | 1.0036 |
@@ -1537,20 +1549,33 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/
 | ablated | skip | best_goal | +0.0000 | −0.0033 | +0.0005 |
 | ablated | skip | best_goal_cost | +0.0000 | −0.0067 | +0.0001 |
 
-* **weighted 模型：所有 outcome 指标逐位相同**（表格里没有它的行），预筛选是纯安全网；
-* **ablated 模型：有 ±0.3~2pt 的抖动**，因为预筛选会腾出 top-k 名额、让原本被 dead branch
-  挤掉的**可行**分支也进入展开，于是表里的 goal 路径集合会变（`mean_goal_paths` 7.42 → 7.51）。
-  这不是随机噪声：`single` 那一列在所有 8 次运行里完全相同，证明评测链本身是确定性的。
+* **weighted 模型：三种配置（off / on / on 重跑）的全部 outcome 指标逐位相同**，预筛选是纯安全网；
+* **ablated 模型那几行差值不能归因于过滤器** —— 它们是**跑间噪声**。同一配置连跑两次
+  （都用 `--filter-dead-branches --null-policy stop`）：
+
+  ```
+  weighted: 两次 difference = none（逐位相同）
+  ablated : 两次 difference = multi_best.optimal 0.0033 / best_goal_cost.optimal 0.0067
+  ```
+
+  噪声源已定位：同一批输入、同一 seed，`candidate_prob` 在 **cuda 上两次相差 8.6e-07**
+  （`z0` 相同），在 **cpu 上两次逐位相同（0.0）**。原因是 GraphFlow 的
+  `message.index_add_` / EdgeState 的 `scatter_reduce_` 在 CUDA 上走原子加、
+  归约顺序每次不同。weighted 模型的决策概率余量大，1e-6 抖动不会翻 top-k；
+  消融模型分布平，会翻掉 2~3 条 query —— 所以只有它抖。
+  `single` 一列在所有运行里都相同（采样对 1e-6 抖动不敏感），是这条解释的对照。
 * 不变量自检（`outputs/multipath_weighted_summary.json` 生成时跑）：每个 run 都满足
   `best_goal_cost.optimal ≤ weighted_optimal_coverage_rate`，`single` 与 filter 无关 —— 0 violations。
+* 只跑开启过滤的结果另有独立产物：`outputs/multipath_weighted_filteron_summary.json`
+  （weighted 的数字与上表逐位相同；ablated 有上述噪声）。
 
 ### 21.4 这条链路把「模型能力」拆成了三层
 
 以 weighted 模型（skip）为例：
 
 ```
-single 0.6800  ->  multi_best 0.7800  ->  best_goal_cost 0.9867
-   ↑ 采样丢路        ↑ 确定性贪心           ↑ 表里有最优路（上界）
+single 0.6900  ->  multi_best 0.7800  ->  best_goal_cost 0.9867
+   ↑ 最终 argmax readout  ↑ 确定性贪心           ↑ 表里有最优路（上界）
 weighted optimal coverage = 0.9867
 ```
 
@@ -1558,7 +1583,7 @@ weighted optimal coverage = 0.9867
 
 | decoder | 带 edge cost | cost 消融 | 差值 |
 |---|---|---|---|
-| single optimal | **0.6800** | 0.2867 | +0.393 |
+| single optimal（新 readout） | **0.6900** | 0.3667 | +0.323 |
 | multi_best optimal | **0.7800** | 0.4367 | +0.343 |
 | best_goal optimal | **0.7800** | 0.4367 | +0.343 |
 | best_goal_cost optimal | 0.9867 | 0.9300 | +0.057 |
@@ -1571,7 +1596,49 @@ hop-最优与 cost-最优通常只差一两个 decision —— 表里自然容�
 所以**判断模型是否真的在用 edge weight，要看概率排名那几个口径**（single / multi_best / best_goal，
 差距 34~39 个点），不能拿 best_goal_cost 当证据。
 
-### 21.5 零破坏验证
+### 21.5 beam 宽度对照：beam=64 vs beam=3（CPU，开过滤）
+
+跑在 **CPU** 上（CPU 逐位可复现：同配置连跑两次，除 `wall_time` 外结果完全相同），
+`--filter-dead-branches`，`top_k=2`，300 条 weighted test。`single` 不受 beam 影响，两列恒等，故不重复列。
+
+| model | null | 指标 | beam=64 | beam=3 | Δ |
+|---|---|---|---|---|---|
+| weighted | stop | multi_best optimal | 0.6933 | 0.6933 | 0 |
+| weighted | stop | best_goal optimal | 0.7833 | 0.7833 | 0 |
+| weighted | stop | best_goal_cost optimal | 0.9133 | 0.9100 | −0.0033 |
+| weighted | stop | weighted optimal coverage | 0.9133 | 0.9100 | −0.0033 |
+| weighted | skip | multi_best optimal | 0.7800 | 0.7800 | 0 |
+| weighted | skip | best_goal optimal | 0.7800 | 0.7800 | 0 |
+| weighted | skip | best_goal_cost optimal | 0.9867 | **0.9800** | −0.0067 |
+| weighted | skip | weighted optimal coverage | 0.9867 | **0.9800** | −0.0067 |
+| ablated | stop | best_goal_cost optimal | 0.7833 | 0.7533 | −0.0300 |
+| ablated | stop | weighted optimal coverage | 0.7833 | 0.7533 | **−0.0300** |
+| ablated | skip | best_goal_cost optimal | 0.9267 | 0.8767 | −0.0500 |
+| ablated | skip | weighted optimal coverage | 0.9267 | 0.8767 | **−0.0500** |
+
+| model | null | beam | coverage | w_opt_cov | mean_goal_paths | mean_finished | mean_pruned |
+|---|---|---|---|---|---|---|---|
+| weighted | stop | 64 | 1.0000 | 0.9133 | 3.34 | 10.02 | 0.00 |
+| weighted | stop | 3 | 1.0000 | 0.9100 | 2.86 | 8.78 | 0.33 |
+| weighted | skip | 64 | 1.0000 | 0.9867 | 6.14 | 13.05 | 0.00 |
+| weighted | skip | 3 | 1.0000 | 0.9800 | 4.48 | 9.60 | 0.91 |
+| ablated | stop | 64 | 1.0000 | 0.7833 | 3.64 | 9.85 | 0.00 |
+| ablated | stop | 3 | 1.0000 | 0.7533 | 3.13 | 8.78 | 0.29 |
+| ablated | skip | 64 | 1.0000 | 0.9267 | 7.51 | 13.32 | 0.00 |
+| ablated | skip | 3 | 1.0000 | 0.8767 | 5.24 | 9.48 | 1.07 |
+
+**读数**：
+
+* `multi_best` / `best_goal`（概率排名口径）在 beam=3 下**一个点都不掉** —— 最优路本来就排在前面，
+  beam 再窄也留着；`coverage` 也恒为 1.0000；
+* 掉的是「表里有最优路」这一族：weighted 只掉 0.33~0.67pt，ablated 掉 **3.0~5.0pt**；
+* 于是**两个模型在 w_opt_cov 上的差距被窄 beam 拉开**：stop 13.0pt → 15.7pt，skip 6.0pt → **10.3pt**。
+  这说明宽 beam 之前在替消融模型兜底：它靠扫更多分支把最优路捡进表里；把 beam 收到 3、
+  只保留模型自己排得高的分支后，消融模型就漏了，weighted 模型不漏。
+* 产物：`outputs/multipath_weighted_beam_compare.json`（8 次运行的完整记录）+ 各 run 目录下的
+  `mp_cpu_beam{64,3}_{stop,skip}.json`。
+
+### 21.6 零破坏验证
 
 同一个未加权历史产物（`v2_rev2_mixed` × `controlled_long` × top_k=2 skip）**逐位复现**：
 
@@ -1582,7 +1649,7 @@ multi_best: goal_hit 1.0000 / optimal 0.9450 / cost_ratio 1.0024
 本轮重跑的每一项 delta = 0.0
 ```
 
-### 21.6 新增测试（`tests/test_multi_path_decoder.py` 24 个，其中 14 个是本轮加的）
+### 21.7 新增测试（`tests/test_multi_path_decoder.py` 24 个，其中 14 个是本轮加的）
 
 对应指南第 11 节：dead 不占 top-k、关筛选逐位复现旧行为、全部候选被筛掉判 broken 不崩、
 loop 逻辑不变、beam 剪枝不变、weighted path cost（26.0 / 10.0）、无权退化成跳数、
@@ -1590,12 +1657,143 @@ loop 逻辑不变、beam 剪枝不变、weighted path cost（26.0 / 10.0）、�
 `best_goal_cost_path` 取真实 cost 最低（2 跳 cost=21 vs 3 跳 cost=6 → 后者）、
 weighted optimal coverage 需要真正的最小 cost 路。另外加了 3 个 evaluator 接线测试
 （`report.multi` 三条口径 + 无权不暴露 weighted 别名 + weighted 上暴露）。
-全部测试：`pytest tests -q` → **306 passed**；`semantic_check.py --strict` → **0 problems**。
+全部测试：`pytest tests -q` → **307 passed**；`semantic_check.py --strict` → **0 problems**。
 
-### 21.7 复现用的产物
+### 21.8 全模型统一评测报告
+
+`docs/REPORT_multipath_and_weighted.md`：8 个模型配置（加权 / 消融 / 无权 / 跨任务）× 2 个测试集
+（加权 300 条、无权 300 条）× 单分支 + 多分支（`top_k=2, beam_width=3, filter=True`，stop/skip 各一遍），
+CPU 跑、逐位可复现；含完整指标定义、解码器定义、参考基线、结论与读数陷阱。
+机器可读汇总在 `outputs/all_models_multipath_summary.json`，16 份原始评测在 `outputs/multipath_report/`。
+
+### 21.9 复现用的产物
 
 ```
 outputs/multipath_weighted_summary.json                        # 6 次评测的汇总表
 outputs/runs/v2_weighted_controlled/mp_weighted_{stop,skip}_{off,on}.json
 outputs/runs/v2_weighted_controlled_cost_ablated/mp_weighted_{stop_off,skip_on}.json
 ```
+
+---
+
+## 22. 交互看板（`dashboard/`）：加权模型 + 指标报告
+
+```bash
+E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py            # http://127.0.0.1:8765/
+E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py --no-browser --device cpu
+```
+
+三个页签：**路径可视化** / **测试指标可视化** / **实验报告**。
+
+### 22.1 加权模型与多分支口径怎么进面板的
+
+| 位置 | 内容 |
+|---|---|
+| 模型筛选器 | 每个 run 按 `run_config.json` 的 `data.weighted` + `model.use_edge_cost` 打徽章：**带权** / **带权·无cost**（消融）/ **无权** |
+| 指标页 · 口径 | 一次评测会展开成多行：`single`、`multi`、`multi · best_goal`、`multi · best_goal_cost`、`multi k=2 / stop|skip` —— 直接对照方案第 8 节的三条口径 |
+| 指标页 · 新列 | **类别**（徽章）、**W-opt cov**（`weighted_optimal_coverage_rate`）、**Goal paths**（`mean_goal_paths`） |
+| 指标页 · 数据集 | `weighted_controlled_{train,val,test}.pkl` 与无权数据集并列，按 `data/` 子目录分组 |
+| 路径页 · 多分支 | 控制条新增 **必死 branch 预筛选** 开关（透传 `filter_dead_branches`），summary 里显示剔除数量 |
+| 路径页 · 带权图 | 每条路线同时显示 **跳数** 与 **真实 cost**（后端 `_route_payload` 新增 `path_cost` / `weighted`） |
+
+数据集归属不再靠文件名猜：`scripts/evaluate.py` 现在把 `data` 写进评测 JSON，看板优先用它；
+加权 run 里的老产物（没有 `data` 字段）按 `data.weighted=true` 兜底判到加权测试集。另外同一口径
+有多份产物时，**`best.pt` 的评测优先于 `*_last.json`**。
+
+### 22.2 实验报告页签
+
+`GET /api/reports` 返回固定清单（不遍历目录），`GET /api/reports/<id>` 返回内容：
+Markdown 原样返回（前端用内置小渲染器画标题/表格/列表/代码块），JSON 解析后格式化展示。
+
+| id | 文件 |
+|---|---|
+| `report` | `docs/REPORT_multipath_and_weighted.md` |
+| `all_models` | `outputs/all_models_multipath_summary.json` |
+| `weighted_experiment` | `outputs/weighted_experiment.json` |
+| `multipath_weighted` / `multipath_filteron` | 过滤 on/off 的 beam=64 对照 |
+| `beam_compare` | beam=64 vs beam=3（CPU） |
+| `regression` | 零破坏回归：旧 checkpoint 逐位复现 |
+
+### 22.3 API 一览
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/catalog` | 模型（含 `kind` / `weighted` / `use_edge_cost` / `flow_steps`）、数据集、指标行、报告清单 |
+| GET | `/api/datasets/<id>` | 数据集规模 |
+| GET | `/api/reports/<id>` | 报告内容（Markdown 文本 / JSON 对象） |
+| POST | `/api/path` | 一次真实反向扩散 + 单路径/多分支解码，返回图、路线（含 `path_cost`）与 summary |
+
+截图（Chromium 实跑，`outputs/figures/dashboard_*.png`）：指标页按加权测试集筛选、报告页渲染本文第 21 节报告。
+
+---
+
+## 23. single-path 最终 readout 变更（采样 -> 最终 argmax）
+
+### 23.1 为什么改
+
+旧默认的 single 解码直接吃 reverse chain **采样**出来的 `z0`。采样只是"从模型分布里抽到的一条"，
+不等于模型最可能的那条：weighted 测试集 #92 上，模型在最后一个路口（node 8）对 `NULL` 和 `->9` 都给了
+概率，**采样抽到 NULL** → 16 跳中止；而模型自己的 argmax 明明是 `->9` → 18 跳到达。
+用户看到"扩散过程连上了、单步解码没连上"，根因就在这里。
+
+### 23.2 改成了什么（只动最终 readout）
+
+```
+旧: stochastic reverse chain -> sampled z0                -> decode_flat
+新: stochastic reverse chain -> 最后一步 candidate_prob
+                             -> 每个 decision 组内 argmax -> z0_argmax -> decode_flat
+```
+
+* **reverse chain 一个字没改**：仍然逐步按 posterior 采样（`stochastic=True` 默认不变），
+  `z_T ~ pi`、`q(z_{t-1} | z_t, ẑ_0)` 的数学定义都没动；
+* 变的是 **readout**：`grouped_argmax(candidate_prob)`（每个 decision 只在自己的候选里取最大，
+  不是 flat 全局 argmax），NULL / source decision 的候选语义沿用 DecisionField；
+* **multi-path 完全没动**：仍然直接用整组 `candidate_prob` 展开 top-k，历史结果逐位不变
+  （已验证：同一配置的新旧产物 `multi_best` / `best_goal` / `best_goal_cost` / coverage 全等）；
+* **sampled z0 仍然保留**：扩散可视化的"链状态"档、调试都用它，只是不再驱动 single 解码；
+* **`stochastic=False` 的全程 argmax rollout 也保留**，它是另一条路径（每一步都取 argmax），
+  与新的 single 是两回事；面板上的开关现在叫「全程 argmax（对照）」。
+
+### 23.3 三个状态的命名（别再混）
+
+| 名字 | 是什么 | 谁在用 |
+|---|---|---|
+| `single`（默认） | 最后一步 `candidate_prob` 的**组内 argmax** | 评测主口径；面板"解码使用"那一行 |
+| `single_sampled`（诊断） | 采样出来的 `z0` | 旧行为，保留用于对照；面板"链状态（仅诊断）" |
+| deterministic rollout | **每一步** posterior 取 argmax | `stochastic=False` / 面板「全程 argmax（对照）」 |
+
+代码入口：`src/evaluation/readout.py`（`single_readout_state` / `single_path_state`）。
+`evaluate_dataset(decode=...)` 现在接受 `single` / `single_sampled` / `multi`；
+`tools/evaluate_multipath.py` 同时输出 `single_path`（新）与 `single_sampled`（诊断）。
+
+### 23.4 #92 回归（weighted 测试集，`v2_weighted_controlled`，seed 0，CPU）
+
+```
+readout z0 = [2, 5, 10, 16, 20]   -> goal    18 跳 / cost 101.29
+sampled z0 = [2, 5, 10, 16, 19]   -> broken  16 跳 / cost  92.35   NULL selected at 8
+（decision 4 上 readout=->9，采样=NULL）
+```
+
+测试：`tests/test_single_readout.py`（8 个）覆盖 grouped argmax 正确性、single 不再读采样状态、
+采样状态变化不影响 single、multi 与采样状态无关、采样链仍是 stochastic、#92 回归。
+
+### 23.5 300 条上的口径变化（CPU，seed 0）
+
+| 模型 / 测试集 | single（新 readout） | single_sampled（旧） |
+|---|---|---|
+| weighted 模型 / weighted test | **0.8633 / 0.6900** | 0.8400 / 0.6800 |
+| cost 消融 / weighted test | **0.8767 / 0.3667** | 0.7600 / 0.2867 |
+| 无权模型跨任务 / weighted test | **0.9433 / 0.5067** | 0.9367 / 0.4867 |
+| rev2_mixed / controlled test | 0.9233 / **0.9000** | 0.9300 / 0.8833 |
+| rev2_longmix / controlled test | **0.9567 / 0.9500** | 0.9300 / 0.9033 |
+| controlled_flow3 / controlled test | **0.9733 / 0.8567** | 0.9167 / 0.7233 |
+| controlled_flow1 / controlled test | **0.9967 / 0.8767** | 0.8933 / 0.7333 |
+
+（格式 `goal_hit / optimal_path_rate`。）总体规律：**argmax readout 让 `optimal` 普遍上升**
+（weighted 0.6800→0.6900、消融 0.2867→0.3667、flow1 0.7333→0.8767），`goal_hit` 多数也升；
+少数模型（rev2_mixed、weighted-跨无权）`goal_hit` 略降 0.7~1.3 个点 —— 因为 argmax 链会更"自信"地
+走它认为对的那条，而采样有时会瞎走到终点。两种口径都保留，报告里并排列出。
+
+> **注**：第 0.2 节模型表里较早那些 `controlled_test` / `long` / `oldv1_test` 的 single 数字是在本次
+> 改动**之前**测的（等价于现在的 `single_sampled`），没有重跑；要看新口径请用第 23.5 节或
+> `docs/REPORT_multipath_and_weighted.md`。

@@ -20,6 +20,7 @@
     <nav class="tabs" aria-label="面板标签页" role="tablist">
       <button class="tab active" id="path-tab" role="tab" aria-selected="true" aria-controls="path-panel">路径可视化</button>
       <button class="tab" id="metrics-tab" role="tab" aria-selected="false" aria-controls="metrics-panel">测试指标可视化</button>
+      <button class="tab" id="reports-tab" role="tab" aria-selected="false" aria-controls="reports-panel">实验报告</button>
     </nav>
 
     <section id="path-panel" class="tab-panel" role="tabpanel" aria-labelledby="path-tab">
@@ -35,6 +36,9 @@
         <label>解码方式
           <select id="decode-mode"><option value="single">单路径</option><option value="multi">多分支</option></select>
         </label>
+        <label class="switch" id="deterministic-switch" title="单路径解码：勾选后走 argmax 确定性 rollout，而不是从 reverse posterior 采样（扩散视图的 clean 预测就是这条路）">
+          <input id="deterministic" type="checkbox"><span></span>全程 argmax（对照）
+        </label>
         <button id="generate" class="primary">生成并播放</button>
       </div>
 
@@ -43,6 +47,9 @@
         <label>路径表上限 <input id="beam-width" type="number" min="1" max="256" value="64"></label>
         <label>显示路线数 <input id="display-paths" type="number" min="1" max="24" value="8"></label>
         <label>NULL 策略 <select id="null-policy"><option value="stop">停止</option><option value="skip">跳过</option></select></label>
+        <label class="switch" id="filter-dead-switch" title="top-k 之前剔除终点既不是 Goal 也不是 decision 的必死 branch">
+          <input id="filter-dead" type="checkbox"><span></span>必死 branch 预筛选
+        </label>
       </div>
 
       <div class="workspace">
@@ -55,8 +62,9 @@
             <div><dt>最短路径</dt><dd>—</dd></div>
             <div><dt>覆盖情况</dt><dd>—</dd></div>
           </dl>
+          <p class="contrast" id="decoder-contrast" hidden></p>
           <div class="legend" id="path-legend"></div>
-          <p class="hint" id="view-hint">分叉路线使用独立颜色；合流后仍保持紧凑的多色总线。</p>
+          <p class="hint" id="view-hint">所有路线共用的前缀合并成一条灰色主干（那里还没有分叉）；分叉后各路线用独立颜色，合流处保持紧凑的多色总线。</p>
         </aside>
 
         <div class="graph-shell">
@@ -74,8 +82,8 @@
           </div>
           <div class="diffusion-toolbar" id="diffusion-toolbar" hidden>
             <div class="state-switch" role="group" aria-label="选择扩散状态">
-              <button id="state-clean" class="active" aria-pressed="true">预测干净状态 <code>ẑ₀</code></button>
-              <button id="state-noisy" aria-pressed="false">去噪后带噪状态 <code>zₜ₋₁</code></button>
+              <button id="state-clean" class="active" aria-pressed="true" title="模型每一步对干净状态的 argmax 预测（它认为的答案），不是采样结果">模型预测 <code>ẑ₀</code>（每步 argmax）</button>
+              <button id="state-noisy" aria-pressed="false" title="扩散链自己携带的状态（默认模式=按 posterior 采样）；single 解码默认不跟随它，只作诊断">链状态 <code>zₜ₋₁</code>（仅诊断）</button>
             </div>
             <div class="diffusion-scrubber">
               <button id="diffusion-replay" aria-label="从头播放扩散过程" disabled>↺</button>
@@ -116,11 +124,32 @@
         <div class="section-heading"><div><span class="eyebrow">完整记录</span><h2>指标明细</h2></div></div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>模型</th><th>数据集</th><th>口径</th><th>Goal hit</th><th>Optimal</th><th>Cost ratio</th><th>Loop</th><th>Broken</th><th>Coverage</th></tr></thead>
+            <thead><tr><th>模型</th><th>类别</th><th>数据集</th><th>口径</th><th>Goal hit</th><th>Optimal</th><th>Cost ratio</th><th>Loop</th><th>Broken</th><th>Coverage</th><th>W-opt cov</th><th>Goal paths</th></tr></thead>
             <tbody id="metrics-body"></tbody>
           </table>
         </div>
       </section>
+    </section>
+
+    <section id="reports-panel" class="tab-panel" role="tabpanel" aria-labelledby="reports-tab" hidden>
+      <div class="reports-layout">
+        <aside class="report-list">
+          <div class="eyebrow">报告与汇总产物</div>
+          <h2>实验报告</h2>
+          <p class="hint">加权模型 / 多分支解码的评测报告与机器可读汇总，直接从仓库文件读取。</p>
+          <ul id="report-items"></ul>
+        </aside>
+        <div class="report-view">
+          <div class="report-head">
+            <div>
+              <span class="eyebrow" id="report-kind">—</span>
+              <h2 id="report-title">选择左侧的一份报告</h2>
+            </div>
+            <code id="report-path" class="muted"></code>
+          </div>
+          <div id="report-body" class="report-body"><p class="muted">尚未加载。</p></div>
+        </div>
+      </div>
     </section>
   </main>
 

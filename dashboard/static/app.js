@@ -11,8 +11,15 @@ const METRICS = {
   loop_rate: "Loop rate",
   broken_rate: "Broken rate",
   coverage_rate: "Coverage rate",
-  optimal_coverage_rate: "Optimal coverage"
+  optimal_coverage_rate: "Optimal coverage",
+  // Weighted 扩展 / 多分支增强新增的口径
+  weighted_optimal_coverage_rate: "加权最优覆盖率（表里至少一条最小 cost 路）",
+  mean_goal_paths: "平均 Goal 路径数",
+  mean_finished_paths: "平均终止路径数",
+  mean_filtered_dead_branches: "平均被预筛选的必死 branch"
 };
+
+const KIND_LABEL = { weighted: "带权", ablated: "带权·无cost", unweighted: "无权" };
 
 const state = {
   catalog: null,
@@ -132,7 +139,8 @@ function renderModelFilters() {
   state.catalog.models.forEach((model, index) => {
     const label = document.createElement("label");
     label.className = "model-filter";
-    label.innerHTML = `<input type="checkbox" value="${escapeHtml(model.id)}" ${index < 5 ? "checked" : ""}><span>${escapeHtml(model.label)}</span>`;
+    const kind = model.kind || "unweighted";
+    label.innerHTML = `<input type="checkbox" value="${escapeHtml(model.id)}" ${index < 6 ? "checked" : ""}><span>${escapeHtml(model.label)}</span><em class="kind-badge ${kind}">${KIND_LABEL[kind] || kind}</em>`;
     root.append(label);
   });
 }
@@ -195,6 +203,8 @@ async function generatePath() {
       beam_width: Number($("#beam-width").value),
       display_paths: Number($("#display-paths").value),
       null_policy: $("#null-policy").value,
+      filter_dead_branches: $("#filter-dead").checked,
+      deterministic: $("#deterministic").checked,
       seed: 0,
       include_diffusion: true
     };
@@ -219,6 +229,40 @@ async function generatePath() {
   } finally { setLoading(false); }
 }
 
+function statusText(status) {
+  return status === "goal" ? "到达" : status === "loop" ? "成环" : status === "broken" ? "中止" : status || "—";
+}
+
+const READOUT_TITLE = {
+  final_prob_argmax: "Single 解码 = 最终 candidate_prob 的组内 argmax（reverse chain 仍按 posterior 采样）",
+  deterministic_rollout: "Single 解码 = 全程 argmax rollout（每一步 posterior 都取 argmax）",
+  sampled_z0: "Single 解码 = 采样出来的 z₀（旧行为）"
+};
+
+/**
+ * single 解码**不再**跟随采样状态：默认用"最终候选概率的组内 argmax"。
+ * 扩散链自己携带的状态（默认是采样出来的）只用于可视化/诊断 —— 两者允许不一致
+ * （实测 #92：readout 18 跳到达，采样链在最后一个路口抽到 NULL 判 broken）。
+ */
+function renderDecodeContrast(data) {
+  const box = $("#decoder-contrast");
+  const contrast = data.contrast;
+  if (!contrast) { box.hidden = true; return; }
+  const readout = contrast.readout;
+  const chainState = contrast.chain_state;
+  const differ = readout.status !== chainState.status;
+  const line = (tag, entry) =>
+    `${tag}：<b>${statusText(entry.status)}</b> · ${entry.hops} 跳 / cost ${Number(entry.path_cost).toFixed(1)}` +
+    (entry.reason ? ` · ${escapeHtml(entry.reason)}` : "");
+  const chainTag = contrast.chain_stochastic
+    ? "扩散链实际采样状态（仅诊断）"
+    : "扩散链状态（本模式=贪心 rollout）";
+  box.hidden = false;
+  box.innerHTML = `<strong>${READOUT_TITLE[contrast.readout_mode] || "Single 解码"}</strong><br>` +
+    line("解码使用", readout) + "<br>" + line(chainTag, chainState) +
+    (differ ? "<br><span class=\"muted\">两者不同是正常的：解码不再跟随采样状态。</span>" : "");
+}
+
 function renderPathInfo() {
   const data = state.pathData;
   const sample = data.sample;
@@ -230,13 +274,18 @@ function renderPathInfo() {
     data.summary.coverage ? "至少一条到达" : "未到达"
   ];
   $$("#sample-stats dd").forEach((dd, i) => { dd.textContent = values[i]; });
+  renderDecodeContrast(data);
   const legend = $("#path-legend");
   legend.innerHTML = "";
   data.routes.forEach((route, index) => {
     const item = document.createElement("div");
     item.className = "legend-item";
     const label = route.status === "goal" ? "到达" : route.status === "loop" ? "成环" : "中止";
-    item.innerHTML = `<i style="background:${routeColor(index)}"></i><span>#${route.rank} · ${label} · ${route.cost} 跳</span>`;
+    // 带权图上"跳数"和"真实 cost"不是一回事，两个都显示
+    const costText = route.weighted
+      ? `${route.cost} 跳 / cost ${Number(route.path_cost).toFixed(1)}`
+      : `${route.cost} 跳`;
+    item.innerHTML = `<i style="background:${routeColor(index)}"></i><span>#${route.rank} · ${label} · ${costText}</span>`;
     legend.append(item);
   });
   const reached = data.routes.filter((route) => route.status === "goal").length;
@@ -258,27 +307,53 @@ function edgeKey(source, target) {
   return source < target ? `${source}:${target}` : `${target}:${source}`;
 }
 
+/**
+ * 每条物理边上都有哪些"路线 × 第几段"经过。
+ *
+ * 额外记录 ``uniqueRoutes``（这条边被多少条**不同**的路线走过）与 ``totalRoutes``：
+ * 一条被**全部**显示路线走过的边属于"公共前缀"，它不携带任何区分信息 —— 画成
+ * 一束平行线只会让人以为这里就分叉了（实测反馈），所以这种边合并成一条主干线。
+ */
 function buildEdgeUsage(routes) {
   const usage = new Map();
+  const uniqueRoutes = new Map();
   routes.forEach((route, routeIndex) => {
     route.edges.forEach(([source, target], step) => {
       const key = edgeKey(source, target);
-      if (!usage.has(key)) usage.set(key, []);
+      if (!usage.has(key)) {
+        usage.set(key, []);
+        uniqueRoutes.set(key, new Set());
+      }
       usage.get(key).push(`${routeIndex}:${step}`);
+      uniqueRoutes.get(key).add(routeIndex);
     });
   });
-  return usage;
+  return {lanes: usage, uniqueRoutes, totalRoutes: routes.length};
 }
 
 const SWEEP_STEP = 3;       // user units between polyline samples of one edge
 const MAX_BUS_SPAN = 9;     // shared edges never spread wider than this
 const ROUTE_WIDTH = 4.5;    // stroke width of an unshared route edge
+const TRUNK_COLOR = "#93a3bd";   // 公共前缀（所有路线都经过）画成一条中性主干
 
 /** Lane assignment for one traversal of one physical edge. */
 function edgeLane(source, target, routeIndex, step, coordinates, usage) {
-  const lanes = usage.get(edgeKey(source, target)) || [];
+  const key = edgeKey(source, target);
+  const lanes = usage.lanes.get(key) || [];
   const laneIndex = Math.max(0, lanes.indexOf(`${routeIndex}:${step}`));
   const laneCount = Math.max(1, lanes.length);
+  // 所有显示路线都经过这条边 -> 公共前缀，不铺车道
+  const shared =
+    usage.totalRoutes > 1 &&
+    (usage.uniqueRoutes.get(key)?.size || 0) === usage.totalRoutes;
+  if (shared) {
+    const canonicalA = coordinates.get(Math.min(source, target));
+    const canonicalB = coordinates.get(Math.max(source, target));
+    const dx = canonicalB.x - canonicalA.x;
+    const dy = canonicalB.y - canonicalA.y;
+    const length = Math.hypot(dx, dy) || 1;
+    return {offset: 0, strokeWidth: ROUTE_WIDTH, shared: true, nx: -dy / length, ny: dx / length};
+  }
 
   // The normal is derived from the canonical (small id -> large id) edge
   // direction, so a route traversing an edge backwards keeps the same lane.
@@ -295,6 +370,7 @@ function edgeLane(source, target, routeIndex, step, coordinates, usage) {
   return {
     offset: (laneIndex - (laneCount - 1) / 2) * spacing,
     strokeWidth: laneCount > 1 ? Math.max(1.1, Math.min(1.75, spacing * 0.72)) : ROUTE_WIDTH,
+    shared: false,
     nx: -dy / length,
     ny: dx / length
   };
@@ -320,7 +396,8 @@ function edgePathData(source, target, routeIndex, step, coordinates, usage) {
   const fmt = (value) => value.toFixed(2);
   return {
     d: `M${fmt(a.x)},${fmt(a.y)} C${fmt(c1x)},${fmt(c1y)} ${fmt(c2x)},${fmt(c2y)} ${fmt(b.x)},${fmt(b.y)}`,
-    strokeWidth: lane.strokeWidth
+    strokeWidth: lane.strokeWidth,
+    shared: lane.shared
   };
 }
 
@@ -449,9 +526,10 @@ function renderGraph() {
     const segments = [];
     route.edges.forEach(([source, target], step) => {
       const geometry = edgePathData(source, target, index, step, coordinates, usage);
+      // 公共前缀统一用中性色：8 条路线在这里完全重合，着色反而像"一开始就分叉"
       const line = svgEl("path", {
         d: geometry.d,
-        stroke: color,
+        stroke: geometry.shared ? TRUNK_COLOR : color,
         "stroke-width": geometry.strokeWidth,
         class: "route"
       });
@@ -663,11 +741,12 @@ function renderDiffusionFrame(index) {
 
   const caption = svgEl("text", {x: 24, y: 28, class: "diffusion-caption"});
   caption.textContent = mode === "clean"
-    ? `t=${frame.t} · 预测干净状态 ẑ₀ 的完整决策场`
-    : `t=${frame.t} → ${frame.t - 1} · 去噪后带噪状态的完整决策场`;
+    ? `t=${frame.t} · 模型预测 ẑ₀（每步 argmax，仅供诊断）→ ${statusText(frame.clean_status)}`
+    : `t=${frame.t} → ${frame.t - 1} · 扩散链实际状态 zₜ₋₁（仅诊断，single 解码不跟随它）→ ${statusText(frame.noisy_status)}`;
   layer.append(caption);
   const detail = svgEl("text", {x: 24, y: 47, class: "diffusion-caption muted"});
-  detail.textContent = `${chosen.size} 个分叉节点各选 1 项 · ${branchCount} 条 Branch（节点亮起）· ${nullCount} 个 NULL（节点调暗）· 每条边都有方向箭头`;
+  detail.textContent = `${chosen.size} 个分叉节点各选 1 项 · ${branchCount} 条 Branch（节点亮起）· ${nullCount} 个 NULL（节点调暗）` +
+    ` · 本帧解码：clean→${statusText(frame.clean_status)} / noisy→${statusText(frame.noisy_status)}`;
   layer.append(detail);
 
   $("#diffusion-step").value = state.diffusionFrame;
@@ -838,12 +917,17 @@ function renderMetrics() {
   $("#chart-title").textContent = METRICS[metric];
   renderMetricChart(rows, metric);
   const body = $("#metrics-body");
+  const kindOf = (modelId) => (state.catalog.models.find((m) => m.id === modelId) || {}).kind || "unweighted";
   body.innerHTML = rows.map((row) => `<tr>
-    <td>${escapeHtml(row.model)}</td><td>${escapeHtml(row.dataset.replace(".pkl", ""))}</td><td class="muted">${escapeHtml(row.decoding)}</td>
+    <td>${escapeHtml(row.model)}</td>
+    <td><em class="kind-badge ${kindOf(row.model)}">${KIND_LABEL[kindOf(row.model)] || "—"}</em></td>
+    <td>${escapeHtml(row.dataset.replace(".pkl", ""))}</td><td class="muted">${escapeHtml(row.decoding)}</td>
     <td class="numeric">${fmt(row.goal_hit_rate)}</td><td class="numeric">${fmt(row.optimal_path_rate)}</td>
     <td class="numeric">${fmt(row.success_cost_ratio)}</td><td class="numeric">${fmt(row.loop_rate)}</td>
     <td class="numeric">${fmt(row.broken_rate)}</td><td class="numeric">${fmt(row.coverage_rate)}</td>
-  </tr>`).join("") || `<tr><td colspan="9" class="muted">当前筛选条件没有已有评测结果</td></tr>`;
+    <td class="numeric">${fmt(row.weighted_optimal_coverage_rate)}</td>
+    <td class="numeric">${row.mean_goal_paths == null ? "—" : Number(row.mean_goal_paths).toFixed(2)}</td>
+  </tr>`).join("") || `<tr><td colspan="12" class="muted">当前筛选条件没有已有评测结果</td></tr>`;
 }
 
 function modelColor(model) {
@@ -911,11 +995,103 @@ function renderMetricChart(rows, metric) {
   root.append(svg);
 }
 
+/* ------------------------------------------------------------------
+ * 实验报告面板：读取 /api/reports/<id>，Markdown 用一个小渲染器画出来，
+ * JSON 汇总按原样格式化展示（数据本身在 outputs/*.json，面板只做只读呈现）。
+ * ------------------------------------------------------------------ */
+function inlineMd(text) {
+  return escapeHtml(text)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+function renderMarkdown(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/);
+  const out = [];
+  const isTableRow = (line) => /^\s*\|.*\|\s*$/.test(line);
+  const isList = (line) => /^\s*([-*]|\d+\.)\s+/.test(line);
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i += 1; continue; }
+    if (line.startsWith("```")) {
+      const buffer = []; i += 1;
+      while (i < lines.length && !lines[i].startsWith("```")) { buffer.push(lines[i]); i += 1; }
+      i += 1;
+      out.push(`<pre class="md-code">${escapeHtml(buffer.join("\n"))}</pre>`);
+      continue;
+    }
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    if (heading) {
+      const level = Math.min(6, heading[1].length + 1);
+      out.push(`<h${level}>${inlineMd(heading[2])}</h${level}>`);
+      i += 1; continue;
+    }
+    if (/^---+\s*$/.test(line.trim())) { out.push("<hr>"); i += 1; continue; }
+    if (isTableRow(line)) {
+      const rows = [];
+      while (i < lines.length && isTableRow(lines[i])) { rows.push(lines[i]); i += 1; }
+      const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
+      const head = cells(rows[0]);
+      const body = rows.slice(1).filter((row) => !/^\s*\|?[\s:|-]+\|?\s*$/.test(row)).map(cells);
+      out.push(`<table class="md-table"><thead><tr>${head.map((cell) => `<th>${inlineMd(cell)}</th>`).join("")}</tr></thead>` +
+        `<tbody>${body.map((row) => `<tr>${row.map((cell) => `<td>${inlineMd(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table>`);
+      continue;
+    }
+    if (isList(line)) {
+      const items = [];
+      while (i < lines.length && isList(lines[i])) { items.push(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, "")); i += 1; }
+      out.push(`<ul>${items.map((item) => `<li>${inlineMd(item)}</li>`).join("")}</ul>`);
+      continue;
+    }
+    const paragraph = [];
+    while (i < lines.length && lines[i].trim() && !lines[i].startsWith("```") && !isTableRow(lines[i]) && !isList(lines[i])
+           && !/^(#{1,4})\s/.test(lines[i]) && !/^---+\s*$/.test(lines[i].trim())) {
+      paragraph.push(lines[i]); i += 1;
+    }
+    out.push(`<p>${inlineMd(paragraph.join(" "))}</p>`);
+  }
+  return out.join("\n");
+}
+
+async function loadReport(reportId) {
+  $$("#report-items button").forEach((button) => button.classList.toggle("active", button.dataset.report === reportId));
+  $("#report-body").innerHTML = `<p class="muted">加载中…</p>`;
+  try {
+    const data = await api(`/api/reports/${encodeURIComponent(reportId)}`);
+    $("#report-title").textContent = data.label;
+    $("#report-path").textContent = data.path;
+    $("#report-kind").textContent = data.kind === "markdown" ? "Markdown 报告" : "JSON 汇总";
+    $("#report-body").innerHTML = data.kind === "markdown"
+      ? renderMarkdown(data.markdown)
+      : `<pre class="md-code">${escapeHtml(JSON.stringify(data.json, null, 1))}</pre>`;
+  } catch (error) {
+    $("#report-body").innerHTML = `<p class="muted">读取失败：${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderReports() {
+  const reports = (state.catalog && state.catalog.reports) || [];
+  const root = $("#report-items");
+  if (!root.dataset.built) {
+    root.innerHTML = reports.map((item) => `<li><button type="button" class="report-item" data-report="${escapeHtml(item.id)}" ${item.exists ? "" : "disabled"}>` +
+      `<strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.path)}` +
+      `${item.size_kb == null ? " · 缺失" : ` · ${item.size_kb} KB`}</small></button></li>`).join("")
+      || `<li class="muted">还没有生成任何报告产物。</li>`;
+    root.dataset.built = "1";
+    root.querySelectorAll("button[data-report]").forEach((button) =>
+      button.addEventListener("click", () => loadReport(button.dataset.report)));
+    const first = reports.find((item) => item.exists);
+    if (first) loadReport(first.id);
+  }
+}
+
 function bindEvents() {
   $$(".tab").forEach((tab) => tab.addEventListener("click", () => {
     $$(".tab").forEach((item) => { item.classList.toggle("active", item === tab); item.setAttribute("aria-selected", item === tab); });
     $$(".tab-panel").forEach((panel) => { panel.hidden = panel.id !== tab.getAttribute("aria-controls"); });
     if (tab.id === "metrics-tab") requestAnimationFrame(renderMetrics);
+    if (tab.id === "reports-tab") requestAnimationFrame(renderReports);
   }));
   $("#decode-mode").addEventListener("change", () => { $("#multi-controls").hidden = $("#decode-mode").value !== "multi"; });
   $("#path-dataset").addEventListener("change", updateDatasetInfo);

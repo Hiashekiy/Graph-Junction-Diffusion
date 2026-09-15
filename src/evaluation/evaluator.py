@@ -34,6 +34,11 @@ from src.evaluation.path_decoder import (
     decode_flat,
     decision_offsets,
 )
+from src.evaluation.readout import (
+    SINGLE_READOUTS,
+    SINGLE_READOUT_ARGMAX,
+    single_path_state,
+)
 from src.models.denoiser import GraphFlowDenoiser
 from src.training.losses import LossWeights, one_step_clean_state_metrics
 from src.training.soft_goal import soft_goal_reachability
@@ -94,7 +99,10 @@ def evaluate_dataset(
 
     ``decode``：
 
-    * ``"single"``（默认）：按采样出来的 ``z_0`` 单路径解码，与历史结果口径一致；
+    * ``"single"``（默认）：跑完 **stochastic** reverse chain 后，取最后一个 reverse
+      step 的 ``candidate_prob`` 做**组内 argmax** 得到 ``z0_argmax``，再单路径解码。
+      也就是说：链照旧采样，只有最终 readout 是确定的。
+    * ``"single_sampled"``：旧的 single 行为（直接解码采样出来的 ``z0``），只用于诊断；
     * ``"multi"``：**存活路径表**解码（每个 decision 保留 ``top_k`` 条 branch，
       见 :mod:`src.evaluation.multi_path_decoder`）。``metrics`` 仍然是**历史口径**
       —— 主指标取 ``multi.best``（累计概率最高的那条路径，不管它到不到终点），
@@ -112,8 +120,14 @@ def evaluate_dataset(
       ``optimal_coverage_rate`` 现在按**真实 cost** 判定：weighted 图上是 Dijkstra
       最小 cost，无权图上等价于原来的跳数口径。
     """
-    if decode not in ("single", "multi"):
-        raise ValueError(f"decode={decode!r} is not supported (single | multi)")
+    if decode not in SINGLE_READOUTS + ("multi",):
+        raise ValueError(
+            f"decode={decode!r} is not supported "
+            f"({' | '.join(SINGLE_READOUTS)} | multi)"
+        )
+    # single 的最终 readout：默认是"最后一个 reverse step 的 candidate probability
+    # 组内 argmax"；"single_sampled" 才是旧的"直接解码采样 z0"（诊断用）。
+    single_readout = decode if decode in SINGLE_READOUTS else SINGLE_READOUT_ARGMAX
     model.eval()
     device = torch.device(device)
 
@@ -149,7 +163,9 @@ def evaluate_dataset(
             max_steps=max_steps,
         )
         elapsed = time.time() - batch_start
-        z0 = chain["z0"]
+        # 采样链本身保持原样（stochastic 由调用方决定）；改的只是 single 的**最终
+        # readout**：默认取最终候选概率的组内 argmax，而不是采样出来的 z0。
+        z0 = single_path_state(chain, batch, single_readout)
 
         # Soft Goal Reachability：与 Hard Goal Hit 分开报告的可微代理指标。
         # 它是"概率传播到 Goal"的软概率，不是路径解码结果，两者不能互相替代。

@@ -171,6 +171,9 @@ def main() -> int:
               f"(只作诊断，不作模型选择)")
 
     payload = {
+        # 评测产物自己记录数据集：看板不再靠文件名猜（加权 run 的 eval_test.json
+        # 与无权 run 同名，只靠文件名会认错数据集）。
+        "data": args.data,
         "metrics": report.metrics,
         "debug": report.debug,
         "inference": {

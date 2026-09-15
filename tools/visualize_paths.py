@@ -153,6 +153,7 @@ def decode_pool(model, diffusion, dataset, device, generator, args) -> List[Dict
     from src.data.collate import collate_samples
     from src.diffusion.sampler import sample_reverse_chain
     from src.evaluation.multi_path_decoder import decode_multi_path
+    from src.evaluation.readout import single_path_state
     from src.evaluation.path_decoder import (
         candidate_offsets,
         decision_offsets,
@@ -172,7 +173,13 @@ def decode_pool(model, diffusion, dataset, device, generator, args) -> List[Dict
             generator=generator,
             stochastic=not args.deterministic,
         )
-        z0 = chain["z0"]
+        # single 的最终 readout：默认取最终候选概率的组内 argmax（--deterministic 时
+        # 链本身就是全程 argmax rollout，解码它自己的最终状态）。
+        z0 = (
+            chain["z0"]
+            if args.deterministic
+            else single_path_state(chain, batch, "single")
+        )
         offsets = decision_offsets(chunk)
         candidate_starts = candidate_offsets(chunk)
         for index, sample in enumerate(chunk):

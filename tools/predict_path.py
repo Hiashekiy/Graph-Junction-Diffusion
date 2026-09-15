@@ -89,6 +89,7 @@ def main() -> int:
     from src.data.collate import collate_samples
     from src.data.dataset import GraphQueryDataset
     from src.diffusion.sampler import sample_reverse_chain
+    from src.evaluation.readout import single_path_state
     from src.evaluation.path_decoder import (
         candidate_offsets,
         decision_offsets,
@@ -141,7 +142,13 @@ def main() -> int:
         generator=make_generator(seed, device="cpu"),
         stochastic=not args.deterministic,
     )
-    z0 = chain["z0"]
+    # single 的最终 readout：默认取最终候选概率的组内 argmax；--deterministic 时链本身
+    # 就是"每步 posterior argmax"的 rollout，解码它自己的最终状态。
+    z0 = (
+        chain["z0"]
+        if args.deterministic
+        else single_path_state(chain, batch, "single")
+    )
     decision_starts = decision_offsets(samples)
     candidate_starts = candidate_offsets(samples)
 

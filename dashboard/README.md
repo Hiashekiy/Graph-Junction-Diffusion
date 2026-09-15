@@ -32,6 +32,11 @@ GPU 显存。
 
 多分支路线使用后端提供并校验的物理边序列。共享边上的彩色线路只在边的内部做平行偏移，
 在真实节点中心汇合，所以相邻两段永远共用同一个端点，不会出现悬空短线或错位接头。
+
+**公共前缀不铺车道**：一条边如果被当前显示的**全部**路线经过（`uniqueRoutes == totalRoutes`），
+它不携带任何区分信息 —— 现在合并成一条中性色主干线（`TRUNK_COLOR = #93a3bd`），
+只有**真正分叉之后**的边才按路线各自偏移着色。在这之前 8 条路线会把公共前缀画成 8 条
+平行细线，看上去像"一开始就分叉了"（实测反馈）；左侧提示语与图例也说明了这一点。
 线路与非路径节点发生视觉交叉时使用底色衬线跨过，只有真正属于路线的节点才覆盖在线路
 上方，避免把普通交叉误认为连接或缺线。
 
@@ -44,6 +49,65 @@ GPU 显存。
 都会缺一截，看起来就是路径快到节点时突然断开。现在 `styles.css` 里 `.route` /
 `.route-casing` 不再声明 `vector-effect`，描边粗细与节点半径一样使用用户单位，随面板
 一起缩放。采样结果逐帧增量追加，回放/重播时才重建前缀。
+
+
+## 加权模型与多分支解码（新）
+
+面板现在把 Weighted 扩展与多分支增强一并展示出来：
+
+- **模型徽章**：按 run 的 `data.weighted` 与 `model.use_edge_cost` 标 **带权** / **带权·无cost** / **无权**；
+  目前带权的是 `v2_weighted_controlled`，消融对照是 `v2_weighted_controlled_cost_ablated`。
+- **口径**：一次评测展开成 `single` / `multi` / `multi · best_goal` / `multi · best_goal_cost` /
+  `multi k=N / stop|skip`，与方案的「三条口径」一一对应；新增两列 **W-opt cov**（加权最优覆盖率）
+  与 **Goal paths**（平均 Goal 路径数）。
+- **数据集**：`data/weighted_controlled/*.pkl`（w ~ U(1,10)）与无权数据集并列显示；评测产物的数据集
+  归属优先取 JSON 里记录的 `data` 字段（老产物按 `data.weighted` 兜底），不再靠文件名猜。
+- **路径页**：多分支控制条多了「必死 branch 预筛选」（透传 `filter_dead_branches`），summary 显示剔除数量；
+  带权图上每条路线同时显示跳数与**真实 cost**。
+
+## 实验报告页签（新）
+
+`GET /api/reports` 给出固定清单，`GET /api/reports/<id>` 返回内容：Markdown 直接渲染
+（标题/表格/列表/代码块），JSON 汇总格式化展示。清单：
+
+| id | 文件 |
+|---|---|
+| `report` | `docs/REPORT_multipath_and_weighted.md`（全模型统一评测报告） |
+| `all_models` | `outputs/all_models_multipath_summary.json` |
+| `weighted_experiment` | `outputs/weighted_experiment.json`（加权 vs cost 消融） |
+| `multipath_weighted` / `multipath_filteron` | 过滤 on/off 的 beam=64 对照 |
+| `beam_compare` | beam=64 vs beam=3（CPU） |
+| `regression` | 零破坏回归：旧 checkpoint 逐位复现 |
+
+> 报告清单与 run/dataset 清单都在**启动时**扫描，新增产物后重启 server 才会出现在列表里。
+
+### 三个状态不是一回事（#92 那个疑问）
+
+路径页上同时能看到三个东西，**它们不是同一个状态**，面板把差异显式写出来：
+
+| 状态 | 是什么 | 谁在用它 |
+|---|---|---|
+| **final argmax readout** | 最后一个 reverse step 的 `candidate_prob` 做**组内 argmax** | **single 解码用的就是它**（第 23 节的口径变更） |
+| **链状态 `z_{t-1}`**（扩散视图 noisy 档） | 扩散链**自己携带**的状态（默认模式=按 posterior 采样） | **只作诊断**，single 解码不再跟随它 |
+| **模型预测 `ẑ₀`**（扩散视图 clean 档） | 模型每一步对干净状态做的 argmax 预测（每步的，不是最终 readout） | 只作诊断 |
+| **全程 argmax rollout**（`stochastic=False`） | 每一步 posterior 都取 argmax 走到底 | 面板「全程 argmax（对照）」开关 |
+
+实测 #92（`weighted_controlled_test.pkl`，`v2_weighted_controlled`，seed 0，CPU）：
+
+```
+GT                                  18 跳
+readout z0 = [2,5,10,16,20] -> goal    18 跳 / cost 101.29   （single 解码用这条）
+sampled z0 = [2,5,10,16,19] -> broken  16 跳 / cost  92.35   NULL selected at 8（仅诊断）
+唯一分歧在 decision 4（node 8）：readout 选 ->9，采样抽到 NULL
+```
+
+也就是说：**single 解码不再读取采样状态**，所以 #92 的默认 single 结果现在是"到达"；
+扩散视图的"链状态"档仍然显示那次采样（中止），这是正常的 —— 两个口径本来就不同。
+面板为此提供：
+
+- 左侧对照框：「Single 解码 = 最终 candidate_prob 的组内 argmax」+ 解码所用的状态与链状态并排；
+- 控制条上的 **全程 argmax（对照）** 开关：切到"每一步都取 argmax"的 rollout（与默认 single 不同）；
+- 扩散帧标题与明细行标出 `clean→… / noisy→…`。
 
 生成完成后可以在图上切换到“扩散过程”。时间轴记录完整的 `T -> 0` reverse chain，并可
 在两种真实中间状态之间切换：
