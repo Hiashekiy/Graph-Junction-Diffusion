@@ -56,11 +56,11 @@ GPU 显存。
 面板现在把 Weighted 扩展与多分支增强一并展示出来：
 
 - **模型徽章**：按 run 的 `data.weighted` 与 `model.use_edge_cost` 标 **带权** / **带权·无cost** / **无权**；
-  目前带权的是 `v2_weighted_controlled`，消融对照是 `v2_weighted_controlled_cost_ablated`。
+  目前带权的是 `controlled_weighted`，消融对照是 `controlled_weighted_cost_ablated`。
 - **口径**：一次评测展开成 `single` / `multi` / `multi · best_goal` / `multi · best_goal_cost` /
   `multi k=N / stop|skip`，与方案的「三条口径」一一对应；新增两列 **W-opt cov**（加权最优覆盖率）
   与 **Goal paths**（平均 Goal 路径数）。
-- **数据集**：`data/weighted_controlled/*.pkl`（w ~ U(1,10)）与无权数据集并列显示；评测产物的数据集
+- **数据集**：`data/weighted/*.pkl`（w ~ U(1,10)）与无权数据集并列显示；评测产物的数据集
   归属优先取 JSON 里记录的 `data` 字段（老产物按 `data.weighted` 兜底），不再靠文件名猜。
 - **路径页**：多分支控制条多了「必死 branch 预筛选」（透传 `filter_dead_branches`），summary 显示剔除数量；
   带权图上每条路线同时显示跳数与**真实 cost**。
@@ -73,8 +73,8 @@ GPU 显存。
 | id | 文件 |
 |---|---|
 | `report` | `docs/REPORT_multipath_and_weighted.md`（全模型统一评测报告） |
-| `all_models` | `outputs/all_models_multipath_summary.json` |
-| `weighted_experiment` | `outputs/weighted_experiment.json`（加权 vs cost 消融） |
+| `all_models` | `outputs/reports/all_models_multipath_summary.json` |
+| `weighted_experiment` | `outputs/reports/weighted_experiment.json`（加权 vs cost 消融） |
 | `multipath_weighted` / `multipath_filteron` | 过滤 on/off 的 beam=64 对照 |
 | `beam_compare` | beam=64 vs beam=3（CPU） |
 | `regression` | 零破坏回归：旧 checkpoint 逐位复现 |
@@ -92,7 +92,7 @@ GPU 显存。
 | **模型预测 `ẑ₀`**（扩散视图 clean 档） | 模型每一步对干净状态做的 argmax 预测（每步的，不是最终 readout） | 只作诊断 |
 | **全程 argmax rollout**（`stochastic=False`） | 每一步 posterior 都取 argmax 走到底 | 面板「全程 argmax（对照）」开关 |
 
-实测 #92（`weighted_controlled_test.pkl`，`v2_weighted_controlled`，seed 0，CPU）：
+实测 #92（`weighted_test.pkl`，`controlled_weighted`，seed 0，CPU）：
 
 ```
 GT                                  18 跳

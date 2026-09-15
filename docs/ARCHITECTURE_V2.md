@@ -284,7 +284,7 @@ H_{t-1} = H_{flow_steps}
    （它管的是时间轴上的截断，不是轮次）。
 
 配置项：`model.flow_steps`、`model.flow_slot_embedding`、`model.flow_slot_scale`
-（见 `configs/graph_flow.yaml`）。诊断信息：`DenoiserOutput.flow_steps` 与
+（见 `configs/controlled_unweighted.yaml`）。诊断信息：`DenoiserOutput.flow_steps` 与
 `DenoiserOutput.attn_per_slot`。
 
 推理侧的提前退出：`GraphFlowDenoiser.set_inference_flow_steps(k)`（`k <= 训练时的

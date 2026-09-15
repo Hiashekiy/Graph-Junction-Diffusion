@@ -1,6 +1,6 @@
 """用**已有的合成图模型**在 DiDi 真实样本上跑一遍，量一下跑不跑得动。
 
-背景：``outputs/runs/v2_weighted_controlled`` 是在 controlled_junction 合成图上
+背景：``outputs/runs/controlled_weighted`` 是在 controlled_junction 合成图上
 训出来的（每个样本 ~6 个 decision / ~35 个候选），而 DiDi 真实 corridor 是
 ~350 个 decision / ~430 个节点 / ~1800 个候选 —— 大两个数量级。所以这里要回答的
 不是"准不准"，而是：
@@ -62,10 +62,10 @@ from src.utils.seed import make_generator, set_seed  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="benchmark a synthetic-graph model on DiDi samples")
-    parser.add_argument("--config", default="configs/graph_flow_weighted.yaml",
+    parser.add_argument("--config", default="configs/controlled_weighted.yaml",
                         help="必须与 checkpoint 的架构一致")
-    parser.add_argument("--checkpoint", default="outputs/runs/v2_weighted_controlled/best.pt")
-    parser.add_argument("--data", default="data/didi_chengdu_gjd/test.pkl")
+    parser.add_argument("--checkpoint", default="outputs/runs/controlled_weighted/best.pt")
+    parser.add_argument("--data", default="data/didi/graph/chengdu/test.pkl")
     parser.add_argument("--count", type=int, default=4, help="用多少条样本")
     parser.add_argument("--offset", type=int, default=0, help="从第几条开始取")
     parser.add_argument("--batch-sizes", type=int, nargs="+", default=[1, 2, 4])
@@ -279,7 +279,7 @@ def main() -> int:
         )
     print("=" * 96)
 
-    out_path = PROJECT_ROOT / "outputs/_didi_build/benchmark_inference.json"
+    out_path = PROJECT_ROOT / "outputs/reports/benchmark_inference.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as handle:
         json.dump(

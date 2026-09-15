@@ -37,6 +37,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -44,6 +45,7 @@ import torch
 from torch import Tensor
 
 from src.diffusion.categorical import CategoricalDiffusion
+from src.training.trajectory_loss import TrajectoryLossConfig, trajectory_set_loss
 from src.models.denoiser import GraphFlowDenoiser
 from src.training.soft_goal import soft_goal_loss, soft_goal_reachability
 from src.utils.segment_ops import segment_sum
@@ -58,6 +60,9 @@ GOAL_TIMESTEP_WEIGHTINGS = ("alpha_bar", "uniform")
 #:   "path_nll_sampled_null"  —— Path NLL + 采样 NULL 辅助损失（DiDi 主目标）
 LOSS_TYPES = ("ce", "path_nll_sampled_null")
 PATH_NLL_SAMPLED_NULL = "path_nll_sampled_null"
+#: 局部 NULL 的两种"形式"（方案第 13 节）
+NULL_LOSS_TYPES = ("nll", "saturating_nll")
+SATURATING_NLL = "saturating_nll"
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +122,21 @@ class LossWeights:
     null_sampling_max: int = 64
     null_loss_weight: float = 0.2
 
+    # ---- 局部 NULL 的"形式"（多轨迹集合损失方案第 13 节）-------------------
+    #
+    # 光把 lambda_null 从 0.3 降到 0.1 是**不够的**：只要 p(NULL) < 1，普通 NLL
+    # 就永远还能通过 0.70 -> 0.80 -> 0.99 继续降 loss。所以要把形式也换掉：
+    #
+    #     l_j = max(0, -log p_j(NULL) + log rho_null) = max(0, log(rho/p_j))
+    #
+    # p_j >= rho_null 之后梯度**恒为 0**，模型再把 NULL 往上推拿不到任何收益。
+    # "到处预测 NULL"的无限奖励被切断，而 off-path 的 NULL 状态定义仍然保留。
+    null_loss_type: str = "nll"          # nll | saturating_nll
+    null_target_prob: float = 0.60       # rho_null
+
+    # ---- 多轨迹集合损失（方案第 2 / 14 / 15 节）---------------------------
+    trajectory: TrajectoryLossConfig = field(default_factory=TrajectoryLossConfig)
+
     def describe(self) -> str:
         if not self.is_sampled_null:
             return f"loss=ce(null_w={self.null_weight}, active_w={self.active_weight})"
@@ -125,10 +145,16 @@ class LossWeights:
             if self.null_sampling_enabled
             else "disabled(full NULL)"
         )
-        return (
-            f"loss=path_nll+{self.null_loss_weight}*sampled_null "
-            f"[{sampling}]"
+        null_form = (
+            "sampled_null" if self.null_loss_type == "nll"
+            else f"sampled_null_sat(rho={self.null_target_prob})"
         )
+        text = (
+            f"loss=path_nll+{self.null_loss_weight}*{null_form} [{sampling}]"
+        )
+        if self.trajectory.enabled:
+            text += f" + {self.trajectory.describe()}"
+        return text
 
     @classmethod
     def from_config(cls, config) -> "LossWeights":
@@ -157,11 +183,19 @@ class LossWeights:
             null_sampling_ratio=float(_sampling_value(section, "ratio", 2.0)),
             null_sampling_max=int(_sampling_value(section, "max_per_sample", 64)),
             null_loss_weight=float(section.get("null_loss_weight", 0.2)),
+            null_loss_type=str(section.get("null_loss_type", "nll")),
+            null_target_prob=float(section.get("null_target_prob", 0.60)),
+            trajectory=TrajectoryLossConfig.from_config(section),
         )
 
     @property
     def is_sampled_null(self) -> bool:
         return self.loss_type == PATH_NLL_SAMPLED_NULL
+
+    @property
+    def is_saturating_null(self) -> bool:
+        """局部 NULL 是否用饱和式（到 ``null_target_prob`` 就停止奖励）。"""
+        return self.null_loss_type == SATURATING_NLL
 
     def validate(self) -> None:
         if self.goal_timestep_weighting not in GOAL_TIMESTEP_WEIGHTINGS:
@@ -172,6 +206,16 @@ class LossWeights:
         if self.goal_horizon_cap is not None and int(self.goal_horizon_cap) < 1:
             raise ValueError(
                 f"loss.goal_horizon_cap must be >= 1 or None, got {self.goal_horizon_cap}"
+            )
+        if self.null_loss_type not in NULL_LOSS_TYPES:
+            raise ValueError(
+                f"loss.null_loss_type={self.null_loss_type!r} is not supported "
+                f"(choose one of {NULL_LOSS_TYPES})"
+            )
+        if not 0.0 < float(self.null_target_prob) < 1.0:
+            raise ValueError(
+                "loss.null_target_prob (rho_null) must be in (0, 1), got "
+                f"{self.null_target_prob}"
             )
         if self.loss_type not in LOSS_TYPES:
             raise ValueError(
@@ -357,6 +401,32 @@ def sample_null_decisions(
     }
 
 
+def saturating_null_loss(
+    null_log_prob: Tensor, target_prob: float
+) -> Tensor:
+    """饱和式 NULL loss（方案第 13.2 节）::
+
+        l_j = max(0, -log p_j(NULL) + log rho_null)
+            = max(0, log(rho_null / p_j(NULL)))
+
+    ``p_j >= rho_null`` 之后 ``l_j = 0`` 且**梯度恒为 0** —— 模型再把 NULL 从 0.60
+    推到 0.99 拿不到任何训练收益。这正是普通 NLL 做不到的：只要 ``p < 1`` 它就还能
+    降 loss，于是训练后期一直在"到处把 NULL 打高"，而那不是"生成更好的完整路径"。
+
+    Args:
+        null_log_prob: 被采样的 NULL decision 的 ``log p(NULL)``，形状 ``[K]``
+        target_prob:   ``rho_null``，典型 0.60
+
+    Returns:
+        标量（``[K]`` 的均值）。``K == 0`` 时返回 0。
+    """
+    if null_log_prob.numel() == 0:
+        return null_log_prob.new_zeros(())
+    threshold = math.log(float(target_prob))
+    # log(rho) - log(p) = threshold - null_log_prob
+    return torch.clamp(threshold - null_log_prob, min=0.0).mean()
+
+
 def path_nll_sampled_null_loss(
     candidate_log_prob: Tensor,
     candidate_prob: Tensor,
@@ -395,7 +465,16 @@ def path_nll_sampled_null_loss(
         return (mean * valid).sum() / valid.sum().clamp_min(1.0)
 
     path_nll = per_sample_mean(nll, is_active)
-    null_nll = per_sample_mean(nll, selected)
+
+    if weights.is_saturating_null:
+        # 饱和式：逐元素 max(0, log(rho/p))，再按同样的"decision 内 -> sample 内 ->
+        # batch"顺序求平均。饱和之后梯度为 0，所以后期不会再靠推高 NULL 降 loss。
+        sat = torch.clamp(
+            math.log(float(weights.null_target_prob)) - log_prob, min=0.0
+        )
+        null_nll = per_sample_mean(sat, selected)
+    else:
+        null_nll = per_sample_mean(nll, selected)
     total = path_nll + float(weights.null_loss_weight) * null_nll
 
     def masked_mean(values: Tensor, mask: Tensor) -> Tensor:
@@ -416,6 +495,12 @@ def path_nll_sampled_null_loss(
         "mean_num_active": sampling["num_active"].mean(),
         "mean_num_sampled_null": sampling["num_selected"].mean(),
     }
+    if weights.is_saturating_null:
+        # 被监督的 NULL 里已经"够 NULL"（p >= rho）的比例。它应该快速趋近 1.0，
+        # 之后局部 NULL 这一项就不再提供梯度（saturation_rate=1 是**预期**行为，
+        # 不是训练停滞）。
+        saturated = (prob.detach() >= float(weights.null_target_prob)).to(torch.float32)
+        metrics["null_saturation_rate"] = masked_mean(saturated, selected)
     return total, path_nll, null_nll, metrics
 
 
@@ -474,6 +559,30 @@ class RecurrentLossOutput:
     pred_active_rate: float = float("nan")
     mean_num_active: float = float("nan")
     mean_num_sampled_null: float = float("nan")
+    null_saturation_rate: float = float("nan")
+    # ---- 多轨迹集合损失的拆分日志（trajectory.enabled=False 时全是 NaN）----
+    trajectory_loss: float = float("nan")
+    traj_success_loss: float = float("nan")
+    traj_similarity_loss: float = float("nan")
+    traj_failure_loss: float = float("nan")
+    traj_success_mass: float = float("nan")
+    traj_failure_mass: float = float("nan")
+    traj_num_candidates: float = float("nan")
+    traj_num_success: float = float("nan")
+    traj_num_failure: float = float("nan")
+    traj_fail_null_mass: float = float("nan")
+    traj_fail_loop_mass: float = float("nan")
+    traj_fail_dead_mass: float = float("nan")
+    traj_fail_broken_mass: float = float("nan")
+    traj_mean_success_nlcs: float = float("nan")
+    #: miner 在**截断到 max_success / max_failure 之前**产出了多少条 —— 用于第 20.3
+    #: 节的 mining budget 消融（判断 beam 再放大是否还有新东西）
+    traj_raw_finished: float = float("nan")
+    traj_raw_success: float = float("nan")
+    traj_raw_null: float = float("nan")
+    traj_raw_loop: float = float("nan")
+    traj_raw_dead_end: float = float("nan")
+    traj_raw_broken: float = float("nan")
 
 
 def goal_timestep_weight(diffusion: CategoricalDiffusion, t: int, mode: str) -> float:
@@ -554,6 +663,8 @@ def recurrent_reverse_loss(
     step_soft_goals: List[float] = []
     step_accuracies: List[float] = []
     final_log_prob: Optional[Tensor] = None
+    traj_accum: List[Tensor] = []
+    traj_metric_accum: Dict[str, List[float]] = {}
     steps_done = 0
 
     for t in range(steps, 0, -1):
@@ -612,8 +723,21 @@ def recurrent_reverse_loss(
         steps_done += 1
         if record:
             step_losses.append(float(step_loss.detach()))
-            step_goal_losses.append(float(step_goal_loss.detach()))
-            step_soft_goals.append(float(p_goal.mean().detach()))
+            # goal_reach_weight == 0 时上面整段被跳过，step_goal_loss / p_goal
+            # **根本没有被赋值**。以前这里直接引用它们，于是
+            # "goal_reach_weight=0 且 record=True" 会抛 UnboundLocalError —— DiDi
+            # 配置正是 goal_reach_weight=0，训练时 record=False 所以一直没暴露。
+            # 记 NaN 而不是 0：和"真的算出来是 0"区分开。
+            step_goal_losses.append(
+                float(step_goal_loss.detach())
+                if weights.goal_reach_weight > 0
+                else float("nan")
+            )
+            step_soft_goals.append(
+                float(p_goal.mean().detach())
+                if weights.goal_reach_weight > 0
+                else float("nan")
+            )
             step_accuracies.append(
                 float(
                     accuracy(
@@ -626,6 +750,17 @@ def recurrent_reverse_loss(
             )
         if t == 1:
             final_log_prob = out.candidate_log_prob
+
+        if weights.trajectory.enabled and t == weights.trajectory.timestep:
+            # 默认 timestep=1，即最后一步；early timestep 噪声大，采出来的轨迹
+            # 不代表最终 Decision Field，而且 miner 是离散 CPU 搜索，每步都跑
+            # 会让训练时间爆掉。
+            traj_loss, traj_metrics = trajectory_set_loss(
+                out.candidate_log_prob, batch, weights.trajectory
+            )
+            traj_accum.append(traj_loss)
+            for key, value in traj_metrics.items():
+                traj_metric_accum.setdefault(key, []).append(float(value))
 
         # 3) persistent state 直接进下一步
         H_t = out.H_next
@@ -644,6 +779,9 @@ def recurrent_reverse_loss(
         goal_loss = ce_loss.new_zeros(())
         soft_goal_mean = float("nan")
     loss = ce_loss + float(weights.goal_reach_weight) * goal_loss
+    if traj_accum:
+        # trajectory_set_loss 已经乘过 cfg.weight（= lambda_T），这里不再重复乘
+        loss = loss + torch.stack(traj_accum).sum()
 
     final_accuracy = (
         float(
@@ -677,6 +815,13 @@ def recurrent_reverse_loss(
             key: _mean_or_nan(values)
             for key, values in metric_accum.items()
         },
+        **{
+            f"traj_{key}": _mean_or_nan(values)
+            for key, values in traj_metric_accum.items()
+        },
+        trajectory_loss=(
+            float(torch.stack(traj_accum).sum().detach()) if traj_accum else float("nan")
+        ),
     )
 
 

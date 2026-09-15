@@ -32,7 +32,7 @@ from src.training.setup import build_model
 from src.utils.config import load_config
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LEGACY_CHECKPOINT = REPO_ROOT / "outputs" / "runs" / "v2_rev2_mixed" / "best.pt"
+LEGACY_CHECKPOINT = REPO_ROOT / "outputs" / "runs" / "controlled_unweighted" / "best.pt"
 
 # conftest 里的手工图（节点编号固定，见 tests/conftest.py 的 docstring）：
 #     s(0) - c(1) - J1(2) - a(3) - b(4) - x(5) - J2(6) - g(7)
@@ -310,7 +310,7 @@ def test_unweighted_model_has_no_cost_parameters():
 
 
 def test_unweighted_config_defaults_to_no_edge_cost():
-    config = load_config(REPO_ROOT / "configs" / "graph_flow.yaml")
+    config = load_config(REPO_ROOT / "configs" / "controlled_unweighted.yaml")
     assert config.section("model").get("use_edge_cost", False) is False
     model = build_model(config)
     assert model.edge_cost_encoder is None
@@ -318,7 +318,7 @@ def test_unweighted_config_defaults_to_no_edge_cost():
 
 
 def test_weighted_config_enables_the_edge_cost_path():
-    config = load_config(REPO_ROOT / "configs" / "graph_flow_weighted.yaml")
+    config = load_config(REPO_ROOT / "configs" / "controlled_weighted.yaml")
     assert config.section("data").get("weighted") is True
     assert config.section("model").get("use_edge_cost") is True
     model = build_model(config)
@@ -331,7 +331,7 @@ def test_weighted_config_enables_the_edge_cost_path():
 
 def test_only_graph_mean_normalization_is_implemented(tmp_path):
     config = load_config(
-        REPO_ROOT / "configs" / "graph_flow_weighted.yaml",
+        REPO_ROOT / "configs" / "controlled_weighted.yaml",
         ["model.edge_cost.normalization=minmax"],
     )
     with pytest.raises(NotImplementedError):
@@ -343,7 +343,7 @@ def test_only_graph_mean_normalization_is_implemented(tmp_path):
 )
 def test_legacy_checkpoint_still_loads_with_the_unweighted_config():
     """旧 checkpoint 的参数集合必须与新代码的无权模型逐 key 相同。"""
-    model = build_model(load_config(REPO_ROOT / "configs" / "graph_flow.yaml"))
+    model = build_model(load_config(REPO_ROOT / "configs" / "controlled_unweighted.yaml"))
     payload = load_checkpoint(LEGACY_CHECKPOINT, model=model)
     assert set(payload["model"]) == set(model.state_dict())
     assert not any("cost" in key for key in payload["model"])

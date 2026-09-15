@@ -1,7 +1,7 @@
 """汇总一个 run 的最终统计（按 README 里的报告格式）。
 
-用法：python tools/final_report.py outputs/runs/v2_controlled_100ep_flow3 \
-        --baseline outputs/runs/v2_controlled_100ep
+用法：python tools/final_report.py outputs/runs/controlled_weighted \
+        --baseline outputs/runs/controlled_unweighted
 
 只读工具：从 run 目录里已经落盘的产物（history.json / summary.json /
 breakdown_test.json / multiseed_goal_hit.json / ablation_flow_steps.json /
@@ -300,7 +300,7 @@ def mean_decisions_by_bucket() -> Dict[str, float]:
     """按 gt_decisions 的 3 个一档分组，算每组的平均决策数（需要 test 集）。"""
     from src.data.dataset import GraphQueryDataset
 
-    dataset = GraphQueryDataset.load("data/controlled/controlled_test.pkl")
+    dataset = GraphQueryDataset.load("data/unweighted/unweighted_test.pkl")
     buckets: Dict[str, List[int]] = {}
     for sample in dataset:
         low = sample.num_decisions // 3 * 3

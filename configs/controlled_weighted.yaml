@@ -1,6 +1,6 @@
 # Graph-Junction-Diffusion V2：Weighted 扩展配置（实施方案第 14 节）
 #
-# 这是一份**新增的独立配置**，configs/graph_flow.yaml 的默认无权行为一个字节都没改：
+# 这是一份**新增的独立配置**，configs/controlled_unweighted.yaml 的默认无权行为一个字节都没改：
 #
 #     data.weighted       = true   边权真的进入任务（GT 用 Dijkstra）
 #     model.use_edge_cost = true   实例化 EdgeCostEncoder / k_cost_proj / v_cost_proj
@@ -118,6 +118,6 @@ evaluation:
   max_steps: 0
 
 paths:
-  data_dir: data/weighted_controlled
+  data_dir: data/weighted
   output_dir: outputs/runs
-  run_name: v2_weighted_controlled
+  run_name: controlled_weighted

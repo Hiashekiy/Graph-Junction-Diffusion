@@ -10,12 +10,15 @@
 用法::
 
     python tools/check_leakage.py \
-        --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl \
-        --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl \
-        --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
+        --pair data/unweighted/unweighted_train.pkl data/unweighted/unweighted_val.pkl \
+        --pair data/unweighted/unweighted_train.pkl data/unweighted/unweighted_test.pkl
 
     # 或者一次给多份，检查所有两两组合
-    python tools/check_leakage.py --all data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl data/oldv1/oldv1_test.pkl
+    python tools/check_leakage.py --all data/unweighted/unweighted_train.pkl \
+        data/unweighted/unweighted_val.pkl data/unweighted/unweighted_test.pkl
+
+``tools/resplit_dataset.py`` 重新划分数据集后会自动做一遍 graph_id 交集的粗检，
+但那只是自检；**用本工具做独立的指纹核对才算数**。
 
 退出码：有任何一对存在重叠 -> 1（配合 --strict 用于流水线；默认也是 1，便于发现）。
 """

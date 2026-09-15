@@ -6,7 +6,7 @@
 用例单独 skip），用来在数据准备阶段就地验证整条链路：
 
     python tools/verify_didi_pipeline.py
-    python tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+    python tools/verify_didi_pipeline.py --data data/didi/graph/chengdu
 
 退出码 0 = 全部通过。
 """
@@ -55,8 +55,8 @@ from src.data.decision_field import (  # noqa: E402
 from src.evaluation import real_path_metrics as rpm  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 
-DIDI_ROOT = PROJECT_ROOT / "data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu"
-DIDI_CONFIG = PROJECT_ROOT / "configs/graph_flow_didi_weighted.yaml"
+DIDI_ROOT = PROJECT_ROOT / "data/didi/raw/chengdu"
+DIDI_CONFIG = PROJECT_ROOT / "configs/didi_chengdu.yaml"
 
 CHECKS: List[Tuple[str, Callable[[], None]]] = []
 
@@ -812,7 +812,7 @@ def check_built_dataset(data_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 def main() -> int:
     parser = argparse.ArgumentParser(description="verify the DiDi real-data pipeline")
-    parser.add_argument("--data", default="data/didi_chengdu_gjd")
+    parser.add_argument("--data", default="data/didi/graph/chengdu")
     parser.add_argument("--limit", type=int, default=4000)
     parser.add_argument("--skip-real", action="store_true")
     args = parser.parse_args()

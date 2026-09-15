@@ -3,7 +3,7 @@
 A small wrapper around a nested dict so that configs can be written as plain
 YAML and still be read with attribute access:
 
-    cfg = load_config("configs/graph_flow.yaml")
+    cfg = load_config("configs/controlled_unweighted.yaml")
     cfg.model.d_model          # 128
     cfg.get("training.lr", 1e-4)
 

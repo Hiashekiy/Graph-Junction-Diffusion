@@ -8,9 +8,9 @@ reverse chain 重跑一遍，绝大部分时间都在算一模一样的东西。
 
 用法::
 
-    python tools/ablate_didi_multi_decode.py --run outputs/runs/didi_chengdu_flow1_weighted
+    python tools/ablate_didi_multi_decode.py --run outputs/runs/didi_chengdu
     python tools/ablate_didi_multi_decode.py --run <run> --combos 2:64:stop,2:3:skip,3:64:stop
-    python tools/ablate_didi_multi_decode.py --run <run> --data data/didi_chengdu_gjd/test.pkl
+    python tools/ablate_didi_multi_decode.py --run <run> --data data/didi/graph/chengdu/test.pkl
 
 输出的每一行是一个组合，列的含义：
 

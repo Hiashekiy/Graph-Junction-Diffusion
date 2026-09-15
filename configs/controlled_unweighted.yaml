@@ -27,7 +27,7 @@ data:
     candidates_per_decision: [2, 5]      # 每个 decision 的总出口数
 
   # 无权 V2：模型看不到 edge cost，GT 就是 BFS 最少跳数路径。
-  # 带权扩展用独立配置 configs/graph_flow_weighted.yaml
+  # 带权扩展用独立配置 configs/controlled_weighted.yaml
   # （data.weighted=true + model.use_edge_cost=true），不改这里的行为。
   weighted: false
   component_fallback: true
@@ -99,8 +99,10 @@ evaluation:
   max_steps: 0               # 只能为 0/None 或等于 diffusion.T
 
 paths:
-  # 生成器（scripts/generate_dataset.py）的默认输出目录。数据集按来源分组：
-  # controlled / long / oldv1 / mixed / smoke，本配置生成的是主数据集 controlled。
-  data_dir: data/controlled
+  # 生成器（scripts/generate_dataset.py）的默认输出目录。
+  # 指向 data/unweighted —— 这是目前**唯一保留的无权重数据集**（由 tools/resplit_dataset.py
+  # 重新划分成 train/val/test）。原 controlled / long / oldv1 / smoke 已于 2026-09-16
+  # 删除，详见仓库根 README §0.1。
+  data_dir: data/unweighted
   output_dir: outputs/runs
-  run_name: v2_controlled_100ep_flow3
+  run_name: controlled_unweighted

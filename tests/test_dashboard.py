@@ -43,8 +43,8 @@ def test_dashboard_discovers_nested_runs_and_datasets(tmp_path: Path) -> None:
 def test_dashboard_discovers_grouped_datasets(tmp_path: Path) -> None:
     """数据集按来源分组后仍要被发现，而且 id 保持文件名（历史产物按文件名记录）。"""
     for group, name in (
-        ("controlled", "controlled_test.pkl"),
-        ("mixed", "mixed_oldv1_train.pkl"),
+        ("weighted", "weighted_test.pkl"),
+        ("unweighted", "unweighted_train.pkl"),
     ):
         directory = tmp_path / "data" / group
         directory.mkdir(parents=True)
@@ -52,18 +52,18 @@ def test_dashboard_discovers_grouped_datasets(tmp_path: Path) -> None:
 
     datasets = discover_datasets(tmp_path)
 
-    assert list(datasets) == ["controlled_test.pkl", "mixed_oldv1_train.pkl"]
-    assert datasets["mixed_oldv1_train.pkl"].path.parent.name == "mixed"
-    assert datasets["mixed_oldv1_train.pkl"].group == "mixed"
-    assert datasets["controlled_test.pkl"].group == "controlled"
-    assert datasets["controlled_test.pkl"].relative == "data/controlled/controlled_test.pkl"
+    assert list(datasets) == ["unweighted_train.pkl", "weighted_test.pkl"]
+    assert datasets["unweighted_train.pkl"].path.parent.name == "unweighted"
+    assert datasets["unweighted_train.pkl"].group == "unweighted"
+    assert datasets["weighted_test.pkl"].group == "weighted"
+    assert datasets["weighted_test.pkl"].relative == "data/weighted/weighted_test.pkl"
 
 
 def test_catalog_exposes_dataset_group_for_the_picker(tmp_path: Path) -> None:
     """面板靠 group 把数据集按目录分组、靠 relative 显示文件在哪。"""
     for group, name in (
-        ("controlled", "controlled_test.pkl"),
-        ("mixed", "mixed_oldv1_train.pkl"),
+        ("weighted", "weighted_test.pkl"),
+        ("unweighted", "unweighted_train.pkl"),
     ):
         directory = tmp_path / "data" / group
         directory.mkdir(parents=True)
@@ -72,12 +72,12 @@ def test_catalog_exposes_dataset_group_for_the_picker(tmp_path: Path) -> None:
     entry = next(
         item
         for item in DashboardService(tmp_path).catalog()["datasets"]
-        if item["id"] == "mixed_oldv1_train.pkl"
+        if item["id"] == "unweighted_train.pkl"
     )
 
-    assert entry["group"] == "mixed"
-    assert entry["relative"] == "data/mixed/mixed_oldv1_train.pkl"
-    assert entry["label"] == "mixed oldv1 train"
+    assert entry["group"] == "unweighted"
+    assert entry["relative"] == "data/unweighted/unweighted_train.pkl"
+    assert entry["label"] == "unweighted train"
 
 
 def test_dashboard_reads_compact_eval_and_multipath_metrics(tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ def test_dashboard_reads_compact_eval_and_multipath_metrics(tmp_path: Path) -> N
     (run / "mp_test_k2.json").write_text(
         json.dumps(
             {
-                "data": "data/controlled/controlled_test.pkl",
+                "data": "data/unweighted/unweighted_test.pkl",
                 "top_k": 2,
                 "null_policy": "skip",
                 "results": [
@@ -109,11 +109,14 @@ def test_dashboard_reads_compact_eval_and_multipath_metrics(tmp_path: Path) -> N
 
     rows = discover_metrics(discover_runs(tmp_path), tmp_path)
 
-    assert [(row["decoding"], row["goal_hit_rate"]) for row in rows] == [
+    # 顺序不参与断言：行的排序键含 dataset，而 dataset 可能为空（历史产物的
+    # graph split 已被删除/重划分），空串的排位与具体数据集名有关。
+    assert sorted((row["decoding"], row["goal_hit_rate"]) for row in rows) == [
         ("multi k=2 / skip", 1.0),
         ("single", 0.8),
     ]
-    assert rows[0]["coverage_rate"] == 1.0
+    multi_row = next(row for row in rows if row["decoding"] == "multi k=2 / skip")
+    assert multi_row["coverage_rate"] == 1.0
 
 
 def test_route_payload_uses_and_validates_physical_edges() -> None:

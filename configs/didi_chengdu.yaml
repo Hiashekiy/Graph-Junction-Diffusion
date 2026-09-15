@@ -1,7 +1,7 @@
 # Graph-Junction-Diffusion V2：DiDi 成都**真实道路数据**配置（实施方案第 10 节）
 #
-# 这是一份**新增的独立配置**，configs/graph_flow.yaml 与
-# configs/graph_flow_weighted.yaml 的默认行为一个字节都没改。
+# 这是一份**新增的独立配置**，configs/controlled_unweighted.yaml 与
+# configs/controlled_weighted.yaml 的默认行为一个字节都没改。
 #
 # 与 synthetic weighted 配置的三处本质差别：
 #
@@ -12,11 +12,20 @@
 #   3. model.flow_steps: 1         -> 真实 corridor 图明显更大，先用 1 控制训练时间；
 #      注意推理必须与训练同轮数，**不能**训练 1 轮、推理 3 轮
 #
-# loss 第三版（当前）：L = L_path + 0.3 * L_null，即 Path NLL + 下采样 NULL。
+# loss 第四版（当前）：在第三版基础上加**多轨迹集合损失**，并把局部 NULL 从
+# 无界 NLL 换成**饱和式** NULL：
+#
+#     L = L_PathNLL + 0.10 * L_NULL-sat + 0.50 * L_traj
+#     L_traj = 1.0 * L_succ + 1.0 * L_sim + 0.50 * L_fail
+#
 # 第一版的 L = CE + 0.1 * SoftGoal 已废弃：真实 corridor 里 93.6% 的 decision
 # 标签是 NULL，而旧 CE 对每个 decision 等权平均，"全押 NULL"就是它的平凡最优解
 # （实测 5 epoch 就卡死在 x0_acc = 0.933 ≈ NULL 占比、goal_hit 恒为 0）。
-# 详见 README §24.13；soft goal 已整段关闭（goal_reach_weight: 0.0）。
+# 第三版 L = L_path + 0.3 * L_null 解决了 collapse，但局部 NULL 项无上界，
+# 模型会一路把 pred_active_rate 压低；第四版把 NULL 目标改成"达到 0.60 就停"，
+# 同时用 L_traj 直接惩罚 loop / dead-end / NULL 这些**具体的失败轨迹**。
+# 详见 README §24.13 与本 config 里的 loss 段；soft goal 仍整段关闭
+# （goal_reach_weight: 0.0）。
 #
 # 仍然**没有**引入 cost-minimization loss：真实 GT 是司机的历史选择而不是最优解，
 # 直接加"最短路径"式监督会把模型拉回只追最短路，改变研究任务本身（方案第 11 节）。
@@ -29,7 +38,8 @@ data:
 
   # 原始数据根目录（相对项目根）。里面是 20161010~19.csv / dicts.pkl /
   # edge_features.csv / line_graph_edge_idx.npy。
-  root: data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu
+  # 2026-09-16：从下载包 data/DiDiChengduXian/ 里提取到这里，那个包已删除。
+  root: data/didi/raw/chengdu
 
   dicts_file: dicts.pkl
   edge_features_file: edge_features.csv
@@ -40,9 +50,9 @@ data:
   # dicts.pkl 的 (u, v) 同一套）。**不是** data.root 下的文件，所以单独给全路径。
   # 用途：真实地理底图可视化（tools/visualize_didi_samples.py）与 km-based DTW。
   # 该文件是可选依赖：缺了只影响画图和 DTW，不影响训练。
-  # 注意它配的是 data/data/cd/dicts.pkl（2848 节点），对我们这张 2891 节点的图
+  # 注意它配的是它自带的那份 dicts.pkl（2848 节点），对我们这张 2891 节点的图
   # 覆盖率是 96.2%，其余用邻居坐标填充。
-  coords_file: data/DiDiChengduXian/data/data/cd/ChengDu.pkl
+  coords_file: data/didi/raw/chengdu/ChengDu.pkl
 
   # **必须显式确认，代码绝不猜**（方案第 3.2 节）。
   # 已用 `prepare_didi.py --scan-only` 核实：edge_features.csv 的列名是
@@ -194,12 +204,13 @@ training:
   selection_mode: max
 
 loss:
-  # ===== 主训练目标：Path NLL + Sampled NULL ==============================
+  # ===== 主训练目标：Path NLL + Saturating NULL + Trajectory Set ==========
   #
-  #     L = L_path + lambda_null * L_null
+  #     L = L_path + lambda_null_local * L_NULL-sat + lambda_T * L_traj
   #
-  #     L_path = -1/N_A * sum_{i in active} log p_i(b_i^GT)
-  #     L_null = -1/K    * sum_{j in S_N}    log p_j(NULL)
+  #     L_path       = -1/N_A * sum_{i in active} log p_i(b_i^GT)
+  #     L_NULL-sat   = -1/K   * sum_{j in S_N} max(0, log(rho_null) - log p_j(NULL))
+  #     L_traj       = lambda_s*L_succ + lambda_g*L_sim + lambda_f*L_fail
   #
   # 为什么换掉旧 CE：真实 corridor 里 93.6% 的 decision 标签是 NULL，而旧 CE 对
   # **每个 decision 等权平均**，于是"全押 NULL"就是 CE 的平凡最优解 —— 实测 5 epoch
@@ -208,26 +219,89 @@ loss:
   # 新目标把 active 当主监督、NULL 只做**下采样**的辅助约束：
   #   * 平均顺序 decision 内 -> sample 内 -> batch（每条真实轨迹等权，
   #     否则 30 个 active 的样本会比 8 个的贡献大 3.75 倍）；
-  #   * NULL 不再全量监督，每条轨迹随机采 K = min(N_N, ceil(2*N_A), 64)，
-  #     即 active:null ≈ 1:2（原来是 1:14.6），且每个 batch 重新采；
+  #   * NULL 不再全量监督，每条轨迹随机采 K = min(N_N, ceil(ratio*N_A), max_per_sample)，
+  #     且每个 batch 重新采；
   #   * 第一版纯随机采样，**不做 hard negative mining**（先回答"降 NULL 冗余本身
   #     能不能解决 collapse"，混入 hard negative 就没法归因）。
   type: path_nll_sampled_null
 
   null_sampling:
     enabled: true
-    ratio: 2.0              # K = min(N_N, ceil(ratio * N_A), max_per_sample)
-    max_per_sample: 64      # 超长路径的上限
+    ratio: 1.0              # K = min(N_N, ceil(ratio * N_A), max_per_sample)
+    max_per_sample: 32      # 超长路径的上限
     resample_each_batch: true
 
-  # lambda_null：NULL 的平衡旋钮。**采样条数 K 不影响 L_null 的量级**
-  # （它是 mean），所以调平衡只能调这个，不能调 ratio。
+  # ---- 局部 NULL：饱和式（Saturating NULL）--------------------------------
   #
-  # 5 epoch 探针（348 条 / T=20）显示：active_branch_acc 0.372 -> 0.536、
-  # goal_hit 0 -> 0.175（方向对了），但 pred_active_rate 收敛到 0.609，而监督比例
-  # 只有约 0.34 —— 模型仍然**过度激活**，表现为 loop_rate 0.62~0.90 偏高。
-  # 所以把 lambda_null 从 0.2 提到 0.3（方案 §11 的"错误激活多就把 0.2 -> 0.3"）。
-  null_loss_weight: 0.3
+  # 第三版用普通 NLL，p_j(NULL) 越接近 1 越继续奖励，模型于是系统性**过度抑制**
+  # 激活（pred_active_rate 收敛到 0.609，而监督比例只有约 0.34，loop_rate 0.62~0.90）。
+  # 饱和式把目标从"尽量高"改成"**够用就行**"：
+  #     p_j(NULL) >= rho_null  ->  该 decision 的 loss 恒为 0，不再有梯度
+  #     p_j(NULL) <  rho_null  ->  仍按 NLL 拉，但因为已经下采样过，量级可控
+  # 所以 lambda_null_local 可以从 0.30 降到 0.10 —— 不是削弱约束，而是这个约束
+  # 本身不再需要靠"拉得够久"来生效（方案第 9 / 11 节）。
+  null_loss_type: saturating_nll
+  # rho_null。0.50 -> 仍有少量 loss；0.60 -> 恰好为 0；0.80 / 0.99 过于激进。
+  null_target_prob: 0.60
+  # lambda_null_local：NULL 的平衡旋钮。**采样条数 K 不影响 L_NULL-sat 的量级**
+  # （它是 mean），所以调平衡只能调这个，不能调 ratio。
+  null_loss_weight: 0.10
+
+  # ---- 多轨迹集合损失（方案第 12~16 节）-----------------------------------
+  #
+  # 局部 loss 只看单个 decision，看不见"整条轨迹是不是废的"。L_traj 把**一整组
+  # 候选轨迹**当成一个集合来打分：
+  #   * 用历史多轨迹 decoder（strict=False）在 detach 后的概率上采候选，
+  #     分成 success / NULL / loop / dead-end / broken；
+  #   * 候选池 = GT + <=4 success + <=4 failure，用**未 detach** 的
+  #     candidate_log_prob 重算每条轨迹的 S(P) = mean_ℓ log p(c_ℓ)；
+  #   * 集合 softmax pi = softmax(S/tau)，
+  #       L_succ = -log(sum_{success} pi)               把质量推向"任何到达 goal 的"
+  #       L_sim  = -sum q log(pi_hat)，q = softmax(beta * nLCS)  只在 success 内部
+  #       L_fail = sum pi * cost，NULL 终止代价 1.5 > loop / dead-end / broken 1.0
+  #
+  # **必须用 strict=False 的历史 decoder**：strict 会在 top-k 之前就把
+  # NULL / loop / dead-end 全部 mask 掉，miner 根本看不到失败轨迹。
+  # **S(P) 必须是 mean 而不是 sum**：sum 会偏向短轨迹，越短的"尸体"分数越高 ——
+  # 这正是历史 best readout 里那个 bug。
+  trajectory:
+    enabled: true
+
+    # 训练轨迹采集（与推理 planner 的 strict 2/3 是**两套参数**，不要混）
+    top_k: 2
+    beam_width: 8
+    null_policy: stop
+    filter_dead_branches: false
+    strict: false
+
+    # 进入 loss 的候选数（先每类各一条，再按分数补满）
+    max_success: 4
+    max_failure: 4
+
+    # 轨迹集合 softmax 温度
+    temperature: 1.0
+
+    # GT 相似度（nLCS = 归一化最长公共子序列）
+    similarity: nlcs
+    similarity_beta: 3.0
+
+    # 整个 trajectory loss 的权重 lambda_T
+    weight: 0.50
+
+    success_weight: 1.0
+    similarity_weight: 1.0
+    failure_weight: 0.50
+
+    # 失败类型代价
+    failure_cost:
+      null: 1.50
+      loop: 1.00
+      dead_end: 1.00
+      broken: 1.00
+
+    # 只在最后一个 reverse step 算（early timestep 噪声大，且 miner 是
+    # 离散 CPU 搜索，每步都跑会让训练时间爆掉）
+    timestep: 1
 
   # ---- 旧 CE 口径的字段（type=ce 时才用；这里保留只为向后兼容）----------
   x0_ce: 1.0
@@ -251,6 +325,6 @@ evaluation:
   max_steps: 0
 
 paths:
-  data_dir: data/didi_chengdu_gjd
+  data_dir: data/didi/graph/chengdu
   output_dir: outputs/runs
-  run_name: didi_chengdu_flow1_weighted
+  run_name: didi_chengdu

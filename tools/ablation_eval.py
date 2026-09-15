@@ -4,8 +4,8 @@
 0.03 s/query）。而"训练时见识过多轮、推理时少跑几轮"完全合法（第 k 轮用的
 slot embedding 就是训练时那一行），所以值得量化"多少轮才够"：
 
-    python tools/ablation_eval.py outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled/controlled_test.pkl
+    python tools/ablation_eval.py outputs/runs/controlled_unweighted \
+        --data data/unweighted/unweighted_test.pkl
 
 对 k = 1..trained_flow_steps 各评一遍，写
 ``<run_dir>/eval_test_flow{k}.json``，并把汇总表打印出来 + 写
@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="inference flow_steps ablation")
     parser.add_argument("run_dir")
     parser.add_argument("--checkpoint", default=None, help="默认 <run_dir>/best.pt")
-    parser.add_argument("--data", default="data/controlled/controlled_test.pkl")
+    parser.add_argument("--data", default="data/unweighted/unweighted_test.pkl")
     parser.add_argument("--config", default=None, help="默认 <run_dir>/run_config.json")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--steps", type=int, nargs="*", default=None,

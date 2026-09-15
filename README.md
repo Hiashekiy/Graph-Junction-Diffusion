@@ -38,86 +38,66 @@ z_t  ->  E_t = Psi(z_t)  ->  H_{t-1} = F_theta(H_t, E_t, tau_t)  ->  p_theta(z_0
 
 编号空间与语义见第 3 节；这里只说"每份文件是什么、多大规模、拿来干什么"。
 
-**A. 当前主力数据集 —— `data/controlled/`（`controlled_junction` 生成器，骨架 + 干扰分支）**
+**A. 无权重数据集 —— `data/unweighted/`（目前唯一保留的无权重数据集）**
 
 | 文件 | 是什么 | 规模 | 用途 |
 |---|---|---|---|
-| `controlled_train.pkl` | 主训练集（3000 样本按图 8:1:1 切出来的 train） | 2400 条 / 每 query 6.53 决策 / 34.7 候选 | 旧版 run 的训练集 |
-| `controlled_val.pkl` | 主验证集 | 300 条 / 6.55 决策 | 旧版 run 的验证集 |
-| `controlled_test.pkl` | **标准测试集** | 300 条 / 6.49 决策 | 所有 run 都在这上面报 test 指标 |
-| `controlled_summary.json` | 上面三份的生成统计（决策数/候选数/长度分布） | — | 查数据分布 |
+| `unweighted_train.pkl` | 训练集 | 4905 条 / 4564 图 | 训练 |
+| `unweighted_val.pkl` | 验证集 | 601 条 / 570 图 | 模型选择 |
+| `unweighted_test.pkl` | **标准测试集** | 604 条 / 570 图 | 所有无权重 run 在这上面报 test 指标 |
+| `unweighted_summary.json` | 三份的划分统计（组成占比、决策数/候选数） | — | 查数据分布 |
 
-**B. 长链（决策数 ≥ 9）—— `data/long/`**
+> **2026-09-16 重新划分。** 原来 `data/` 下有 5 个合成数据集（`controlled` / `long` /
+> `oldv1` / `mixed` / `smoke`）。现在只保留 `mixed` 一个，并且用
+> `tools/resplit_dataset.py` 重新切成 train/val/test ——
+> `mixed` 本来就是 `controlled_longmix` + `oldv1` 合并出来的，**已经包含了另外几个的
+> 训练数据**，所以这一步没有丢样本，只是把「焊死」的旧划分换成了按图重切的新划分。
+>
+> 重划分遵循两条硬要求：**按 `graph_id` 切**（不是按样本，否则同一张图会漏到两个 split，
+> 即 topology leakage），并且**把 `graph_id` 重编号成全局唯一**（各输入文件的 id 空间
+> 本来各自从 0 开始，直接拼会撞键）。划分后跑了 `tools/check_leakage.py` 的独立指纹
+> 核对：**train/val/test 两两重叠图数 = 0**。
+>
+> 组成（三个 split 的占比一致，分层生效）：
+>
+> | 来源 | train | val | test |
+> |---|---:|---:|---:|
+> | `controlled_longmix` | 3000 条 (61.2%) | 375 (62.4%) | 375 (62.1%) |
+> | `oldv1` | 1905 条 (38.8%) | 226 (37.6%) | 229 (37.9%) |
+>
+> ⚠️ 各样本 `meta['source_file']` 仍写着 `controlled_longmix_train.pkl` 之类的**原始出处**，
+> 那是血缘记录；但那几个文件本身已经删了，不要再去找它们。
 
-| 文件 | 是什么 | 规模 | 用途 |
-|---|---|---|---|
-| `controlled_long.pkl` | **长链专测集**（全 hard，9–11 决策） | 400 条 / 9.20 决策 / 26.0 跳 | 检验"多轮交流"和长链能力 |
-| `controlled_longpool.pkl` | 长链候选池（生成时只留 ≥9 决策） | 1050 条 / 9.22 决策 | 给训练集补长链样本 |
-| `controlled_longmix_train.pkl` | `controlled_train` + 池子里 900 条 | 3300 条 / 7.26 决策 / ≥9 决策占 30.9% | `v2_rev2_longmix` 的训练集 |
-| `controlled_longmix_val.pkl` | `controlled_val` + 池子里 150 条 | 450 条 / 7.44 决策 | 对应的验证集 |
+**B. （已移除）`data/controlled/`、`data/long/`、`data/oldv1/`、`data/smoke/`**
 
-**C. 旧 V1 数据 —— `data/oldv1/`（随机图 er/ba/ws/geometric，20–80 节点，候选=下一跳边；
-原始 `.pt` 在 `data/processed/v1/`）**
+> **2026-09-16 移除，共 131 MB。** 四个目录的数据文件已删除，它们的训练数据全部包含在
+> 上面新的 `data/unweighted/` 里。`data/smoke/` 额外还是 2026-09-13 的旧格式
+> （缺 `segments.source_forced_edge_ids`），留着只会误导。
+>
+> ⚠️ **不可再生**：`oldv1` 的上游 `data/processed/v1/*.pt` 本来就不在仓库里，
+> `controlled_longmix` 的上游 `controlled`/`long` 也已删除。所以这四个目录**无法重建**
+> （除非重新生成整套合成数据 —— 但那样得到的不是同一批 query）。
+>
+> ⚠️ 本文档 §17 / §20 / §21 里还有大量引用这四个目录的历史命令，**那些命令现在跑不了**。
+> 它们是当时实验过程的记录，保留原文；要复现请改用 `data/unweighted/unweighted_{train,val}.pkl`。
 
-| 文件 | 是什么 | 规模 | 用途 |
-|---|---|---|---|
-| `data/processed/v1/train.pt` | V1 原始 train（torch dict：`graphs` / `queries` / `meta`） | 5000 图 / 25000 query | V1 格式原始数据 |
-| `data/processed/v1/val.pt` | V1 原始 val | 500 图 / 2500 query | 同上 |
-| `data/processed/v1/test.pt` | V1 原始 test | 500 图 / 2500 query | 同上 |
-| `data/processed/v1/ood_size.pt` | V1 规模外推集（**100–200 节点**） | 300 图 / 1500 query | 只做规模外推测试，**不进训练** |
-| `data/processed/v1/manifest.json`、`*_meta.json` | 上面四份的统计 | — | 查数据分布 |
-| `oldv1_train_sub.pkl` | V1 train 随机抽 2000 条转成 V2 格式（成功 1970） | 1970 条 / 37.9 决策 / 275 候选 | 混入训练集 |
-| `oldv1_val_sub.pkl` | V1 val 随机抽 400 条转 V2（成功 390） | 390 条 / 36.5 决策 | 混入验证集 |
-| `oldv1_test.pkl` | V1 test 转 V2（成功 2444 / 2500） | 2444 条 / 38.2 决策 / 268 候选 | **跨分布测试集**（旧数据上到底行不行） |
-
-> 本机工作副本里没有保留 `data/processed/v1/*.pt`（V1 时代的归档件），需要时先从归档恢复，
-> 再跑第 18 节的转换命令。
-
-> V1 与 V2 的差别：V1 的候选是"下一跳的边"，V2 是"走到下一个 structural endpoint 的
-> branch segment"。所以 V1 的 `.pt` 必须先转换（`tools/convert_v1_dataset.py`）才能喂给
-> 现在的模型；约 2.2% 的 query 因为"两个 degree=2 节点构成的三角"无法用 V2 语义表示而被跳过。
-
-**D. 混合训练集 —— `data/mixed/`（当前最新模型用的）**
-
-| 文件 | 是什么 | 规模 | 用途 |
-|---|---|---|---|
-| `mixed_oldv1_train.pkl` | `controlled_longmix_train` + `oldv1_train_sub` | **5270 条** / 18.7 决策 / 127 候选 | `v2_rev2_mixed` 的训练集 |
-| `mixed_oldv1_val.pkl` | `controlled_longmix_val` + `oldv1_val_sub` | **840 条** / 20.9 决策 | 对应的验证集（模型选择用它） |
-| `mixed_oldv1_{train,val}_summary.json` | 合并统计（组成、决策数直方图、长链占比） | — | 查合并结果 |
-
-**E. 冒烟小数据集 —— `data/smoke/`**：`smoke_{train,val,test}.pkl`（26 / 3 / 3 条），只用来快速跑通流程。
-
-**F. 公开图数据 —— `data/public_graphs/`**：由 `scripts/download_graph_datasets.py` 下载的
-DIMACS9/10 路网（`--profile recommended` 约 14 MB：rome99、Luxembourg OSM、NY / BAY / COL），
-另有 `--profile snap`（roadNet-CA/PA/TX）与 `--profile all`（再加 CLRS30）可选。
-
-DIMACS9 的 `.gr` 只有弧长、不带坐标，加 `--with-coords` 会连 `*.co.gz` / `*.xyz.bz2` 坐标
-伴随文件一起下；有了坐标 `tools/visualize_public_graphs.py` 才能把它们画成地图（没有坐标的
-rome99 退化成力导向布局）。文件清单见 `data/README.md`。
-
-```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/download_graph_datasets.py --list
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/download_graph_datasets.py --with-coords
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
-```
-
-**G. Weighted 数据集 —— `data/weighted_controlled/`（第 20 节的带权扩展）**
+**C. Weighted 数据集 —— `data/weighted/`（第 20 节的带权扩展）**
 
 | 文件 | 是什么 | 规模 | 用途 |
 |---|---|---|---|
-| `weighted_controlled_train.pkl` | 加权主训练集（3000 条按图 8:1:1 切出来的 train） | 2400 条 | `v2_weighted_controlled` 的训练集 |
-| `weighted_controlled_val.pkl` | 加权验证集 | 300 条 | 模型选择 |
-| `weighted_controlled_test.pkl` | 加权标准测试集 | 300 条 | 带权能力的主指标 |
-| `weighted_controlled_summary.json` | 生成统计 + **weighted sanity check**（conflict rate / bfs cost ratio / 权重分布） | — | 判断这份数据到底难不难 |
+| `weighted_train.pkl` | 加权主训练集 | 2400 条 | `controlled_weighted` 的训练集 |
+| `weighted_val.pkl` | 加权验证集 | 300 条 | 模型选择 |
+| `weighted_test.pkl` | 加权标准测试集 | 300 条 | weighted run 的 test 指标 |
+| `weighted_summary.json` | 生成统计 + **weighted sanity check**（conflict rate / bfs cost ratio / 权重分布） | — | 判断这份数据到底难不难 |
 
 每条边 w ~ U(1, 10)（可用 `data.edge_weight.distribution` 换 loguniform），GT 是 Dijkstra 最小 cost 路径。
 实测：conflict rate 0.460、bfs cost ratio 1.034、`gt_path_is_weighted_optimal_fraction` 1.0。
 
-**H. DiDi 成都真实道路数据集 —— `data/didi_chengdu_gjd/`（第 24 节，**GT 是真实车辆历史路径**）**
+**H. DiDi 成都真实道路数据集 —— `data/didi/graph/chengdu/`（第 24 节，**GT 是真实车辆历史路径**）**
 
 | 文件 | 是什么 | 规模 | 用途 |
 |---|---|---|---|
-| `train.pkl` / `val.pkl` | 真实路网 OD 训练/验证集 | 4687 / 533 条 | `didi_chengdu_flow1_weighted` |
+| `train.pkl` / `val.pkl` | 真实路网 OD 训练/验证集 | 4687 / 533 条 | `didi_chengdu` |
 | `test.pkl` | 完整测试集 | 1275 条 | 全量 test 指标 |
 | `test_1000.pkl` | GDP 风格固定子集 | 1000 条 | 论文主表 |
 | `shuffled_od_1000.pkl` | OD 打乱重配，**无真实 GT** | 741 条 | 只测 GoalHit/Loop/Broken/CostRatio/时间 |
@@ -127,23 +107,61 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
 GT 是 CSV 里真实车辆走过的路径（93.7% 都不是最短路，cost ratio 中位数 1.12），
 corridor 用 rho=1.5 的 OD 椭球。生成命令与全部实测结论见**第 24 节**。
 
+**I. 配置文件 —— `configs/` 下三份，和上面三个数据集一一对应**
+
+> **2026-09-16 改名。** 旧名是 `graph_flow.yaml` / `graph_flow_weighted.yaml` /
+> `graph_flow_didi_weighted.yaml` —— `graph_flow` 是**模型名**，三份配置用的都是同一个模型，
+> 所以它不区分任何东西；而两份都带 `weighted` 却指完全不同的两件事（合成图的 `w~U(1,10)`
+> vs 真实道路的米制长度）。现在改成按**数据集**命名，和 `data/` 的目录名、`outputs/runs/`
+> 的 run 名三者对齐。
+
+| config | 配的数据集 | 边权 | 训练目标 | 对应 run |
+|---|---|---|---|---|
+| `configs/controlled_unweighted.yaml` | `data/unweighted/` | **无**（`weighted: false`） | `L = CE + 0.1·SoftGoal` | `controlled_unweighted` |
+| `configs/controlled_weighted.yaml` | `data/weighted/` | **有**，`w ~ U(1,10)`，开 `model.use_edge_cost` | 同上 | `controlled_weighted` |
+| `configs/didi_chengdu.yaml` | `data/didi/graph/chengdu/` | **有**，用 `edge_features.csv` 的 `length`（米） | **`L = L_path + 0.3·L_null`**（Path NLL + 下采样 NULL），soft goal **关闭** | `didi_chengdu` |
+
+三份配置的 `paths.data_dir` 和 `paths.run_name` 都已经指向现存的数据集与 run，所以
+**不带 `--name` / `--data` 直接跑 `scripts/train.py --config configs/<X>.yaml` 就是对的**。
+
+唯一的例外是 DiDi：它的数据必须先用 `scripts/prepare_didi.py` 生成（`data.source: didi_chengdu`
+时 `src/training/setup.py` 会明确拒绝"现场生成"），见第 24 节。
+
 ### 0.2 训练好的模型（`outputs/runs/`，checkpoint 不进版本库）
 
-| run 目录 | 网络/推理 | 训练集 | 训练规模 | best epoch | val goal_hit | `controlled_test`(300) goal / optimal | `controlled_long`(400) goal / optimal | `oldv1_test`(2444) goal / optimal |
-|---|---|---|---|---|---|---|---|---|
-| `outputs/runs/v2_controlled_100ep` | 旧 attention（K 只吃 edge），flow_steps=1 | `controlled_train` | 80 epoch | 无 epoch 标注 | 0.9067 | 0.8933 / 0.7333 | 0.601 / 0.453（5 种子） | 0.605 / 0.380 |
-| `outputs/runs/v2_controlled_100ep_flow3` | 旧 attention，flow_steps=3 | `controlled_train` | 100 epoch | 80 | 0.8900 | 0.9167 / 0.7233 | 0.6685 / 0.5335（5 种子） | 0.604 / 0.367 |
-| `outputs/runs/v2_rev2_longmix/v2_rev2_longmix` | 新 attention（node+edge K）+ Soft Goal，flow_steps=3 | `controlled_longmix_train` | 100 epoch（52 s/ep） | 75 | 0.9444 | 0.9300 / 0.9033 | 0.9125 / 0.8850 | 0.2275 / 0.1911 |
-| **`outputs/runs/v2_rev2_mixed`**（最新） | 新 attention + Soft Goal + horizon cap=24，flow_steps=3 | `mixed_oldv1_train` | 100 epoch（183 s/ep） | **90** | **0.9548** | 0.9300 / 0.8833 | 0.8950 / 0.7900 | **0.9763 / 0.9677** |
-| **`outputs/runs/v2_weighted_controlled`**（第 20 节，带权） | 新 attention + Soft Goal + **Edge Cost Encoder**，flow_steps=3 | `weighted_controlled_train`（w~U(1,10)） | 100 epoch（~120 s/ep） | 95 | 0.8233 | — | — | — |
-| `outputs/runs/v2_weighted_controlled_cost_ablated`（第 20 节的 cost 消融） | 新 attention + Soft Goal，**看不到 edge cost** | 同一份带权训练集 | 100 epoch（~120 s/ep） | 75 | 0.8033 | — | — | — |
-
-> 两个 weighted run 的评测集不是上面三个（那些是无权图），而是 `data/weighted_controlled/weighted_controlled_test.pkl`：
-> 见第 20.8 节 —— Ours `goal 0.8633 / optimal 0.6900 / cost_ratio 1.0070`，cost 消融 `0.8767 / 0.3667 / 1.0557`，
+| run 目录 | 网络/推理 | 训练集 | 训练规模 | best epoch | val goal_hit | 测试集表现 |
+|---|---|---|---|---|---|---|
+| **`outputs/runs/controlled_unweighted`**（最新无权重） | 新 attention + Soft Goal + horizon cap=24，flow_steps=3 | `data/unweighted`（旧布局） | 100 epoch（183 s/ep） | 90 | 0.9548 | `controlled_test` 0.9300 / 0.8833 · `controlled_long` 0.8950 / 0.7900 · `oldv1_test` 0.9763 / 0.9677 |
+| **`outputs/runs/controlled_weighted`**（有权重） | 新 attention + Soft Goal + **Edge Cost Encoder**，flow_steps=3 | `data/weighted`（w~U(1,10)） | 100 epoch（~120 s/ep） | 95 | 0.8233 | `data/weighted` test：goal 0.8633 / optimal 0.6900 / cost_ratio 1.0070（第 20.8 节） |
+| **`outputs/runs/didi_chengdu`**（DiDi 真实数据） | 新 attention + **Edge Cost** + Path NLL + Sampled NULL，flow_steps=1，T=50 | `data/didi/graph/chengdu` | 24 epoch（~775 s/ep） | 10 | — | 见第 24 节。strict 解码下 test_1000：PathSim 0.4438 / EdgeF1 0.3828 / DTW 0.2276 km / broken 0 |
+> `controlled_weighted` 的评测集不是上面前两个（那些是无权图），而是 `data/weighted/weighted_test.pkl`：
+> 见第 20.8 节 —— Ours `goal 0.8633 / optimal 0.6900 / cost_ratio 1.0070`；
+> 当时的 cost 消融 run 是 `0.8767 / 0.3667 / 1.0557`（该 run 已在 2026-09-16 删除）、
 > Greedy-BFS `1.0000 / — / 1.0350`，Dijkstra oracle `1.0000 / 1.0000 / 1.0000`（逐条配对 p=7e-23）。
 
+> **2026-09-16 清理：`outputs/runs/` 只保留上面 3 个 run。** 删除的 5 个是
+> `v2_controlled_100ep`、`v2_controlled_100ep_flow3`、`v2_rev2_longmix`、
+> `controlled_weighted_cost_ablated`，以及 `didi_chengdu_new`
+> （它和 `didi_chengdu` 是**同一次训练**：`best.pt` / `run_config.json` /
+> `val_records_epoch{5,10,15}` 逐字节相同，只多了 epoch 24 的 `history.json` / `last.pt`，
+> 已合并进后者）。
+>
+> **同时把保留下来的 3 个 run 改了名**（旧名太隐晦，看不出是什么模型）。
+> 本文档里的引用已全部改成新名；如果你在 git 历史、实验记录或别处的笔记里看到旧名，
+> 对照关系是：
+>
+> | 旧名 | 新名 | 是什么 |
+> |---|---|---|
+> | `v2_rev2_mixed` | `controlled_unweighted` | 合成 Controlled Junction Graph，无权重 |
+> | `v2_weighted_controlled` | `controlled_weighted` | 同一基准的带权版本 |
+> | `didi_chengdu_flow1_weighted` | `didi_chengdu` | DiDi 成都真实道路 |
+>
+> ⚠️ 下面那批多种子配对结论引用的 `multiseed_*.json` 原本存在被删的 run 目录里，
+> **已经不存在了**；表格里的数字和结论保留作为当时的实验结果记录。前 4 个 run 的训练集
+> （`data/controlled` / `data/long`）也已删除，所以它们**无法再评测**。
+
 > 上表是**单次评测（seed 0）** 的数字；括号里注明的行是 5 种子均值。多种子配对检验的
-> 结论（`multiseed_*.json`）：
+> 结论（`multiseed_*.json`，**原始 json 已随 run 删除**）：
 >
 > * flow3 vs flow1：test 打平（−0.008，p=0.44），long 显著更好（+0.068，p=2.6e-7）；
 > * longmix vs flow3：test +0.042（p=3.8e-4）、long +0.235（p=6e-50）；
@@ -153,7 +171,7 @@ corridor 用 rho=1.5 的 OD 椭球。生成命令与全部实测结论见**第 2
 > 也就是说：把旧数据混进来，**旧数据上从"灾难性退化"变成"几乎全对"，代价是长链上
 > "恰好走最短路"的比例掉了 6.7 个点**。
 >
-> 推理侧还有一招**多分支（存活路径表）解码**（第 19 节，增强版见第 21 节）：`v2_rev2_mixed` 在
+> 推理侧还有一招**多分支（存活路径表）解码**（第 19 节，增强版见第 21 节）：`controlled_unweighted` 在
 > controlled_test 上 goal_hit 0.930 → **1.000**、optimal 0.883 → **0.973**（k=2 + NULL 不停），
 > controlled 两个测试集的 coverage 都是 **1.0000**（路径表里必有一条能到终点）。
 
@@ -181,76 +199,76 @@ corridor 用 rho=1.5 的 OD 椭球。生成命令与全部实测结论见**第 2
 
 ```bash
 # tiny overfit（先验证链路能过拟合；小数据 + 高 lr）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --tiny --name tiny --set diffusion.T=20 --set training.epochs=200 --set training.lr=3.0e-3
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --tiny --name tiny --set diffusion.T=20 --set training.epochs=200 --set training.lr=3.0e-3
 
 # 正式训练：长链偏重（v2_rev2_longmix 用的这条）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_longmix --data data/long/controlled_longmix_train.pkl --val-data data/long/controlled_longmix_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name v2_rev2_longmix --data data/long/controlled_longmix_train.pkl --val-data data/long/controlled_longmix_val.pkl
 
-# 正式训练：旧数据融合（v2_rev2_mixed，最新，100 epoch 约 5 小时）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl
+# 正式训练：旧数据融合（controlled_unweighted，最新，100 epoch 约 5 小时）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name controlled_unweighted --data data/unweighted/unweighted_train.pkl --val-data data/unweighted/unweighted_val.pkl
 
 # 对照：降低 NULL 权重（混合集 NULL 占 68%，模型容易"该走却选 NULL"）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed_nw03 --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl --set loss.null_weight=0.3
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name controlled_unweighted_nw03 --data data/unweighted/unweighted_train.pkl --val-data data/unweighted/unweighted_val.pkl --set loss.null_weight=0.3
 
 # Weighted 扩展：主实验（weighted GT + Edge Cost Encoder；命令细节见第 20 节）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_weighted.yaml --name controlled_weighted --data data/weighted/weighted_train.pkl --val-data data/weighted/weighted_val.pkl
 
 # Weighted 扩展：关键消融（同一份 weighted GT，但不给模型 edge cost）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled_cost_ablated --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl --set model.use_edge_cost=false
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_weighted.yaml --name controlled_weighted_cost_ablated --data data/weighted/weighted_train.pkl --val-data data/weighted/weighted_val.pkl --set model.use_edge_cost=false
 
 # 续训（从 last.pt 再跑 30 轮；--extra-epochs 是"在已跑轮数之上再加多少"）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl --resume outputs/runs/v2_rev2_mixed/last.pt --extra-epochs 30
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name controlled_unweighted --data data/unweighted/unweighted_train.pkl --val-data data/unweighted/unweighted_val.pkl --resume outputs/runs/controlled_unweighted/last.pt --extra-epochs 30
 ```
 
 **评测**
 
 ```bash
 # 标准测试集
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_rev2_mixed/eval_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_unweighted/run_config.json --checkpoint outputs/runs/controlled_unweighted/best.pt --data data/controlled/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/controlled_unweighted/eval_test.json
 
 # 长链专测集
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/long/controlled_long.pkl --device cuda --no-progress --out outputs/runs/v2_rev2_mixed/eval_long.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_unweighted/run_config.json --checkpoint outputs/runs/controlled_unweighted/best.pt --data data/long/controlled_long.pkl --device cuda --no-progress --out outputs/runs/controlled_unweighted/eval_long.json
 
 # 旧 V1 数据（跨分布）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/oldv1/oldv1_test.pkl --device cuda --no-progress --out outputs/runs/v2_rev2_mixed/eval_oldv1_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_unweighted/run_config.json --checkpoint outputs/runs/controlled_unweighted/best.pt --data data/oldv1/oldv1_test.pkl --device cuda --no-progress --out outputs/runs/controlled_unweighted/eval_oldv1_test.json
 
 # 多分支（存活路径表）解码：主指标取累计概率最高的路径，额外报 coverage
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/long/controlled_long.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --out outputs/runs/v2_rev2_mixed/eval_long_multi.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_unweighted/run_config.json --checkpoint outputs/runs/controlled_unweighted/best.pt --data data/long/controlled_long.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --out outputs/runs/controlled_unweighted/eval_long_multi.json
 
 # 多分支增强（第 21 节）：必死 branch 预筛选 + 三条口径（best / best_goal / best_goal_cost）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_weighted_controlled/run_config.json --checkpoint outputs/runs/v2_weighted_controlled/best.pt --data data/weighted_controlled/weighted_controlled_test.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --filter-dead-branches --out outputs/runs/v2_weighted_controlled/eval_test_multi.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_weighted/run_config.json --checkpoint outputs/runs/controlled_weighted/best.pt --data data/weighted/weighted_test.pkl --device cuda --no-progress --decode multi --top-k 2 --null-policy skip --filter-dead-branches --out outputs/runs/controlled_weighted/eval_test_multi.json
 
 # 三套口径一起出（单路径 / 多分支 best / coverage）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip --out outputs/runs/v2_rev2_mixed/mp_long_k2_skip.json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip --out outputs/runs/controlled_unweighted/mp_long_k2_skip.json
 
 # 多种子配对检验（A=基线 run，B=新 run；--decode multi 时两个 run 都用同一模式）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --data data/oldv1/oldv1_test.pkl --seeds 0,1,2 --metric goal_hit --out outputs/runs/v2_rev2_mixed/multiseed_oldv1_vs_prev.json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/controlled_unweighted --data data/oldv1/oldv1_test.pkl --seeds 0,1,2 --metric goal_hit --out outputs/runs/controlled_unweighted/multiseed_oldv1_vs_prev.json
 
 # 按难度 / 结构模式 / 决策数 / source 类型拆桶
-E:/CondaEnvData/envs/GGMPC/python.exe tools/breakdown_eval.py outputs/runs/v2_rev2_mixed/eval_oldv1_test.json --data data/oldv1/oldv1_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/breakdown_eval.py outputs/runs/controlled_unweighted/eval_oldv1_test.json --data data/oldv1/oldv1_test.pkl
 
 # 训练曲线按真实 epoch 对齐比较
-E:/CondaEnvData/envs/GGMPC/python.exe tools/compare_curves.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --label-a longmix --label-b mixed --every 5
+E:/CondaEnvData/envs/GGMPC/python.exe tools/compare_curves.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/controlled_unweighted --label-a longmix --label-b mixed --every 5
 ```
 
 **可视化 / 取路径**
 
 ```bash
 # 单路径：随机抽 16 张画图（不加 --select-seed 每次抽的不一样，实际种子会打印）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 16 --cols 2 --labels --select random --select-seed 0 --out outputs/figures/paths_mixed_long.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --num 16 --cols 2 --labels --select random --select-seed 0 --out outputs/figures/paths_mixed_long.png
 
 # 多分支：细线画出整张存活路径表，粗线是累计概率最高的那条
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --out outputs/figures/paths_mixed_long_multi.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --out outputs/figures/paths_mixed_long_multi.png
 
 # 只看失败样本（broken / loop / optimal / goal 任选）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select broken --out outputs/figures/paths_mixed_long_broken.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select broken --out outputs/figures/paths_mixed_long_broken.png
 
 # 指定下标（最稳的复现方式）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/controlled/controlled_test.pkl --num 4 --cols 2 --labels --select indices --indices 3,7,42,101 --out outputs/figures/paths_mixed_indices.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/controlled_unweighted --data data/controlled/controlled_test.pkl --num 4 --cols 2 --labels --select indices --indices 3,7,42,101 --out outputs/figures/paths_mixed_indices.png
 
 # 只要路径文本 / JSON，不画图
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/oldv1/oldv1_test.pkl --index 1242
-E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --index 111 --json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/controlled_unweighted --data data/oldv1/oldv1_test.pkl --index 1242
+E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --index 111 --json
 ```
 
 **交互看板（加权模型 + 报告页签）**
@@ -269,43 +287,42 @@ E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py
 
 ```bash
 # 重新生成主数据集（当前数据都在，一般不需要重跑）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/controlled_unweighted.yaml
 
 # 看数据语义（branch / z0 / batch 形状）
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/inspect_dataset.py --data data/controlled/controlled_train.pkl --limit 3
 
-# V1 -> V2 转换（--sample 随机抽样；不能用 --limit，V1 的 query 按图类型分块存）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/test.pt --out data/oldv1/oldv1_test.pkl
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/train.pt --out data/oldv1/oldv1_train_sub.pkl --sample 2000 --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/val.pt --out data/oldv1/oldv1_val_sub.pkl --sample 400 --seed 0
+# V1 -> V2 转换：**tools/convert_v1_dataset.py 已于 2026-09-16 删除**
+#   （上游 data/processed/v1/*.pt 和产物 data/oldv1/ 都不在仓库里，它无法运行）
+#   现有的 data/unweighted 里那 38.8% 的 V1 样本就是当年用它转出来的，见第 19 节
 
 # 合并数据集（--sample N:INDEX 表示第 INDEX 份输入随机抽 N 条）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_train.pkl --input data/long/controlled_longmix_train.pkl --input data/oldv1/oldv1_train_sub.pkl --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_val.pkl --input data/long/controlled_longmix_val.pkl --input data/oldv1/oldv1_val_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/unweighted/unweighted_train.pkl --input data/long/controlled_longmix_train.pkl --input data/oldv1/oldv1_train_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/unweighted/unweighted_val.pkl --input data/long/controlled_longmix_val.pkl --input data/oldv1/oldv1_val_sub.pkl --seed 0
 
 # 图级泄漏检查（必须 0 重叠才能训；有任何一对重叠就退出码 1）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/unweighted/unweighted_train.pkl data/unweighted/unweighted_val.pkl --pair data/unweighted/unweighted_train.pkl data/oldv1/oldv1_test.pkl --pair data/unweighted/unweighted_train.pkl data/controlled/controlled_test.pkl
 ```
 
 **DiDi 成都真实道路数据（第 24 节）**
 
 ```bash
 # 阶段 0：扫描原始文件，确认道路长度列名 / 转换率 / GT cost ratio（不建数据）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-only
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/didi_chengdu.yaml --scan-only
 
 # 阶段 1：在 train split 上比较 rho 候选，选 corridor 参数并冻结进配置
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-corridor
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/didi_chengdu.yaml --scan-corridor
 
 # 阶段 2：生成 train/val/test/test_1000/shuffled_od_1000（约 4 分钟，产出 ~1GB）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --build
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/didi_chengdu.yaml --build
 
 # 自检（27 条断言：转换 / corridor / 指标 / 已生成数据集）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi/graph/chengdu
 
 # 训练 / 评测 / 可视化：**完整命令见第 24.7 节**（含轻量探针、续训、三套评测、调参旋钮）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_didi_weighted.yaml ^
-  --name didi_chengdu_flow1_weighted --data data/didi_chengdu_gjd/train.pkl ^
-  --val-data data/didi_chengdu_gjd/val.pkl --set training.batch_size=8 --set training.epochs=25
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/didi_chengdu.yaml ^
+  --name didi_chengdu --data data/didi/graph/chengdu/train.pkl ^
+  --val-data data/didi/graph/chengdu/val.pkl --set training.batch_size=8 --set training.epochs=25
 ```
 
 **测试与静态检查**
@@ -329,7 +346,7 @@ pip install -r requirements.txt
 
 ```
 Graph-Junction-Diffusion/
-├── configs/graph_flow.yaml          第一版配置
+├── configs/controlled_unweighted.yaml          第一版配置
 ├── src/
 │   ├── data/                        graph_generators / branch_segments / decision_field
 │   │                                dataset_builder / dataset / collate
@@ -409,10 +426,10 @@ Global Pool、Static Graph Encoder、旧 Routing-State Encoder。
 > 可直接粘贴到 Git Bash）。这里只留一条最小闭环，其余用速查表里的命令。
 
 ```bash
-# 看数据语义 -> 训练 -> 评测（以当前最新的 run 名 v2_rev2_mixed 为例）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/inspect_dataset.py --data data/mixed/mixed_oldv1_train.pkl --limit 3
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_rev2_mixed/eval_test.json
+# 看数据语义 -> 训练 -> 评测（以当前最新的 run 名 controlled_unweighted 为例）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/inspect_dataset.py --data data/unweighted/unweighted_train.pkl --limit 3
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name controlled_unweighted --data data/unweighted/unweighted_train.pkl --val-data data/unweighted/unweighted_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_unweighted/run_config.json --checkpoint outputs/runs/controlled_unweighted/best.pt --data data/controlled/controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/controlled_unweighted/eval_test.json
 ```
 
 旧的示例（`data/er_256_train.pkl`、`outputs/runs/graph_flow`）是更早一版的数据与 run 名（这些文件本机已不存在），
@@ -583,7 +600,7 @@ epoch 200: train_loss=0.068  train_x0_acc=1.000  full-chain goal_hit=1.000（opt
 多少次 Branch Decision），而不是节点数。代码在 `src/data/controlled_graph.py`。
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/controlled_unweighted.yaml
 ```
 
 输出 `data/controlled/controlled_{train,val,test}.pkl` + `data/controlled/controlled_summary.json`，后者包含
@@ -593,7 +610,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 
 ```bash
 # 只保留 GT 决策数 >= 9 的样本，且不划分 train/val/test（整份存成一个文件）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --data-dir data/long --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/controlled_unweighted.yaml --data-dir data/long --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
 ```
 
 `--min-decisions N` 走 `build_controlled_dataset(min_decisions=N)`：难度过滤通过但决策数
@@ -628,7 +645,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 
 ### 目标 mix 与实测 mix 不一致（重要）
 
-`configs/graph_flow.yaml` 里的 `difficulty_mix` / `structure_mix` 是**每次 attempt 重新
+`configs/controlled_unweighted.yaml` 里的 `difficulty_mix` / `structure_mix` 是**每次 attempt 重新
 采样**的（`generate_controlled_junction_graph` 内部采样，`build_controlled_dataset`
 的外层循环只判断 `accepted`）。被留下的样本带着"成功那次 attempt"的标签，于是
 **各标签的接受率不同会重新加权 mix**。实测（把生成器包一层计数器、用 seed=0 跑完整
@@ -677,7 +694,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 ## 13. 正式训练（100 epoch）
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_controlled_100ep --data data/controlled/controlled_train.pkl --val-data data/controlled/controlled_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name v2_controlled_100ep --data data/controlled/controlled_train.pkl --val-data data/controlled/controlled_val.pkl
 ```
 
 第一版正式配置：`num_samples=3000`、`batch_size=48`、`T=50`、`d_model=128`、`amp=true`、
@@ -686,7 +703,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_fl
 评测：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/graph_flow.yaml --checkpoint outputs/runs/v2_controlled_100ep/best.pt --data data/controlled/controlled_test.pkl --baselines --out outputs/runs/v2_controlled_100ep/eval_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/controlled_unweighted.yaml --checkpoint outputs/runs/v2_controlled_100ep/best.pt --data data/controlled/controlled_test.pkl --baselines --out outputs/runs/v2_controlled_100ep/eval_test.json
 ```
 
 ### 第一版单轮结果（flow_steps = 1，作为对照基线）
@@ -702,7 +719,7 @@ cost_ratio 1.016、loop 0.003、broken 0.103，单条 22 ms。按 decision 条�
 要跨越 T = 50 个 timestep 才能把信息传完，而且每轮只能看一跳。把"一轮"改成"一个
 step 内部连续交流 k 轮"可以让远距离信息在同一个 timestep 内多次传播。
 
-配置（`configs/graph_flow.yaml`）：
+配置（`configs/controlled_unweighted.yaml`）：
 
 ```yaml
 model:
@@ -815,7 +832,6 @@ round 数会直接 `ValueError`（slot embedding 没有那么多行）；评测�
 |---|---|
 | 看图（预测路径 vs GT 画在一起） | `tools/visualize_paths.py` |
 | 要路径本身（节点序列、结局、分岔点、机器可读 JSON） | `tools/predict_path.py` |
-| 公开图数据（DIMACS9/10，`data/public_graphs/`）长什么样 | `tools/visualize_public_graphs.py` |
 
 ```bash
 # ---- 1) 只要路径本身（文本，不画图）------------------------------------------
@@ -1023,7 +1039,7 @@ print(result.status, result.path, result.reason)        # 结局 / 节点序列 
 于是专门造了一个长链评测集：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --data-dir data/long --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/controlled_unweighted.yaml --data-dir data/long --name controlled_long --no-split --min-decisions 9 --set data.num_samples=400 --set seed=7 --set data.difficulty_mix.hard=1.0 --set data.difficulty_mix.easy=0.0 --set data.difficulty_mix.medium=0.0
 ```
 
 生成结果（`data/long/controlled_long.pkl` + `_summary.json`）：**400 条 query / 400 张图**、
@@ -1068,7 +1084,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v
 
 ```bash
 # 1) 先另外造一批长链样本（不要动现有 train/val/test）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow.yaml --data-dir data/long --name controlled_longpool --no-split --min-decisions 9 --set data.num_samples=1050 --set seed=11
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/controlled_unweighted.yaml --data-dir data/long --name controlled_longpool --no-split --min-decisions 9 --set data.num_samples=1050 --set seed=11
 # 实测：1050 条 / 1050 图，决策数 9–10（均值 9.22）、hops 16–33（均值 22.0），
 #       201,352 次 attempt 才凑出来（接受率 0.52%），耗时 ~10 分钟
 
@@ -1091,7 +1107,7 @@ longmix_val ↔ 两个 test 也都是 0。原来三个 split 与两个 test 集*
 **将来要（用户批准后）训练时**：
 
 ```bash
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_longmix_100ep --data data/long/controlled_longmix_train.pkl --val-data data/long/controlled_longmix_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name v2_longmix_100ep --data data/long/controlled_longmix_train.pkl --val-data data/long/controlled_longmix_val.pkl
 ```
 
 想验证的两件事（先记下来，免得事后凑解释）：
@@ -1107,10 +1123,26 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_fl
 
 复现全部结论：
 
+> **2026-09-16：`tools/postprocess.bat` 已删除**（它的默认 run 名指向两个已清理的 run）。
+> 它当年串起来的流程是"test eval → 曲线对比 → 分桶 → 配对检验 → 验证集配对 → 推理轮数
+> 消融"，逐步跑下面这些工具即可（把 `<run>` / `<baseline>` 换成你自己的）：
+>
+> ```bash
+> python tools/collect_run.py <run>            # 汇总 history + 各 eval 产物
+> python tools/compare_curves.py --a <baseline> --b <run>
+> python tools/breakdown_eval.py <run>/eval_test.json
+> python tools/paired_compare.py --a <baseline>/eval_test.json --b <run>/eval_test.json --metric goal_hit
+> python tools/ablation_eval.py <run> --data <dataset_test.pkl>
+> ```
+
 ```bash
-cmd /c tools\postprocess.bat v2_controlled_100ep_flow3 v2_controlled_100ep
-E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_controlled_100ep --b outputs/runs/v2_controlled_100ep_flow3 --seeds 0,1,2,3,4 --metric goal_hit
+E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/controlled_unweighted --b outputs/runs/controlled_weighted --seeds 0,1,2,3,4 --metric goal_hit
 ```
+
+> ⚠️ **训练时不要硬编码 `--name`。** run 名应交给配置里的 `paths.run_name`
+> （或显式给一个和架构匹配的名字）。硬编码很危险：改了 `model.flow_steps` 之后再跑，
+> 新 run 会**直接覆盖**旧 run 的 `best.pt` / `history.json`，而两者的 checkpoint 结构
+> 并不兼容。
 
 产物：`outputs/runs/v2_controlled_100ep_flow3/{eval_test.json, summary.txt,
 breakdown_test.json, paired_*.json, curves_vs_baseline.json, multiseed_goal_hit.json,
@@ -1157,7 +1189,7 @@ L_goal^{(t)} = -(1/B) * sum_b log(P_goal,b^{(t)} + eps)
   `Hard Goal Hit / Optimal Path Rate / Loop Rate / Broken Rate`，并额外报告
   `soft_goal_reachability`（评测与每个 epoch 的 `val_*` 都会写进 `history.json`）。
 
-配置（`configs/graph_flow.yaml`）：
+配置（`configs/controlled_unweighted.yaml`）：
 
 ```yaml
 loss:
@@ -1201,26 +1233,25 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/semantic_check.py --strict   # check
 
 ```bash
 # 1) V1 -> V2（GT 沿用 V1 自己的 gt_path，decision/active 集合逐条核对为 0 不一致）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/test.pt --out data/oldv1/oldv1_test.pkl
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/train.pt --out data/oldv1/oldv1_train_sub.pkl --sample 2000 --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/convert_v1_dataset.py --input data/processed/v1/val.pt --out data/oldv1/oldv1_val_sub.pkl --sample 400 --seed 0
+# tools/convert_v1_dataset.py 已于 2026-09-16 删除（上游 data/processed/v1/*.pt 不存在）
 
 # 2) 与现有训练/验证集合并（不合并 test；"融入训练"只动 train/val）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_train.pkl --input data/long/controlled_longmix_train.pkl --input data/oldv1/oldv1_train_sub.pkl --seed 0
-E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/mixed_oldv1_val.pkl --input data/long/controlled_longmix_val.pkl --input data/oldv1/oldv1_val_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/unweighted/unweighted_train.pkl --input data/long/controlled_longmix_train.pkl --input data/oldv1/oldv1_train_sub.pkl --seed 0
+E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/unweighted/unweighted_val.pkl --input data/long/controlled_longmix_val.pkl --input data/oldv1/oldv1_val_sub.pkl --seed 0
 
 # 3) 图级泄漏检查（必须 0 重叠才能训）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/unweighted/unweighted_train.pkl data/unweighted/unweighted_val.pkl --pair data/unweighted/unweighted_train.pkl data/oldv1/oldv1_test.pkl --pair data/unweighted/unweighted_train.pkl data/controlled/controlled_test.pkl
 
 # 4) 训练
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow.yaml --name v2_rev2_mixed --data data/mixed/mixed_oldv1_train.pkl --val-data data/mixed/mixed_oldv1_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_unweighted.yaml --name controlled_unweighted --data data/unweighted/unweighted_train.pkl --val-data data/unweighted/unweighted_val.pkl
 ```
 
 要点：
 
 * **`--sample` 而不是 `--limit`**：V1 的 query 按图类型分块存储（er/ba/ws/geometric
-  各占一段），取前缀只会拿到 `er` 图。`tools/convert_v1_dataset.py` 与
-  `tools/merge_datasets.py` 都支持 `--sample N[:INDEX]`。
+  各占一段），取前缀只会拿到 `er` 图。当年做 V1→V2 转换的
+  `tools/convert_v1_dataset.py`（已删除）与仍在的 `tools/merge_datasets.py`
+  都支持 `--sample N[:INDEX]`。
 * **约 2.2% 的 V1 query 转换不了**：随机图里存在"由两个 degree=2 节点构成的三角"
   （例如 `5-11-12-5`），V2 的 branch segment 会判定"回到 owner"并断言失败，这些样本
   会被跳过并打印原因。
@@ -1264,16 +1295,16 @@ while frontier 非空:
 
 ```bash
 # 单独评测（三套口径对比：单路径 / 多分支 best / 多分支 coverage）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --top-k 2 --beam-width 64 --null-policy skip
 
 # 接进主评测脚本（其余工具链不变：输出的 eval json 记录口径完全一致）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_rev2_mixed/run_config.json --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/long/controlled_long.pkl --device cuda --decode multi --top-k 2 --null-policy skip --out outputs/runs/v2_rev2_mixed/eval_long_multi.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_unweighted/run_config.json --checkpoint outputs/runs/controlled_unweighted/best.pt --data data/long/controlled_long.pkl --device cuda --decode multi --top-k 2 --null-policy skip --out outputs/runs/controlled_unweighted/eval_long_multi.json
 
 # 多种子配对检验（两个 run 用同一模式评测，比较的才是同一件事）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --seeds 0,1,2 --metric goal_hit --decode multi --top-k 2 --null-policy skip
+E:/CondaEnvData/envs/GGMPC/python.exe tools/multiseed_eval.py --a outputs/runs/v2_rev2_longmix/v2_rev2_longmix --b outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --seeds 0,1,2 --metric goal_hit --decode multi --top-k 2 --null-policy skip
 
 # 可视化：细线 = 整张路径表，粗线 = 累计概率最高的那条
-E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/v2_rev2_mixed --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --multi-highlight 5 --out outputs/figures/paths_mixed_long_multi_k2.png
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/runs/controlled_unweighted --data data/long/controlled_long.pkl --num 8 --cols 2 --labels --select random --select-seed 0 --multi-k 2 --null-policy skip --multi-highlight 5 --out outputs/figures/paths_mixed_long_multi_k2.png
 ```
 
 `--decode multi` 时主指标取"累计概率最高的那条路径"（与单路径口径可直接对比），
@@ -1291,7 +1322,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py --run outputs/run
 | 蓝虚线 | GT 最短路 |
 | 标题末行 | `路径表 N 条（到终点 M）· coverage ✓/✗ · 最优 XX 跳 · 备选 a/b/c/d 跳` |
 
-### 19.2 实测（`v2_rev2_mixed`，best.pt = epoch 90，seed 0）
+### 19.2 实测（`controlled_unweighted`，best.pt = epoch 90，seed 0）
 
 controlled_long（400 条长链）：
 
@@ -1349,9 +1380,9 @@ finished 按概率排序、可复现、参数校验、`to_decode_result` 的口�
 
 `model.use_edge_cost=false` 时**不会创建任何** cost 参数，所以老 checkpoint 的 key 集合
 与现在的无权模型逐 key 相同（`tests/test_weighted.py::test_legacy_checkpoint_still_loads_with_the_unweighted_config`
-就是拿 `outputs/runs/v2_rev2_mixed/best.pt` 直接验的）。
+就是拿 `outputs/runs/controlled_unweighted/best.pt` 直接验的）。
 
-配置：`configs/graph_flow.yaml`（无权，行为一个字节没改）与 **`configs/graph_flow_weighted.yaml`**（新增，加权）。
+配置：`configs/controlled_unweighted.yaml`（无权，行为一个字节没改）与 **`configs/controlled_weighted.yaml`**（新增，加权）。
 
 ### 20.2 模型：cost 作为第三路 Key / 第二路 Value
 
@@ -1382,7 +1413,7 @@ Batch 里新增四个 tensor（`src/data/collate.py`）：`physical_edge_cost` /
 
 ### 20.4 数据有效性自检（写进 dataset summary）
 
-实测 3000 条 `data/weighted_controlled`（U(1,10)）：
+实测 3000 条 `data/weighted`（U(1,10)）：
 
 | 指标 | 实测 | 含义 |
 |---|---|---|
@@ -1400,7 +1431,7 @@ i.i.d. U(1,10) 下跳数最优路径的 cost 通常只贵几个百分点。**冲
 
 ```bash
 # 生成时换分布（同一套代码，只是把 U(1,10) 换成 exp(U(log 0.1, log 10))）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow_weighted.yaml --data-dir data/weighted_controlled_logu --set data.edge_weight.distribution=loguniform --set data.edge_weight.range=[0.1,10.0]
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/controlled_weighted.yaml --data-dir data/weighted_logu --set data.edge_weight.distribution=loguniform --set data.edge_weight.range=[0.1,10.0]
 ```
 
 生成脚本会在 `bfs_cost_ratio < 1.05` 或 `weighted_conflict_rate < 0.20` 时打印
@@ -1410,16 +1441,16 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 
 ```bash
 # 1) 生成加权数据集（3000 条，U(1,10)；约 50 秒）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/graph_flow_weighted.yaml --name weighted_controlled --data-dir data/weighted_controlled
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config configs/controlled_weighted.yaml --name weighted_controlled --data-dir data/weighted
 
 # 2) 主实验：weighted GT + Edge Cost Encoder
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_weighted.yaml --name controlled_weighted --data data/weighted/weighted_train.pkl --val-data data/weighted/weighted_val.pkl
 
 # 3) 关键消融：同一份 weighted GT，但**不给模型 edge cost**（应当明显变差）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_weighted.yaml --name v2_weighted_controlled_cost_ablated --data data/weighted_controlled/weighted_controlled_train.pkl --val-data data/weighted_controlled/weighted_controlled_val.pkl --set model.use_edge_cost=false
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/controlled_weighted.yaml --name controlled_weighted_cost_ablated --data data/weighted/weighted_train.pkl --val-data data/weighted/weighted_val.pkl --set model.use_edge_cost=false
 
 # 4) 评测（Dijkstra baseline 的 cost_ratio 必须是 1.0）
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/v2_weighted_controlled/run_config.json --checkpoint outputs/runs/v2_weighted_controlled/best.pt --data data/weighted_controlled/weighted_controlled_test.pkl --device cuda --no-progress --baselines --out outputs/runs/v2_weighted_controlled/eval_test.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config outputs/runs/controlled_weighted/run_config.json --checkpoint outputs/runs/controlled_weighted/best.pt --data data/weighted/weighted_test.pkl --device cuda --no-progress --baselines --out outputs/runs/controlled_weighted/eval_test.json
 ```
 
 评测侧的两处修正：`baselines.shortest_path()` 在 weighted 图上用 `weight="weight"`（否则它根本不是
@@ -1430,10 +1461,10 @@ cost ratio 的 oracle），`metrics.evaluate_sample()` 的 optimal 判定从绝�
 
 ```bash
 # 旧 checkpoint + 旧数据集 + 旧 config：路径级指标与改动前逐位相同
-E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/graph_flow.yaml --checkpoint outputs/runs/v2_rev2_mixed/best.pt --data data/controlled/controlled_test.pkl --baselines --no-progress --out outputs/runs/v2_rev2_mixed/eval_after_weighted_extension.json
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/controlled_unweighted.yaml --checkpoint outputs/runs/controlled_unweighted/best.pt --data data/controlled/controlled_test.pkl --baselines --no-progress --out outputs/runs/controlled_unweighted/eval_after_weighted_extension.json
 ```
 
-结论见 `outputs/runs/v2_rev2_mixed/regression_after_weighted_extension.json`：
+结论见 `outputs/runs/controlled_unweighted/regression_after_weighted_extension.json`：
 
 * `goal_hit 0.9300 / optimal 0.8833 / cost_ratio 1.0030 / broken 0.0700 / soft_goal 0.9110` ——
   与改动前的 `eval_test.json` 逐位一致（`records` 去掉 `elapsed` 后完全相同）；
@@ -1464,7 +1495,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --config configs/graph
 | Greedy-BFS（按跳数贪心） | 1.0000 | — | 1.0350 | — | 永远能到终点，但路线不最优 |
 | **Dijkstra oracle** | **1.0000** | **1.0000** | **1.0000** | — | `baselines.shortest_path()`（oracle 口径自证） |
 
-逐条配对（同一批 300 条 query，McNemar 精确检验，`outputs/weighted_paired_*.json`）：
+逐条配对（同一批 300 条 query，McNemar 精确检验，`outputs/reports/weighted_paired_*.json`）：
 
 * `optimal`：**+0.393**（0.287 → 0.680），只有消融达标 20 条、只有 weighted 达标 138 条，**p = 7.0e-23**；
 * `goal_hit`：+0.080（0.760 → 0.840），p = 0.0138（可达性受 Soft Goal 保护，差距远小于最优性）；
@@ -1533,7 +1564,7 @@ weighted 数据集上额外暴露 `weighted_optimal_coverage_rate`（同一个�
 
 ```bash
 # weighted 模型 + 新解码器（4 个组合：null_policy × filter_dead_branches）
-E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/v2_weighted_controlled --data data/weighted_controlled/weighted_controlled_test.pkl --top-k 2 --beam-width 64 --null-policy skip --filter-dead-branches --out outputs/runs/v2_weighted_controlled/mp_weighted_skip_on.json
+E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/runs/controlled_weighted --data data/weighted/weighted_test.pkl --top-k 2 --beam-width 64 --null-policy skip --filter-dead-branches --out outputs/runs/controlled_weighted/mp_weighted_skip_on.json
 ```
 
 ### 21.3 实测（唯一权威表；300 条 weighted test，top_k=2，beam_width=64，seed 0）
@@ -1599,9 +1630,9 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/evaluate_multipath.py --run outputs/
   归约顺序每次不同。weighted 模型的决策概率余量大，1e-6 抖动不会翻 top-k；
   消融模型分布平，会翻掉 2~3 条 query —— 所以只有它抖。
   `single` 一列在所有运行里都相同（采样对 1e-6 抖动不敏感），是这条解释的对照。
-* 不变量自检（`outputs/multipath_weighted_summary.json` 生成时跑）：每个 run 都满足
+* 不变量自检（`outputs/reports/multipath_weighted_summary.json` 生成时跑）：每个 run 都满足
   `best_goal_cost.optimal ≤ weighted_optimal_coverage_rate`，`single` 与 filter 无关 —— 0 violations。
-* 只跑开启过滤的结果另有独立产物：`outputs/multipath_weighted_filteron_summary.json`
+* 只跑开启过滤的结果另有独立产物：`outputs/reports/multipath_weighted_filteron_summary.json`
   （weighted 的数字与上表逐位相同；ablated 有上述噪声）。
 
 ### 21.4 这条链路把「模型能力」拆成了三层
@@ -1670,12 +1701,12 @@ hop-最优与 cost-最优通常只差一两个 decision —— 表里自然容�
 * 于是**两个模型在 w_opt_cov 上的差距被窄 beam 拉开**：stop 13.0pt → 15.7pt，skip 6.0pt → **10.3pt**。
   这说明宽 beam 之前在替消融模型兜底：它靠扫更多分支把最优路捡进表里；把 beam 收到 3、
   只保留模型自己排得高的分支后，消融模型就漏了，weighted 模型不漏。
-* 产物：`outputs/multipath_weighted_beam_compare.json`（8 次运行的完整记录）+ 各 run 目录下的
+* 产物：`outputs/reports/multipath_weighted_beam_compare.json`（8 次运行的完整记录）+ 各 run 目录下的
   `mp_cpu_beam{64,3}_{stop,skip}.json`。
 
 ### 21.6 零破坏验证
 
-同一个未加权历史产物（`v2_rev2_mixed` × `controlled_long` × top_k=2 skip）**逐位复现**：
+同一个未加权历史产物（`controlled_unweighted` × `controlled_long` × top_k=2 skip）**逐位复现**：
 
 ```
 coverage_rate 1.0000 / optimal_coverage_rate 0.9975 / mean_goal_paths 7.0275
@@ -1699,14 +1730,14 @@ weighted optimal coverage 需要真正的最小 cost 路。另外加了 3 个 ev
 `docs/REPORT_multipath_and_weighted.md`：8 个模型配置（加权 / 消融 / 无权 / 跨任务）× 2 个测试集
 （加权 300 条、无权 300 条）× 单分支 + 多分支（`top_k=2, beam_width=3, filter=True`，stop/skip 各一遍），
 CPU 跑、逐位可复现；含完整指标定义、解码器定义、参考基线、结论与读数陷阱。
-机器可读汇总在 `outputs/all_models_multipath_summary.json`，16 份原始评测在 `outputs/multipath_report/`。
+机器可读汇总在 `outputs/reports/all_models_multipath_summary.json`，16 份原始评测在 `outputs/reports/multipath_report/`。
 
 ### 21.9 复现用的产物
 
 ```
-outputs/multipath_weighted_summary.json                        # 6 次评测的汇总表
-outputs/runs/v2_weighted_controlled/mp_weighted_{stop,skip}_{off,on}.json
-outputs/runs/v2_weighted_controlled_cost_ablated/mp_weighted_{stop_off,skip_on}.json
+outputs/reports/multipath_weighted_summary.json                        # 6 次评测的汇总表
+outputs/runs/controlled_weighted/mp_weighted_{stop,skip}_{off,on}.json
+outputs/runs/controlled_weighted_cost_ablated/mp_weighted_{stop_off,skip_on}.json
 ```
 
 ---
@@ -1743,8 +1774,8 @@ Markdown 原样返回（前端用内置小渲染器画标题/表格/列表/代�
 | id | 文件 |
 |---|---|
 | `report` | `docs/REPORT_multipath_and_weighted.md` |
-| `all_models` | `outputs/all_models_multipath_summary.json` |
-| `weighted_experiment` | `outputs/weighted_experiment.json` |
+| `all_models` | `outputs/reports/all_models_multipath_summary.json` |
+| `weighted_experiment` | `outputs/reports/weighted_experiment.json` |
 | `multipath_weighted` / `multipath_filteron` | 过滤 on/off 的 beam=64 对照 |
 | `beam_compare` | beam=64 vs beam=3（CPU） |
 | `regression` | 零破坏回归：旧 checkpoint 逐位复现 |
@@ -1801,7 +1832,7 @@ Markdown 原样返回（前端用内置小渲染器画标题/表格/列表/代�
 `evaluate_dataset(decode=...)` 现在接受 `single` / `single_sampled` / `multi`；
 `tools/evaluate_multipath.py` 同时输出 `single_path`（新）与 `single_sampled`（诊断）。
 
-### 23.4 #92 回归（weighted 测试集，`v2_weighted_controlled`，seed 0，CPU）
+### 23.4 #92 回归（weighted 测试集，`controlled_weighted`，seed 0，CPU）
 
 ```
 readout z0 = [2, 5, 10, 16, 20]   -> goal    18 跳 / cost 101.29
@@ -1864,7 +1895,7 @@ max 2.24。所以 `Optimal Path Rate` 在真实数据上不再是"模型对不�
 
 ### 24.2 原始文件与语义
 
-数据在 `data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu/`：
+数据在 `data/didi/raw/chengdu/`（2026-09-16 从下载包 `data/DiDiChengduXian/` 里提取，那个包已删除）：
 
 | 文件 | 用途 |
 |---|---|
@@ -1895,7 +1926,7 @@ max 2.24。所以 `Optimal Path Rate` 在真实数据上不再是"模型对不�
 
 方案第 6.3 节要求"train GT containment >= 98% 的最小 rho"。实测（train split
 **5760** 条候选 = `max_dataset_samples=8000` 按 72/8/20 划分后的 train，weighted
-距离口径，见 `data/didi_chengdu_gjd/scan_corridor.json`）：
+距离口径，见 `data/didi/graph/chengdu/scan_corridor.json`）：
 
 | rho | train GT containment | mean corridor nodes | mean decisions |
 |---:|---:|---:|---:|
@@ -1926,16 +1957,16 @@ hop 椭球要大得多（rho_hop=2.5 才 98.7%，而 weighted rho=1.5 就 91.2%�
 ```bash
 # 阶段 0：扫描（不改数据）—— 确认 edge_features 列名、道路长度统计、转换率、
 #         invalid road id、连续性失败率、环路 GT 率、唯一路径数、GT cost ratio 分布
-python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-only
+python scripts/prepare_didi.py --config configs/didi_chengdu.yaml --scan-only
 
 # 阶段 1：corridor rho 扫描，选出并冻结 rho
-python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-corridor
+python scripts/prepare_didi.py --config configs/didi_chengdu.yaml --scan-corridor
 
 # 阶段 2：生成正式数据集
-python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --build
+python scripts/prepare_didi.py --config configs/didi_chengdu.yaml --build
 
 # 自检（不需要 pytest / torch；20 条断言 + 已生成数据集复核）
-python tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+python tools/verify_didi_pipeline.py --data data/didi/graph/chengdu
 ```
 
 `--max-samples N` 覆盖 `data.max_dataset_samples`（最终数据集规模）。它和
@@ -1943,13 +1974,13 @@ python tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
 10 个日期文件才有 OD/时段多样性，所以先尽量多收集、再按固定 seed 均匀抽到目标规模。
 
 `--set data.corridor.rho=1.8` 之类的覆盖照旧可用。候选轨迹会缓存到
-`data/didi_chengdu_gjd/_didi_candidates.pkl`（签名含文件 mtime/size + 过滤条件），
+`data/didi/graph/chengdu/_didi_candidates.pkl`（签名含文件 mtime/size + 过滤条件），
 换配置会自动失效重读，`--refresh-cache` 强制重读。
 
 ### 24.6 产出与指标
 
 ```
-data/didi_chengdu_gjd/
+data/didi/graph/chengdu/
 ├── graph_global.pkl          全局无向有权 junction graph + 建图统计
 ├── train.pkl / val.pkl / test.pkl
 ├── test_1000.pkl             GDP 风格固定 1000 条
@@ -1991,29 +2022,35 @@ JSON 结构与字段名一个字节都没改**）：
 解释器固定用 **`E:/CondaEnvData/envs/GGMPC/python.exe`**（torch 2.9.1+cu126 / CUDA / pytest）。
 下面命令按 **Windows cmd** 写（`^` 续行）；在 Git Bash 里把 `^` 换成 `\`。
 
-**当前训练目标**（`configs/graph_flow_didi_weighted.yaml` 的 `loss.type`）：
+**当前训练目标**（`configs/didi_chengdu.yaml` 的 `loss.type`）：
 
 ```text
-L = L_path + 0.3 * L_null                                       # 纯 CE + 采样 NULL
-    L_path = -(1/N_A) * sum_{i in active}  log p_i(b_i^GT)
-    L_null = -(1/K)   * sum_{j in S_N}     log p_j(NULL)
-    K_b    = min(N_N, ceil(2 * N_A), 64)                        # 每条轨迹自适应
+L = L_path + 0.10 * L_NULL-sat + 0.50 * L_traj                  # 第四版（当前）
+    L_path     = -(1/N_A) * sum_{i in active}  log p_i(b_i^GT)
+    L_NULL-sat = -(1/K)   * sum_{j in S_N} max(0, log(rho_null) - log p_j(NULL))
+    L_traj     = 1.0*L_succ + 1.0*L_sim + 0.50*L_fail           # 多轨迹集合损失
+    K_b        = min(N_N, ceil(1.0 * N_A), 32)                  # 每条轨迹自适应
 ```
 
 Soft goal 已关闭（`goal_reach_weight: 0.0`）。开跑前会打印一行自证：
 
 ```text
-objective   : loss=path_nll+0.3*sampled_null [ratio=2.0, max=64]
+objective   : loss=path_nll+0.1*sampled_null_sat(rho=0.6) [ratio=1.0, max=32] + trajectory[top_k=2, beam=8, null=stop, strict=False, max_succ=4, max_fail=4, tau=1.0, beta=3.0, w=0.5, t=1]
 ```
+
+> ⚠️ `outputs/runs/didi_chengdu/` 里现存的 checkpoint 是**第三版**目标
+> （`0.3 * sampled_null`，无 `L_traj`）训出来的，**不能**和第四版直接比。
+> 第四版要重新从头训（配置已在 `configs/didi_chengdu.yaml` 里切好），
+> 详见 §24.14。
 
 #### 阶段 0 · 前置验证（约 30 秒，不需要 GPU）
 
 ```cmd
 E:/CondaEnvData/envs/GGMPC/python.exe -m pytest tests -q
-E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi/graph/chengdu
 ```
 
-期望：`415 passed` + `all 27 unit checks passed`。
+期望：`487 passed` + `all 27 unit checks passed`。
 
 #### 阶段 1 · 轻量探针（约 5 分钟）—— **上全量之前必做**
 
@@ -2021,11 +2058,11 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/
 
 ```cmd
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py ^
-  --config configs/graph_flow_didi_weighted.yaml ^
+  --config configs/didi_chengdu.yaml ^
   --build --max-samples 600 --out-dir data/didi_probe
 
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
-  --config configs/graph_flow_didi_weighted.yaml ^
+  --config configs/didi_chengdu.yaml ^
   --name didi_probe5 ^
   --data data/didi_probe/train.pkl ^
   --val-data data/didi_probe/val.pkl ^
@@ -2046,10 +2083,10 @@ KLEV/JSEV 和 NaN 的 DTW，而且只打一行 warning 不报错。用当前代�
 
 ```cmd
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
-  --config configs/graph_flow_didi_weighted.yaml ^
-  --name didi_chengdu_flow1_weighted ^
-  --data data/didi_chengdu_gjd/train.pkl ^
-  --val-data data/didi_chengdu_gjd/val.pkl ^
+  --config configs/didi_chengdu.yaml ^
+  --name didi_chengdu ^
+  --data data/didi/graph/chengdu/train.pkl ^
+  --val-data data/didi/graph/chengdu/val.pkl ^
   --set training.batch_size=8 --set training.epochs=25
 ```
 
@@ -2057,11 +2094,11 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
 
 ```cmd
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
-  --config configs/graph_flow_didi_weighted.yaml ^
-  --name didi_chengdu_flow1_weighted ^
-  --data data/didi_chengdu_gjd/train.pkl ^
-  --val-data data/didi_chengdu_gjd/val.pkl ^
-  --resume outputs/runs/didi_chengdu_flow1_weighted/last.pt --extra-epochs 25
+  --config configs/didi_chengdu.yaml ^
+  --name didi_chengdu ^
+  --data data/didi/graph/chengdu/train.pkl ^
+  --val-data data/didi/graph/chengdu/val.pkl ^
+  --resume outputs/runs/didi_chengdu/last.pt --extra-epochs 25
 ```
 
 #### 阶段 3 · 评测
@@ -2069,24 +2106,24 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
 ```cmd
 REM 完整 test + Dijkstra baseline
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
-  --config configs/graph_flow_didi_weighted.yaml ^
-  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt ^
-  --data data/didi_chengdu_gjd/test.pkl --deterministic --baselines ^
-  --out outputs/runs/didi_chengdu_flow1_weighted/eval_test.json
+  --config configs/didi_chengdu.yaml ^
+  --checkpoint outputs/runs/didi_chengdu/best.pt ^
+  --data data/didi/graph/chengdu/test.pkl --deterministic --baselines ^
+  --out outputs/runs/didi_chengdu/eval_test.json
 
 REM GDP 风格主表（固定 1000 条）
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
-  --config configs/graph_flow_didi_weighted.yaml ^
-  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt ^
-  --data data/didi_chengdu_gjd/test_1000.pkl --deterministic --baselines ^
-  --out outputs/runs/didi_chengdu_flow1_weighted/eval_test_1000.json
+  --config configs/didi_chengdu.yaml ^
+  --checkpoint outputs/runs/didi_chengdu/best.pt ^
+  --data data/didi/graph/chengdu/test_1000.pkl --deterministic --baselines ^
+  --out outputs/runs/didi_chengdu/eval_test_1000.json
 
 REM shuffled OD（无真实 GT，会自动跳过相似度指标）
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
-  --config configs/graph_flow_didi_weighted.yaml ^
-  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt ^
-  --data data/didi_chengdu_gjd/shuffled_od_1000.pkl --deterministic ^
-  --out outputs/runs/didi_chengdu_flow1_weighted/eval_shuffled.json
+  --config configs/didi_chengdu.yaml ^
+  --checkpoint outputs/runs/didi_chengdu/best.pt ^
+  --data data/didi/graph/chengdu/shuffled_od_1000.pkl --deterministic ^
+  --out outputs/runs/didi_chengdu/eval_shuffled.json
 ```
 
 #### 阶段 4 · 可视化
@@ -2097,7 +2134,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
 
 ```cmd
 E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_didi_paths.py ^
-  --run outputs/runs/didi_chengdu_flow1_weighted ^
+  --run outputs/runs/didi_chengdu ^
   --num 6 --cols 2 --select mixed --goal-fraction 0.6 ^
   --mode both --multi-k 2 --deterministic
 ```
@@ -2121,8 +2158,8 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_didi_paths.py ^
 ```cmd
 REM 预测 vs GT，spring 拓扑布局（这张图**没有**街道背景，形状也不代表地理）
 E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py ^
-  --run outputs/runs/didi_chengdu_flow1_weighted ^
-  --data data/didi_chengdu_gjd/test_1000.pkl --select random --num 16 ^
+  --run outputs/runs/didi_chengdu ^
+  --data data/didi/graph/chengdu/test_1000.pkl --select random --num 16 ^
   --out outputs/figures/didi_flow1_pred.png
 
 REM 数据集本身（真实经纬度底图，不看模型）
@@ -2155,7 +2192,16 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_didi_samples.py --per-spli
 | `train_path_nll` | 主监督项 | ↓ |
 | `train_pred_active_rate` | 模型预测 active 的比例（监督比例约 0.34） | 靠近 0.34 |
 | `train_sampled_null_acc` / `train_mean_sampled_null_prob` | 采样 NULL 侧的能力 | 不塌到 0 |
-| `train_mean_num_active` / `train_mean_num_sampled_null` | 自证采样比例 ≈ 1:2 | — |
+| `train_mean_num_active` / `train_mean_num_sampled_null` | 自证采样比例 ≈ 1:1（第四版） | — |
+| `train_null_saturation_rate` | p(NULL) 已 ≥ `rho_null`、这一项不再有梯度的 decision 占比 | 到 1.0 就别再加 λ 了，去调 `rho_null` |
+| `train_trajectory_loss` | 多轨迹集合损失（已含 `λ_T = 0.5`） | ↓ |
+| `train_traj_success_mass` | 集合概率质量落在「到达 goal」上的比例 | ↑ |
+| `train_traj_failure_mass` | 落在 NULL / loop / dead-end / broken 上的比例 | ↓（与上一条互补，和为 1） |
+| `train_traj_success_loss` / `_similarity_loss` / `_failure_loss` | 三个子项，用来判断 `L_traj` 掉下来是**哪一项**在动 | ↓ |
+| `train_traj_num_candidates` | 候选池规模（GT + success + failure） | 长期贴 1 = miner 什么都挖不到 |
+| `train_traj_fail_null_mass` 等 4 条 | 失败类型细分（按集合质量） | NULL 质量最高是正常的（代价 1.5） |
+| `train_traj_mean_success_nlcs` | 成功轨迹与 GT 的平均 nLCS | ↑ |
+| `train_traj_raw_success` / `raw_loop` / … | miner **截断前**的产量 | 贴着 `max_success`/`max_failure` = beam 还能再放大 |
 
 评测侧（`evaluate.py` 打印）：`PathSim` / `nLCS(success)` / `EdgeF1` / `CostRatio` /
 `Pred÷GT` / **`DTW(km)`** / `KLEV` / `JSEV` / `buckets`。
@@ -2168,10 +2214,14 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_didi_samples.py --per-spli
 
 | 旋钮 | 默认 | 什么时候动 |
 |---|---|---|
-| `loss.null_loss_weight` | `0.3` | `train_pred_active_rate` 明显高于 0.34、`loop_rate` 高 → 继续加到 0.4 |
-| `loss.null_sampling.ratio` | `2.0` | 想扩大 NULL 覆盖、降低梯度方差。**它不改变 L_null 的量级**（L_null 是 mean），所以调平衡只能调 λ |
+| `loss.null_loss_weight` | `0.10` | `train_pred_active_rate` 明显**高于** 0.34、`loop_rate` 高 → 加到 0.20。但先看 `train_null_saturation_rate`：已经到 1.0 就说明加 λ 无效，该动 `rho_null` |
+| `loss.null_target_prob` | `0.60` | 饱和阈值。调大到 0.7~0.8 = 要求 NULL 更"自信"（方案 §9 的 `rho_null` 扫描表：0.55 / 0.60 / 0.70） |
+| `loss.null_sampling.ratio` | `1.0` | 想扩大 NULL 覆盖、降低梯度方差。**它不改变 `L_NULL-sat` 的量级**（是 mean），所以调平衡只能调 λ |
+| `loss.trajectory.weight` | `0.50` | `traj_success_mass` 长期不动就往上加；`L_traj` 压过 `L_path`（看 `train_path_nll` 是否被顶住）就往下减 |
+| `loss.trajectory.beam_width` | `8` | `traj_raw_success` / `raw_*` 一直贴着 `max_success`/`max_failure` → 说明预算不够，先加 beam 再加 cap |
+| `loss.trajectory.strict` | `false` | **不要改成 true**。strict 会在 top-k 之前把 NULL / loop / dead-end 全 mask 掉，miner 再也看不到失败轨迹，`L_fail` 恒为 0 |
 | `diffusion.T` | `50` | 只是嫌慢 → 降到 20（近似线性省时间），比降 `d_model` 划算 |
-| `training.batch_size` | `8` | 显存远没满，可以继续加到 16 |
+| `training.batch_size` | `4` | 显存远没满，可以继续加到 16 |
 | `model.use_edge_cost` | `true` | 消融对照：`--set model.use_edge_cost=false`（同一份数据、同一网络，唯一变量是 cost 能不能进网络） |
 
 OOM 时按 `8 -> 4 -> 2` 降 batch，**不要**先降模型维度。
@@ -2182,7 +2232,7 @@ OOM 时按 `8 -> 4 -> 2` 降 batch，**不要**先降模型维度。
 |---|---|---|
 | `src/data/didi_dataset.py` | 新增 | dicts/edge_features 读取、建全局有权图、road->junction 转换、corridor、距离缓存、过滤/去重/划分、funnel 统计 |
 | `scripts/prepare_didi.py` | 新增 | `--scan-only` / `--scan-corridor` / `--build` 三个阶段 + 候选缓存 |
-| `configs/graph_flow_didi_weighted.yaml` | 新增 | DiDi 配置（含 rho 取舍的实测表） |
+| `configs/didi_chengdu.yaml` | 新增 | DiDi 配置（含 rho 取舍的实测表） |
 | `src/evaluation/real_path_metrics.py` | 新增 | LCS / nLCS / paired Edge PRF / PathSimilarityScore / KLEV / JSEV / cost ratio / 分桶 |
 | `tests/test_didi_dataset.py` | 新增 | 转换 / corridor 无泄漏 / observed GT 不被替换 / 划分无交集 / flow_steps=1 |
 | `tests/test_real_path_metrics.py` | 新增 | 每个指标的手算小样例 |
@@ -2226,7 +2276,7 @@ OOM 时按 `8 -> 4 -> 2` 降 batch，**不要**先降模型维度。
 
 第一版我在 README / 方案偏离里写过"`dicts.pkl` 只有 OSM node id，没有 junction
 经纬度，所以不伪造 DTW"。**这是错的**，错因是 `ChengDu.pkl` / `graph.pkl`
-（`data/DiDiChengduXian/data/data/cd/`，两份内容完全相同）是 OSMnx 1.1.1 导出的
+（现在在 `data/didi/raw/chengdu/ChengDu.pkl`；下载包里曾有两份同内容的 `ChengDu.pkl` / `graph.pkl`，提取时只留了一份）是 OSMnx 1.1.1 导出的
 `MultiDiGraph`，**边属性里带 `shapely.geometry.linestring.LineString`**；本机没装
 `shapely`，`pickle.load` 直接抛 `No module named 'shapely'`，于是"打不开"被误读成
 "没有坐标"。实际情况：
@@ -2261,7 +2311,7 @@ OOM 时按 `8 -> 4 -> 2` 降 batch，**不要**先降模型维度。
 
   ```bash
   python -m pytest tests/test_didi_dataset.py tests/test_real_path_metrics.py -q
-  python tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd   # 不需要 torch，已通过
+  python tools/verify_didi_pipeline.py --data data/didi/graph/chengdu   # 不需要 torch，已通过
   ```
 
 ### 24.11 样本可视化（真实地理底图）
@@ -2498,3 +2548,188 @@ train_pred_active_rate         train_mean_num_active
 0.3（方案第 11 节的"错误激活多就把 0.2 → 0.3"）。**没有动 `ratio`**，理由见上面第 4 条。
 
 若之后仍见 `pred_active_rate` 偏高 + `loop_rate` 高，再单变量升到 0.4。
+
+> **本节已被 §24.14 取代。** 上面这套 `lambda_null = 0.3` 的无界 NLL 正是
+> `pred_active_rate` 被压到 0.609 的原因；第四版把它换成饱和式 NULL（λ 降到 0.10）
+> 并加了多轨迹集合损失。本节的表格与探针结论仍然有效（它们是第三版的历史证据），
+> 但**不要再照它调参**。
+
+---
+
+### 24.14 第四轮：饱和式 NULL + 多轨迹集合损失（当前训练目标）
+
+> **状态：已实现 + 单测钉住，但还没有跑过真实训练。** 下面所有结论都来自代码与
+> 单元测试（`tests/test_trajectory_loss.py`，58 个用例），**没有**任何 DiDi 上的
+> 曲线可以引用。第一轮真实训练出来之前，本节给的是"该怎么读日志"而不是"结果如何"。
+
+#### 为什么还要再改一次
+
+第三版（§24.13）解决了 collapse，但留下两个结构性问题：
+
+1. **局部 NULL 项没有上界。** `L_null = -log p(NULL)` 只要 `p < 1` 就还能降，
+   于是模型一路把 NULL 概率往上顶。探针里 `pred_active_rate` 收敛到 **0.609**，
+   而监督比例只有约 **0.34** —— 模型在**系统性地过度抑制激活**，表现就是
+   `loop_rate` 0.62~0.90 一直下不来。
+2. **局部 loss 看不见"整条轨迹是不是废的"。** `L_path` 是逐 decision 的，
+   它不知道这条轨迹最后会撞进环、走进 dead-end、还是干脆选了 NULL 终止。
+   `L_null` 只能笼统地"把 NULL 打高"，分不清哪一次 NULL 是合理的收尾、
+   哪一次是把一条本来能到 goal 的路径掐死了。
+
+第四版针对这两点：**把 NULL 目标改成"够用就停"，并新增一个直接对整条轨迹打分的
+集合损失。**
+
+#### 新目标
+
+```text
+L = L_PathNLL + lambda_null_local * L_NULL-sat + lambda_T * L_traj
+
+L_PathNLL   = mean_b [ (1/N_A^(b)) * sum_{i in A_b} -log p_i(b_i^GT) ]
+L_NULL-sat  = mean_b [ (1/K_b) * sum_{j in S_b} max(0, log(rho_null) - log p_j(NULL)) ]
+L_traj      = lambda_s * L_succ + lambda_g * L_sim + lambda_f * L_fail
+```
+
+`rho_null = 0.60`，`lambda_null_local = 0.10`，`lambda_T = 0.50`，
+`lambda_s = lambda_g = 1.0`，`lambda_f = 0.50`。
+
+**1) 饱和式 NULL（`null_loss_type: saturating_nll`）**
+
+`p_j(NULL) >= rho_null` 之后 `l_j = 0` 且梯度恒为 0 —— 把 NULL 从 0.60 推到 0.99
+拿不到任何训练收益。这正是普通 NLL 做不到的。所以 λ 可以从 0.30 降到 **0.10**：
+不是削弱约束，而是这个约束不再需要靠"拉得够久"来生效。
+
+`train_null_saturation_rate` 就是这条的仪表盘：到 1.0 说明这一项已经失去梯度，
+再涨 λ 是白费力气，该去动 `rho_null`。
+
+**2) 多轨迹集合损失（`loss.trajectory`）**
+
+把**一整组候选轨迹**当成一个集合来打分：
+
+```text
+1. 用 detach 后的 candidate_prob 跑历史多轨迹 decoder（top_k=2, beam=8,
+   null_policy=stop, filter_dead_branches=false, strict=false），
+   把 finished 的候选分成 success / NULL / loop / dead-end / broken
+2. 候选池 = GT(1) + success(<=4) + failure(<=4)，按 tuple(nodes) 去重
+3. 用**未 detach** 的 candidate_log_prob 按每条轨迹记录的下标重算
+       S(P_k) = (1/L_k) * sum_l log p(c_l)          # 平均，不是累计
+4. pi = softmax(S / tau)
+       L_succ = -log( sum_{success} pi )
+       q      = softmax(beta * nLCS)  只在 success 上
+       pi_hat = pi / sum_{success} pi
+       L_sim  = -sum q * log(pi_hat)
+       L_fail = sum pi * cost(status)     cost = {null:1.50, 其他:1.00}
+5. L_traj = mean_b L_traj,b                     # batch 等权，不是候选等权
+```
+
+#### 五条硬约束（都有单测钉住）
+
+1. **`S(P)` 必须是 mean，不能是 sum。** 用 sum 的话 2 跳的失败轨迹得分 -2、
+   6 跳的 -6，softmax 会把质量全给**最短的尸体**，模型被鼓励去生成最短的失败轨迹。
+   历史 `best` readout 里就是这个 bug。测试：
+   `test_trajectory_score_is_mean_log_prob_not_sum`。
+2. **训练 miner 必须 `strict=False`。** strict decoder 会在 top-k 之前把
+   NULL / loop / dead-end 全部 mask 掉，miner 根本看不到失败轨迹，`L_fail` 恒为 0、
+   整个多轨迹项没意义。测试：`test_real_miner_keeps_strict_off`。
+3. **候选下标是样本局部坐标系。** decoder 的 `PathCandidate.candidate_indices` 与
+   GT 标签都在"本样本候选表"里编号；`batch.target_candidate` 是**全局**拼表下标，
+   必须减去本样本的起点。测试：
+   `test_multi_sample_batch_uses_local_candidate_offsets`。
+4. **搜索用 detach 的概率，打分用未 detach 的 log-prob。** 搜索是离散 CPU 束搜索，
+   不参与反传；梯度只能从 `S(P)` 回去。测试：
+   `test_gradient_flows_into_candidate_log_prob`。
+5. **只在最后一个 reverse step 算一次**（`trajectory.timestep: 1`）。
+   early timestep 噪声大、采出来的轨迹不代表最终 Decision Field；而且 miner 是
+   离散 CPU 搜索，每个 timestep 都跑会让训练时间爆掉。
+
+另外两条不变量值得单独记住：
+
+* **GT 恒在候选池里、且恒属于 success**，所以 `success` 集合永远非空、
+  `L_succ` 永远有限（`succ_mass >= pi[GT] > 0`）。
+* **`failure_cost` 的唯一来源是 config**。见下面第 2 条修复。
+
+#### 这一轮顺带修掉的 6 个 bug
+
+前 5 个是新代码里的，最后 1 个是既有的、被这次改动踩出来的。
+
+1. **GT 下标全局/局部混用（IndexError）。** `build_gt_trajectory` 拿到的是
+   `batch.target_candidate` 的原始全局下标，却去索引本样本的 `log_row` 切片。
+   单样本 batch 下恰好不越界，**两个样本起必崩**。修法：`gt_target - c0`。
+2. **`failure_cost` 是死配置。** `MinedTrajectory` 上挂了一个用模块默认值的
+   `failure_cost` 属性，于是 config 里的 `failure_cost` 永远被覆盖 —— 改配置毫无
+   效果而且不报错。改成 `failure_cost(costs)` 方法，调用方必须传 `cfg.failure_cost`。
+3. **`raw_*` 统计在截断之后。** 原本先 `success[:max_success]` 再记 `raw_success`，
+   于是 `raw_*` 恒等于 cap，完全看不出 miner 预算够不够（mining budget 消融白做）。
+   改成截断前统计。
+4. **`status="gt"` 却被当成失败。** `is_success` 原本只认 `is_gt` 或 `status=="goal"`，
+   一条手搓的 `status="gt"`（忘了同时给 `is_gt=True`）会被按代价 1.0 罚，静默带偏 loss。
+   `status="gt"` 现在也是 success。
+5. **池子只有 GT 时手写 `num_success = 0`。** 早先版本在这种情况下提前短路并硬写
+   `num_success=0`，日志上会出现"`success_mass = 1` 但 `num_success = 0`"这种自相矛盾。
+   现在走同一条通式，`num_success = 1`。
+6. **既有 bug：`goal_reach_weight = 0` + `record = True` 抛 `UnboundLocalError`。**
+   soft goal 段被整段跳过时 `step_goal_loss` / `p_goal` 根本没被赋值，而
+   `if record:` 里直接引用它们。DiDi 配置正是 `goal_reach_weight: 0.0`，训练时
+   `record=False` 所以一直没暴露。现在记 `NaN` 而不是 0（和"真的算出来是 0"区分开）。
+   测试：`test_recurrent_loss_goal_reach_zero_with_record_does_not_crash`。
+
+#### 新增日志（21 个）
+
+```text
+train_null_saturation_rate
+
+train_trajectory_loss                      train_traj_num_candidates
+train_traj_success_loss                    train_traj_num_success
+train_traj_similarity_loss                 train_traj_num_failure
+train_traj_failure_loss                    train_traj_mean_success_nlcs
+train_traj_success_mass                    train_traj_raw_finished / raw_success
+train_traj_failure_mass                    train_traj_raw_null / raw_loop
+train_traj_fail_null_mass                  train_traj_raw_dead_end / raw_broken
+train_traj_fail_loop_mass
+train_traj_fail_dead_mass
+train_traj_fail_broken_mass
+```
+
+三条一起看才不会误读：
+
+* `trajectory_loss` 掉下来 + `success_mass` 涨 = 真的在往"能到 goal"的方向学；
+* `trajectory_loss` 掉下来 + `failure_mass` 涨 = 只是失败代价被压掉了，
+  模型未必变好；
+* `num_candidates` 长期贴着 1（池子里只有 GT）= miner 什么都挖不到，
+  `L_traj` 恒为 0，整个项等于没开。
+
+`src/evaluation/history.py` 的 `CURVE_KEYS` 已同步加上这 21 条；
+`tests/test_trajectory_loss.py::test_trainer_logs_every_declared_metric` 会静态核对
+`Trainer.EXTRA_TRAIN_METRICS` 与 `trajectory_loss.METRIC_KEYS` 一一对应 ——
+`Trainer` 用 `getattr(out, name, None)` 取值并**静默跳过**取不到的字段，
+一个拼错的键不会报错，只会让那条曲线永远缺席。
+
+#### 向后兼容
+
+* `loss.null_loss_type` 默认 `"nll"`（旧行为），`LossWeights()` 默认构造仍是纯 CE；
+* `loss.trajectory.enabled` 默认 `false`：`configs/controlled_unweighted.yaml` 与
+  `configs/controlled_weighted.yaml` **一个字节都没改**，旧实验的 loss 逐位不变；
+* `Batch.graph_samples` 是新增的非 tensor 字段，`Batch.to()` 只搬 `Tensor`，
+  旧调用方手搓 `Batch` 时它会退回空 tuple，`trajectory_set_loss` 安全返回 0。
+* `loss.type` 仍是 `path_nll_sampled_null`；NULL 是不是饱和式由
+  `null_loss_type` 单独控制。
+
+#### 计划中的消融（方案第 20 节，**尚未执行**）
+
+| 组 | PathNLL | 局部 NULL | L_succ | L_sim | L_fail |
+|---|---|---|---|---|---|
+| A Baseline | ✓ | × | × | × | × |
+| B Low-NULL | ✓ | 0.10 普通 NLL | × | × | × |
+| C Saturating-NULL | ✓ | 0.10 饱和式 | × | × | × |
+| D + Success | ✓ | 0.10 饱和式 | ✓ | × | × |
+| E + Success+Sim | ✓ | 0.10 饱和式 | ✓ | ✓ | × |
+| F Full | ✓ | 0.10 饱和式 | ✓ | ✓ | ✓ |
+
+超参扫描：`lambda_null_local = 0.05 / 0.10 / 0.20`，`rho_null = 0.55 / 0.60 / 0.70`。
+A→C 回答"饱和式本身有没有用"，C→F 回答"多轨迹项逐块加有没有用"。
+
+#### 训练成本提醒
+
+miner 每个 batch 要为**每个样本**跑一次 beam=8 的 CPU 束搜索，只在最后一个 reverse
+step 跑一次。DiDi corridor 的 median 是 ~305 decision / ~1500 candidate，
+实测 2 个 13-decision 的小样本在 CPU 上单步 0.1s；真实训练里这一项会成为
+数据加载之外的主要 CPU 开销，**如果训练时间明显变长，先降 `beam_width`（8 → 4）
+而不是关掉整个项** —— 关掉就退回第三版的过度抑制问题。

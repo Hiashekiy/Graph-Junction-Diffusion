@@ -112,6 +112,11 @@ class Batch:
     )                                  # [C]
     is_weighted: bool = False
 
+    #: 本 batch 的原始 :class:`GraphSample`（**不是 tensor，``to()`` 会跳过它**）。
+    #: 只有多轨迹集合损失需要：beam miner 调 ``decode_multi_path(sample, ...)``，而那个
+    #: 接口吃的是 GraphSample 而不是扁平张量。不启用该损失时它就不该被读。
+    graph_samples: Sequence["GraphSample"] = field(default_factory=tuple)
+
     # -- 软可达性拓扑（第二轮修订 B 项）-------------------------------------
     # 「从 decision i 出发走 candidate c 会到哪里」在 batch 张量层面直接查表，
     # Soft Goal 的 value iteration 因此不需要任何 NetworkX 遍历。
@@ -452,6 +457,7 @@ def collate_samples(
             branch_cost_norm, dtype=torch.float32, device=device
         ),
         is_weighted=bool(any_weighted),
+        graph_samples=tuple(samples),
         candidate_next_decision=torch.tensor(
             candidate_next_decision, dtype=torch.long, device=device
         ),

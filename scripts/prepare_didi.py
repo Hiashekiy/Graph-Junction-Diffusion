@@ -11,7 +11,7 @@
             >= target 的**最小** rho，写回配置并冻结
 
     阶段 2  python scripts/prepare_didi.py --config ... --build
-            生成 data/didi_chengdu_gjd/{train,val,test,test_1000,
+            生成 data/didi/graph/chengdu/{train,val,test,test_1000,
             shuffled_od_1000}.pkl + split_manifest.csv + metadata.json + stats.json
 
 设计约束（方案第 4.3 / 6.1 / 17-A 节）：
@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
         description="prepare the DiDi Chengdu real-road dataset for GJD"
     )
     parser.add_argument(
-        "--config", default="configs/graph_flow_didi_weighted.yaml"
+        "--config", default="configs/didi_chengdu.yaml"
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--scan-only", action="store_true", help="阶段 0：只扫描不建数据")
@@ -114,7 +114,7 @@ def resolve_paths(config: Config, config_path: str, out_dir: Optional[str]) -> D
     root = Path(str(config.get("data.root")))
     if not root.is_absolute():
         root = PROJECT_ROOT / root
-    data_dir = Path(out_dir or str(config.get("paths.data_dir", "data/didi_chengdu_gjd")))
+    data_dir = Path(out_dir or str(config.get("paths.data_dir", "data/didi/graph/chengdu")))
     if not data_dir.is_absolute():
         data_dir = PROJECT_ROOT / data_dir
     return {

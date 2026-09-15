@@ -15,7 +15,7 @@ from src.utils.config import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = REPO_ROOT / "configs" / "graph_flow.yaml"
+CONFIG_PATH = REPO_ROOT / "configs" / "controlled_unweighted.yaml"
 
 
 def test_defaults_are_kept_when_key_is_missing():

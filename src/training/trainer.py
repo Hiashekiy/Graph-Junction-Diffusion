@@ -51,7 +51,47 @@ SAMPLED_NULL_METRICS = (
     "pred_active_rate",
     "mean_num_active",
     "mean_num_sampled_null",
+    # 饱和式 NULL 专属：p(NULL) 已经到 rho_null 的 decision 占比。它到 1.0 就说明
+    # 这一项已经"失去梯度"，再涨 lambda_null_local 也没用，该去调 rho_null。
+    "null_saturation_rate",
 )
+
+#: 多轨迹集合损失（trajectory.enabled=false 时全是 NaN，会被跳过）。
+#:
+#: 这些是**诊断 L_traj 到底在干什么**的唯一窗口：只看 trajectory_loss 掉下来
+#: 分不清是"成功轨迹拿到质量了"还是"失败代价被压掉了"。至少要一起看
+#: traj_success_mass（越大越好）与 traj_fail_*_mass（越小越好）。
+TRAJECTORY_METRICS = (
+    "trajectory_loss",
+    "traj_success_loss",
+    "traj_similarity_loss",
+    "traj_failure_loss",
+    # 集合质量分布：success_mass + failure_mass == 1
+    "traj_success_mass",
+    "traj_failure_mass",
+    # 候选池规模
+    "traj_num_candidates",
+    "traj_num_success",
+    "traj_num_failure",
+    # 失败类型细分（按集合质量，不是按条数）
+    "traj_fail_null_mass",
+    "traj_fail_loop_mass",
+    "traj_fail_dead_mass",
+    "traj_fail_broken_mass",
+    # 成功轨迹与 GT 的平均相似度（nLCS，1.0 = 完全一致）
+    "traj_mean_success_nlcs",
+    # miner 在截断到 max_success / max_failure **之前**挖到多少条 —— mining
+    # budget 消融用：如果 raw_* 一直贴着上限，说明 beam 再放大还有东西可挖。
+    "traj_raw_finished",
+    "traj_raw_success",
+    "traj_raw_null",
+    "traj_raw_loop",
+    "traj_raw_dead_end",
+    "traj_raw_broken",
+)
+
+#: 上面两组一起进 history.json / 控制台（getattr 取不到或 NaN 的自动跳过）
+EXTRA_TRAIN_METRICS = SAMPLED_NULL_METRICS + TRAJECTORY_METRICS
 
 
 def _try_load_coordinates(config) -> Optional[Dict[str, Any]]:
@@ -251,7 +291,7 @@ class Trainer:
             total_goal += float(out.goal_loss.detach())
             total_soft_goal += float(out.soft_goal_mean)
             total_acc += out.final_accuracy
-            for metric_name in SAMPLED_NULL_METRICS:
+            for metric_name in EXTRA_TRAIN_METRICS:
                 metric_value = getattr(out, metric_name, None)
                 if metric_value is None or metric_value != metric_value:
                     continue  # 该 loss_type 不产出这个字段
@@ -262,6 +302,20 @@ class Trainer:
             if (batch_index + 1) % self.log_every == 0:
                 # 拆开的日志：只看总 loss 分不清是 CE 没学好还是 Goal reachability
                 # 没起来（第二轮修订第十二条）。
+                #
+                # traj / null_sat 只在对应目标真的启用时才有值（否则是 NaN），
+                # 所以按需拼，不让不带这些项的 run 刷一屏 "nan"。
+                bits = []
+                for label, name, fmt in (
+                    ("null_sat", "null_saturation_rate", ".3f"),
+                    ("traj", "trajectory_loss", ".3f"),
+                    ("sm", "traj_success_mass", ".3f"),
+                    ("ncand", "traj_num_candidates", ".0f"),
+                ):
+                    value = getattr(out, name, None)
+                    if value is None or value != value:
+                        continue
+                    bits.append(f"{label}={float(value):{fmt}} ")
                 print(
                     f"[epoch {epoch}] batch {batch_index + 1}/{len(batches)} "
                     f"loss={float(out.loss.detach()):.4f} "
@@ -271,6 +325,7 @@ class Trainer:
                     f"x0_acc={out.final_accuracy:.3f} "
                     f"act_acc={getattr(out, 'active_branch_acc', float('nan')):.3f} "
                     f"gt_p={getattr(out, 'mean_gt_branch_prob', float('nan')):.3f} "
+                    f"{''.join(bits)}"
                     f"({time.time() - start:.1f}s)",
                     flush=True,
                 )

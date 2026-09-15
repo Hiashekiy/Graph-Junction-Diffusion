@@ -615,8 +615,14 @@ def test_goal_path_export_helpers_are_json_friendly():
     row = rows[0]
     assert set(row) == {
         "nodes", "log_prob", "path_cost", "hops", "num_branches", "status", "reason",
+        # 多轨迹集合损失靠它把已 detach 的搜索与可微的打分接起来
+        "candidate_indices",
     }
     assert row["status"] == "goal" and row["path_cost"] == pytest.approx(6.0)
+    # trace 必须是"本样本局部的 candidate id"，且长度 = 走过的 branch 数
+    assert row["candidate_indices"] and all(
+        isinstance(index, int) for index in row["candidate_indices"]
+    )
     assert result.summary()["num_filtered_dead_branches"] == 0
 
 

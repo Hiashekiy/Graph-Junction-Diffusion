@@ -23,7 +23,7 @@ from src.models.time_encoder import TimeEncoder
 from src.training.setup import model_kwargs
 from src.utils.config import Config, load_config
 
-CONFIG_PATH = "configs/graph_flow.yaml"
+CONFIG_PATH = "configs/controlled_unweighted.yaml"
 
 
 # ---------------------------------------------------------------------------

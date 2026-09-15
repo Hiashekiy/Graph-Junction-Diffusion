@@ -14,12 +14,18 @@
 
 用法::
 
-    python tools/merge_datasets.py --out data/long/controlled_longmix_train.pkl \
-        --input data/controlled/controlled_train.pkl --input data/long/controlled_longpool.pkl \
+    python tools/merge_datasets.py --out data/merged_train.pkl \
+        --input data/unweighted/unweighted_train.pkl --input <另一份>.pkl \
         --limit 900:1 --seed 0
 
 ``--limit N:INDEX`` 表示"第 INDEX 份输入最多取 N 条"（``N:1`` = 第二份最多 900 条），
 用于把一份长链池拆成训练补充 + 验证补充（两份不能有重叠样本）。
+
+.. warning::
+    **2026-09-16：最初用本工具造出来的 `controlled_longmix_*` / `unweighted_*` 那批
+    中间产物已经不在仓库里了**（见 README §0.1 B）—— 现在 `data/unweighted/unweighted_*.pkl`
+    是"最终成品"，由 ``tools/resplit_dataset.py`` 重新划分，不是本工具的输出。
+    合并完记得跑 ``tools/check_leakage.py``。
 """
 
 from __future__ import annotations

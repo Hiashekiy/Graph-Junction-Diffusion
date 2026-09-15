@@ -6,7 +6,7 @@
     所以即使 history.json 被续训覆盖，验证曲线仍然完整）
   * checkpoint               记录 epoch / best_metric
 
-用法：python tools/collect_run.py outputs/runs/v2_controlled_100ep [--test-eval <json>]
+用法：python tools/collect_run.py outputs/runs/controlled_unweighted [--test-eval <json>]
 """
 
 from __future__ import annotations

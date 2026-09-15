@@ -61,9 +61,9 @@ from src.data.decision_field import (  # noqa: E402
 from src.utils.config import load_config  # noqa: E402
 
 DIDI_ROOT = (
-    PROJECT_ROOT / "data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu"
+    PROJECT_ROOT / "data/didi/raw/chengdu"
 )
-DIDI_CONFIG = PROJECT_ROOT / "configs/graph_flow_didi_weighted.yaml"
+DIDI_CONFIG = PROJECT_ROOT / "configs/didi_chengdu.yaml"
 
 needs_didi = pytest.mark.skipif(
     not DIDI_ROOT.exists(), reason="DiDi raw data is not present in data/"

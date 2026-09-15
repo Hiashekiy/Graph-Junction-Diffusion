@@ -13,7 +13,7 @@
     # 立刻评测（训练已经结束）
     python tools/evaluate_weighted_experiment.py
 
-输出默认写到 ``outputs/weighted_experiment.json``。
+输出默认写到 ``outputs/reports/weighted_experiment.json``。
 """
 
 from __future__ import annotations
@@ -97,12 +97,15 @@ def evaluate_run(run_dir: Path, dataset, device, seed: int) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="evaluate the weighted experiment")
-    parser.add_argument("--main-run", default="outputs/runs/v2_weighted_controlled")
+    parser.add_argument("--main-run", default="outputs/runs/controlled_weighted")
     parser.add_argument(
-        "--ablation-run", default="outputs/runs/v2_weighted_controlled_cost_ablated"
+        "--ablation-run", required=True,
+        help="对照 run 目录。**原本的默认值 outputs/runs/"
+             "controlled_weighted_cost_ablated 已在 2026-09-16 的清理中删除**，"
+             "所以这里改成必填，避免拿主 run 和自己对比而看不出问题。",
     )
-    parser.add_argument("--data", default="data/weighted_controlled/weighted_controlled_test.pkl")
-    parser.add_argument("--out", default="outputs/weighted_experiment.json")
+    parser.add_argument("--data", default="data/weighted/weighted_test.pkl")
+    parser.add_argument("--out", default="outputs/reports/weighted_experiment.json")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wait", action="store_true", help="等两个 run 都训完再评测")

@@ -1,6 +1,6 @@
 """Builders: 从 config 造出 model / diffusion / optimizer / data (实施指南第 28 节).
 
-所有超参数的默认值都来自 ``configs/graph_flow.yaml``；这个模块只负责把配置翻
+所有超参数的默认值都来自 ``configs/controlled_unweighted.yaml``；这个模块只负责把配置翻
 译成对象，不包含任何训练逻辑。
 """
 

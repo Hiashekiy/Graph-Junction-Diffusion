@@ -3,8 +3,8 @@
 用法::
 
     python tools/visualize_paths.py \
-        --run outputs/runs/v2_controlled_100ep_flow3 \
-        --data data/controlled/controlled_test.pkl \
+        --run outputs/runs/controlled_unweighted \
+        --data data/unweighted/unweighted_test.pkl \
         --num 8 --out outputs/figures/paths_flow3.png
 
 面板里画什么：
@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="draw predicted vs ground-truth paths")
     parser.add_argument("--run", required=True, help="run 目录（含 run_config.json）")
     parser.add_argument("--checkpoint", default=None, help="默认 <run>/best.pt")
-    parser.add_argument("--data", default="data/controlled/controlled_test.pkl")
+    parser.add_argument("--data", default="data/unweighted/unweighted_test.pkl")
     parser.add_argument("--num", type=int, default=8, help="画几张")
     parser.add_argument(
         "--cols", type=int, default=2,

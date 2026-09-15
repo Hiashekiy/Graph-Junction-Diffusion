@@ -9,9 +9,9 @@ query**，可以逐条配对，只有"只有 A 达标 / 只有 B 达标"这两�
 用法::
 
     python tools/paired_compare.py \
-        --a outputs/runs/v2_controlled_100ep/eval_test.json \
-        --b outputs/runs/v2_controlled_100ep_flow3/eval_test.json \
-        --data data/controlled/controlled_test.pkl --metric goal_hit \
+        --a outputs/runs/controlled_unweighted/eval_test.json \
+        --b outputs/runs/controlled_weighted/eval_test.json \
+        --data data/unweighted/unweighted_test.pkl --metric goal_hit \
         --label-a "flow_steps=1" --label-b "flow_steps=3"
 
 ``--metric`` 可选 ``goal_hit`` / ``optimal`` / ``broken`` / ``loop``。给 ``--data``

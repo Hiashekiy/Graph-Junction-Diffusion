@@ -28,8 +28,8 @@ from src.evaluation.evaluator import evaluate_dataset
 from src.evaluation.readout import single_path_state, single_readout_state
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-WEIGHTED_RUN = REPO_ROOT / "outputs" / "runs" / "v2_weighted_controlled"
-WEIGHTED_DATA = REPO_ROOT / "data" / "weighted_controlled" / "weighted_controlled_test.pkl"
+WEIGHTED_RUN = REPO_ROOT / "outputs" / "runs" / "controlled_weighted"
+WEIGHTED_DATA = REPO_ROOT / "data" / "weighted" / "weighted_test.pkl"
 
 
 # ---------------------------------------------------------------------------

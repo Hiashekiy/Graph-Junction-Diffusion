@@ -52,7 +52,7 @@ from src.data.dataset import GraphQueryDataset  # noqa: E402
 from src.evaluation import real_path_metrics as rpm  # noqa: E402
 
 #: OSMnx 导出的路网（节点带经纬度）。相对项目根。
-DEFAULT_COORDS = "data/DiDiChengduXian/data/data/cd/ChengDu.pkl"
+DEFAULT_COORDS = "data/didi/raw/chengdu/ChengDu.pkl"
 
 # 中文字体（Windows 上一定有；没有就退回英文标签，绝不让画图挂掉）
 for _font in ("Microsoft YaHei", "SimHei", "SimSun"):
@@ -75,7 +75,7 @@ COLOR_DECISION = "#ff7f0e"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="visualize DiDi dataset samples")
-    parser.add_argument("--data", default="data/didi_chengdu_gjd")
+    parser.add_argument("--data", default="data/didi/graph/chengdu")
     parser.add_argument("--coords", default=DEFAULT_COORDS)
     parser.add_argument("--per-split", type=int, default=3)
     parser.add_argument("--out", default="outputs/figures/didi_samples.png")

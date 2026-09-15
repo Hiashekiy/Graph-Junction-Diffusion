@@ -3,9 +3,9 @@
 用法::
 
     python tools/compare_runs.py \
-        --a outputs/runs/v2_controlled_100ep/eval_test.json \
-        --b outputs/runs/v2_controlled_100ep_flow3/eval_test.json \
-        --data data/controlled/controlled_test.pkl
+        --a outputs/runs/controlled_unweighted/eval_test.json \
+        --b outputs/runs/controlled_weighted/eval_test.json \
+        --data data/unweighted/unweighted_test.pkl
 
 `--data` 可选：给了就按难度 / 结构模式 / source / gt_decisions 分组比较
 （分桶口径来自 ``src/evaluation/buckets.py``，与 tools/breakdown_eval.py 共用），

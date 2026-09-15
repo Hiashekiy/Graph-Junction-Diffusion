@@ -62,7 +62,7 @@ class DatasetInfo:
     label: str
     path: Path
     size_mb: float
-    group: str = ""          # 所属子目录（controlled / long / oldv1 / mixed / smoke …）
+    group: str = ""          # 所属子目录（unweighted / weighted / chengdu …）
     relative: str = ""       # 相对仓库根的可读路径，给面板当提示用
 
 
@@ -106,11 +106,12 @@ def discover_runs(root: Path = PROJECT_ROOT) -> Dict[str, RunInfo]:
 def discover_datasets(root: Path = PROJECT_ROOT) -> Dict[str, DatasetInfo]:
     """Discover every dataset below ``data/``.
 
-    Datasets live in per-family sub-directories (``controlled`` / ``long`` /
-    ``oldv1`` / ``mixed`` / ``smoke``), so the scan is recursive and the listing
-    comes back grouped.  The id stays the bare file name: existing
-    ``eval*.json`` / ``mp_*.json`` artefacts record their dataset by file name,
-    and the id is what the browser sends back on every request.
+    Datasets live in per-family sub-directories (``unweighted`` / ``weighted`` /
+    ``didi/graph/chengdu``), so the scan is recursive and the listing comes back
+    grouped -- note ``group`` is the **immediate** parent directory name (so the
+    DiDi graph dataset reports ``chengdu``, not the full relative path).  The id stays the bare file name: existing ``eval*.json`` /
+    ``mp_*.json`` artefacts record their dataset by file name, and the id is what
+    the browser sends back on every request.
     """
     data_root = root / "data"
     found: Dict[str, DatasetInfo] = {}
@@ -142,13 +143,23 @@ def _dataset_id_from_path(value: str) -> str:
 
 
 def _dataset_from_eval_name(name: str) -> Optional[str]:
-    stem = Path(name).stem.lower()
-    if "oldv1" in stem:
-        return "oldv1_test.pkl"
-    if "long" in stem:
-        return "controlled_long.pkl"
-    if "test" in stem:
-        return "controlled_test.pkl"
+    """**2026-09-16 起停用**，恒返回 ``None``。
+
+    它原本按文件名把历史产物映回数据集：
+
+        ``*oldv1*``  -> ``oldv1_test.pkl``
+        ``*long*``   -> ``controlled_long.pkl``
+        ``*test*``   -> ``controlled_test.pkl``
+
+    这三个数据集（连同 ``data/mixed`` 的旧划分）已经在 2026-09-16 被删除并**重新划分**
+    （见 README §0.1 A/B）：现在的 ``data/unweighted/unweighted_test.pkl`` 是**另一套
+    graph split**，用它去标注旧产物等于给一份结果贴上不匹配的数据集、让面板画出错误的
+    路径。所以这里**故意返回 None**（面板显示为未关联数据集），而不是硬凑一个现存 id。
+
+    加权数据集**没有被重划分**，所以"带权 run 的 test 产物"仍然能可靠地指向
+    ``weighted_test.pkl`` —— 那条兜底保留在 :func:`_dataset_from_payload` 里。
+    """
+    del name  # 保留签名，调用方无需改
     return None
 
 
@@ -157,21 +168,21 @@ def _dataset_from_payload(
 ) -> Optional[str]:
     """评测产物的数据集归属。
 
-    优先级：产物自己记录的 ``data``（新格式）> 文件名推断 > 加权 run 的兜底。
+    优先级：产物自己记录的 ``data``（新格式）> 加权 run 的兜底 > 无法判定（None）。
 
     加权数据集是后来才有的，早期产物里没有 ``data`` 字段，而文件名统一叫
-    ``eval_test.json`` —— 旧的名字推断会把它错认成无权的 ``controlled_test.pkl``。
-    所以对 ``data.weighted=true`` 的 run，"test" 这个名字改判到加权测试集。
+    ``eval_test.json``；对 ``data.weighted=true`` 的 run，这类产物直接判给
+    ``weighted_test.pkl``（带权数据集未重划分，这份对应关系仍然成立）。
+    无权重的历史产物一律返回 ``None`` —— 那套 split 已经不存在了。
     """
     recorded = payload.get("data")
     if recorded:
         candidate = _dataset_id_from_path(str(recorded))
         if candidate.endswith(".pkl"):
             return candidate
-    guessed = _dataset_from_eval_name(path.name)
-    if run is not None and run.weighted and guessed == "controlled_test.pkl":
-        return "weighted_controlled_test.pkl"
-    return guessed
+    if run is not None and run.weighted and "test" in Path(path.name).stem.lower():
+        return "weighted_test.pkl"
+    return _dataset_from_eval_name(path.name)
 
 
 def _finite(value: Any) -> Any:
@@ -242,8 +253,10 @@ def discover_metrics(
             if not isinstance(metrics, Mapping):
                 continue
             dataset_id = _dataset_from_payload(payload, path, run)
-            if dataset_id is None:
-                continue
+            # 2026-09-16：数据集被删除/重划分后，历史产物可能**无法关联**到任何现存数据集。
+            # 这里**不丢弃**该行（丢弃会让面板静默少掉一批历史结果），而是保留并把
+            # dataset_id 置空 —— 面板显示为"未关联数据集"，路径查看器对该行不可用。
+            # 这是正确的：那份 graph split 已不存在，指向任何现存测试集都会画错路径。
             decoding = "multi" if "multi" in path.stem else "single"
             extra = {
                 key: payload[key]
@@ -254,7 +267,9 @@ def discover_metrics(
                 )
                 if key in payload
             }
-            extra["weighted"] = bool(run.weighted) or dataset_id.startswith("weighted")
+            extra["weighted"] = bool(run.weighted) or bool(
+                dataset_id and dataset_id.startswith("weighted")
+            )
             # 新格式（``--decode multi``）：payload["multi"] 里一次带三条口径，各占一行。
             multi = payload.get("multi")
             if isinstance(multi, Mapping):
@@ -330,18 +345,23 @@ def discover_metrics(
             if current_is_last and not previous_is_last:
                 continue
         unique[key] = row
-    return sorted(unique.values(), key=lambda row: (row["dataset"], row["model"], row["decoding"]))
+    # dataset 可能是空（历史产物的 graph split 已被删除/重划分）：用 "" 兜底，
+    # 否则 None 与 str 比较会抛 TypeError
+    return sorted(
+        unique.values(),
+        key=lambda row: (row["dataset"] or "", row["model"], row["decoding"]),
+    )
 
 
 #: 面板要展示的报告 / 汇总产物。(id, 标题, 仓库内相对路径)
 REPORT_ARTIFACTS: Tuple[Tuple[str, str, str], ...] = (
     ("report", "多分支解码 / 加权模型 评测报告", "docs/REPORT_multipath_and_weighted.md"),
-    ("all_models", "全模型统一评测汇总（8 配置 × 2 测试集）", "outputs/all_models_multipath_summary.json"),
-    ("weighted_experiment", "加权模型 vs cost 消融（单路径口径）", "outputs/weighted_experiment.json"),
-    ("multipath_weighted", "加权模型 beam=64：过滤 on/off 对照", "outputs/multipath_weighted_summary.json"),
-    ("multipath_filteron", "只开过滤的 beam=64 结果", "outputs/multipath_weighted_filteron_summary.json"),
-    ("beam_compare", "beam=64 vs beam=3 对照（CPU）", "outputs/multipath_weighted_beam_compare.json"),
-    ("regression", "零破坏回归：旧 checkpoint 逐位复现", "outputs/runs/v2_rev2_mixed/regression_after_weighted_extension.json"),
+    ("all_models", "全模型统一评测汇总（8 配置 × 2 测试集）", "outputs/reports/all_models_multipath_summary.json"),
+    ("weighted_experiment", "加权模型 vs cost 消融（单路径口径）", "outputs/reports/weighted_experiment.json"),
+    ("multipath_weighted", "加权模型 beam=64：过滤 on/off 对照", "outputs/reports/multipath_weighted_summary.json"),
+    ("multipath_filteron", "只开过滤的 beam=64 结果", "outputs/reports/multipath_weighted_filteron_summary.json"),
+    ("beam_compare", "beam=64 vs beam=3 对照（CPU）", "outputs/reports/multipath_weighted_beam_compare.json"),
+    ("regression", "零破坏回归：旧 checkpoint 逐位复现", "outputs/runs/controlled_unweighted/regression_after_weighted_extension.json"),
 )
 
 

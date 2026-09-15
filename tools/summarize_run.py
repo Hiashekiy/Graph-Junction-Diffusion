@@ -2,8 +2,8 @@
 
 用法::
 
-    python tools/summarize_run.py outputs/runs/v2_controlled_100ep \
-        --config configs/graph_flow.yaml --test-data data/controlled/controlled_test.pkl
+    python tools/summarize_run.py outputs/runs/controlled_unweighted \
+        --config configs/controlled_unweighted.yaml --test-data data/unweighted/unweighted_test.pkl
 
 输出 ``<run_dir>/summary.json`` 与 ``<run_dir>/summary.txt``，内容包括：
     * 每 epoch 的 train loss / x0 accuracy；
@@ -36,7 +36,7 @@ from src.evaluation.history import (  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(description="summarize a training run")
     parser.add_argument("run_dir")
-    parser.add_argument("--config", default="configs/graph_flow.yaml")
+    parser.add_argument("--config", default="configs/controlled_unweighted.yaml")
     parser.add_argument("--test-data", default=None)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--device", default="auto")

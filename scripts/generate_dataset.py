@@ -3,13 +3,13 @@
 用法::
 
     # Controlled Junction Graph（推荐，指南第 17 节的默认配置）
-    python scripts/generate_dataset.py --config configs/graph_flow.yaml
+    python scripts/generate_dataset.py --config configs/controlled_unweighted.yaml
 
     # 小规模调试
-    python scripts/generate_dataset.py --config configs/graph_flow.yaml \
+    python scripts/generate_dataset.py --config configs/controlled_unweighted.yaml \
         --name debug --set data.num_samples=300
 
-输出目录默认取配置里的 ``paths.data_dir``（``configs/graph_flow.yaml`` 指向 ``data/controlled``）::
+输出目录默认取配置里的 ``paths.data_dir``（``configs/controlled_unweighted.yaml`` 指向 ``data/controlled``）::
 
     <data-dir>/<name>_train.pkl / _val.pkl / _test.pkl
     <data-dir>/<name>_summary.json      # 指南第 16 节的全部指标
@@ -46,7 +46,7 @@ from src.utils.seed import set_seed  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="generate V2 graph-query dataset")
-    parser.add_argument("--config", default="configs/graph_flow.yaml")
+    parser.add_argument("--config", default="configs/controlled_unweighted.yaml")
     parser.add_argument("--name", default=None, help="dataset name (default: <graph_type>_<n>)")
     parser.add_argument("--data-dir", default=None)
     parser.add_argument(

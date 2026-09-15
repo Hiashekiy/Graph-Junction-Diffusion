@@ -29,7 +29,7 @@
 
 用法::
 
-    python tools/visualize_didi_paths.py --run outputs/runs/didi_chengdu_flow1_weighted
+    python tools/visualize_didi_paths.py --run outputs/runs/didi_chengdu
     python tools/visualize_didi_paths.py --run <run> --num 6 --select goal
     python tools/visualize_didi_paths.py --run <run> --mode multi --multi-k 3
     python tools/visualize_didi_paths.py --run <run> --checkpoint last.pt --deterministic
@@ -165,7 +165,7 @@ def resolve_data_path(args, config) -> Path:
     if args.data:
         path = Path(args.data)
         return path if path.is_absolute() else PROJECT_ROOT / path
-    data_dir = PROJECT_ROOT / str(config.get("paths.data_dir", "data/didi_chengdu_gjd"))
+    data_dir = PROJECT_ROOT / str(config.get("paths.data_dir", "data/didi/graph/chengdu"))
     for name in ("test_1000.pkl", "test.pkl"):
         if (data_dir / name).exists():
             return data_dir / name

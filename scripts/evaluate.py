@@ -2,8 +2,8 @@
 
 用法::
 
-    python scripts/evaluate.py --config configs/graph_flow.yaml \
-        --checkpoint outputs/runs/graph_flow/best.pt --data data/controlled/controlled_test.pkl
+    python scripts/evaluate.py --config configs/controlled_unweighted.yaml \
+        --checkpoint outputs/runs/graph_flow/best.pt --data data/unweighted/unweighted_test.pkl
 
 输出主指标：Goal Hit / Optimal Path / Success Cost Ratio / Loop / Broken / 推理时间。
 另外会打印一个 **debug 用** 的 teacher-forced 单步 decision accuracy。
@@ -97,7 +97,7 @@ def load_coordinates(config, dataset_path=None, quiet: bool = False):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="evaluate the V2 Graph Flow denoiser")
-    parser.add_argument("--config", default="configs/graph_flow.yaml")
+    parser.add_argument("--config", default="configs/controlled_unweighted.yaml")
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--data", required=True)
     parser.add_argument("--out", default=None, help="结果 json 的输出路径")

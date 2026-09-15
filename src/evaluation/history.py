@@ -42,6 +42,38 @@ CURVE_KEYS = (
     "train_pred_active_rate",
     "train_mean_num_active",
     "train_mean_num_sampled_null",
+    # ---- 饱和式 NULL ------------------------------------------------------
+    # p(NULL) 已经 >= rho_null、这一项不再有梯度的 decision 占比。到 1.0 就说明
+    # 继续加大 lambda_null_local 没有意义，该去调 null_target_prob。
+    "train_null_saturation_rate",
+    # ---- 多轨迹集合损失（trajectory.enabled=false 时这些键不存在）---------
+    "train_trajectory_loss",
+    "train_traj_success_loss",
+    "train_traj_similarity_loss",
+    "train_traj_failure_loss",
+    # 集合质量分布，两条互补（和为 1）。
+    # success_mass 涨 = 模型在往"到达 goal"的方向集中概率；
+    # failure_mass 涨而 trajectory_loss 也涨 = 失败代价在起作用。
+    "train_traj_success_mass",
+    "train_traj_failure_mass",
+    # 候选池规模：num_candidates 长期贴着 1（只有 GT）说明 miner 什么都挖不到
+    "train_traj_num_candidates",
+    "train_traj_num_success",
+    "train_traj_num_failure",
+    # 失败类型细分（按集合质量而非条数）
+    "train_traj_fail_null_mass",
+    "train_traj_fail_loop_mass",
+    "train_traj_fail_dead_mass",
+    "train_traj_fail_broken_mass",
+    # 成功轨迹与 GT 的平均 nLCS（1.0 = 完全一致）
+    "train_traj_mean_success_nlcs",
+    # miner 截断前的产量：一直贴着 max_success/max_failure 说明 beam 还能再放大
+    "train_traj_raw_finished",
+    "train_traj_raw_success",
+    "train_traj_raw_null",
+    "train_traj_raw_loop",
+    "train_traj_raw_dead_end",
+    "train_traj_raw_broken",
 )
 
 

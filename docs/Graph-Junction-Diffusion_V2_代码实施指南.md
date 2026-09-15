@@ -39,7 +39,7 @@ Graph-Junction-Diffusion/
 ├── README.md
 ├── requirements.txt
 ├── configs/
-│   └── graph_flow.yaml
+│   └── controlled_unweighted.yaml
 │
 ├── docs/
 │   ├── ARCHITECTURE_V2.md

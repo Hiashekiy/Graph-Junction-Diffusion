@@ -3,8 +3,8 @@
 用法::
 
     python tools/compare_curves.py \
-        --a outputs/runs/v2_controlled_100ep \
-        --b outputs/runs/v2_controlled_100ep_flow3 \
+        --a outputs/runs/controlled_unweighted \
+        --b outputs/runs/controlled_weighted \
         --label-a "flow_steps=1" --label-b "flow_steps=3" \
         --key train_loss --key goal_hit_rate
 

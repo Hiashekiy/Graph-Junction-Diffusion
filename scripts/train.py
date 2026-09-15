@@ -2,8 +2,8 @@
 
 用法::
 
-    python scripts/train.py --config configs/graph_flow.yaml --name graph_flow
-    python scripts/train.py --config configs/graph_flow.yaml --name tiny \
+    python scripts/train.py --config configs/controlled_unweighted.yaml --name graph_flow
+    python scripts/train.py --config configs/controlled_unweighted.yaml --name tiny \
         --tiny --set training.epochs=200 --set diffusion.T=20
 
 ``--tiny`` 会生成实施指南第 27 节要求的 tiny overfit 数据集（固定 seed、小图），
@@ -42,7 +42,7 @@ from src.utils.seed import make_generator, set_seed  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="train the V2 Graph Flow denoiser")
-    parser.add_argument("--config", default="configs/graph_flow.yaml")
+    parser.add_argument("--config", default="configs/controlled_unweighted.yaml")
     parser.add_argument("--name", default=None, help="run name (outputs/runs/<name>)")
     parser.add_argument("--tiny", action="store_true", help="use the tiny overfit dataset")
     parser.add_argument("--tiny-samples", type=int, default=16)

@@ -87,6 +87,14 @@ class PathCandidate:
     stop_node: int = -1
     #: 真实路径 cost = sum of edge weights（无权图 = 跳数）。只用于记录/排序/评测。
     path_cost: float = 0.0
+    #: 这条轨迹依次选了哪些 candidate（**本样本局部**的 flat candidate index）。
+    #:
+    #: 为什么需要：``log_prob`` 是用**已 detach 的概率**在 Python 里累加出来的 float，
+    #: 不能反传。多轨迹集合损失要拿**未 detach** 的 candidate log-prob 按这条 trace
+    #: 重算一个可微的 trajectory score（见 :mod:`src.training.trajectory_loss`）。
+    #: 记录的是所有被选中的 candidate，包括 NULL、导致 loop 的 branch、导致 dead-end
+    #: 的 branch —— 失败的轨迹也必须能算分。
+    candidate_indices: List[int] = field(default_factory=list)
 
     @property
     def goal_hit(self) -> bool:
@@ -116,6 +124,7 @@ class PathCandidate:
             "log_prob": float(self.log_prob),
             "path_cost": float(self.path_cost),
             "hops": int(self.cost),
+            "candidate_indices": [int(v) for v in self.candidate_indices],
             "num_branches": int(self.num_branches),
             "status": self.status,
             "reason": self.reason,
@@ -352,24 +361,29 @@ def decode_multi_path(
 
     if current == goal:
         result.finished.append(
-            PathCandidate(list(path), 0, 0.0, "goal", "", goal, path_cost=path_cost)
+            PathCandidate(
+                list(path), 0, 0.0, "goal", "", goal,
+                path_cost=path_cost, candidate_indices=[],
+            )
         )
         return result
 
     # ---- 2) beam search over branches ------------------------------------
-    # frontier 元素：(nodes, seen, node, log_prob, path_cost, depth)
-    frontier: List[Tuple[List[int], set, int, float, float, int]] = [
-        (list(path), set(visited), int(current), 0.0, path_cost, 0)
+    # frontier 元素：(nodes, seen, node, log_prob, path_cost, depth, indices)
+    #   indices = 这条存活路径依次选过的 candidate（局部 id），用于事后可微重算 score
+    frontier: List[Tuple[List[int], set, int, float, float, int, List[int]]] = [
+        (list(path), set(visited), int(current), 0.0, path_cost, 0, [])
     ]
 
     while frontier:
-        nxt: List[Tuple[List[int], set, int, float, float, int]] = []
-        for nodes, seen, node, log_prob, cost_so_far, depth in frontier:
+        nxt: List[Tuple[List[int], set, int, float, float, int, List[int]]] = []
+        for nodes, seen, node, log_prob, cost_so_far, depth, indices in frontier:
             if depth >= max_branches:
                 result.finished.append(
                     PathCandidate(
                         list(nodes), depth, log_prob, "broken",
                         "step limit exceeded", node, path_cost=cost_so_far,
+                        candidate_indices=list(indices),
                     )
                 )
                 continue
@@ -413,6 +427,7 @@ def decode_multi_path(
 
             for index in picked:
                 step_log_prob = log_prob + math.log(max(probs[index], 0.0) + _EPS)
+                step_indices = indices + [int(index)]
                 result.num_expanded += 1
                 if candidates.candidate_is_null[index]:
                     # null_policy == "stop" 时才会走到这里：该路径在这里终止
@@ -420,6 +435,7 @@ def decode_multi_path(
                         PathCandidate(
                             list(nodes), depth, step_log_prob, "broken",
                             f"NULL selected at {node}", node, path_cost=cost_so_far,
+                            candidate_indices=step_indices,
                         )
                     )
                     continue
@@ -430,6 +446,7 @@ def decode_multi_path(
                         PathCandidate(
                             list(nodes), depth, step_log_prob, "broken",
                             f"missing branch at {node}", node, path_cost=cost_so_far,
+                            candidate_indices=step_indices,
                         )
                     )
                     continue
@@ -448,7 +465,7 @@ def decode_multi_path(
                     result.finished.append(
                         PathCandidate(
                             new_nodes, new_depth, step_log_prob, "goal", "", end,
-                            path_cost=new_cost,
+                            path_cost=new_cost, candidate_indices=step_indices,
                         )
                     )
                 elif end in seen:
@@ -456,6 +473,7 @@ def decode_multi_path(
                         PathCandidate(
                             new_nodes, new_depth, step_log_prob, "loop",
                             f"revisited node {end}", end, path_cost=new_cost,
+                            candidate_indices=step_indices,
                         )
                     )
                 elif end not in decision_of:
@@ -463,13 +481,16 @@ def decode_multi_path(
                         PathCandidate(
                             new_nodes, new_depth, step_log_prob, "broken",
                             f"node {end} has no decision variable", end,
-                            path_cost=new_cost,
+                            path_cost=new_cost, candidate_indices=step_indices,
                         )
                     )
                 else:
                     new_seen = set(seen)
                     new_seen.add(end)
-                    nxt.append((new_nodes, new_seen, end, step_log_prob, new_cost, new_depth))
+                    nxt.append(
+                        (new_nodes, new_seen, end, step_log_prob, new_cost, new_depth,
+                         step_indices)
+                    )
 
         # 存活路径表：按累计 log 概率保留最好的 beam_width 条
         # （path_cost **不参与**剪枝 —— 指南第 4.2 节明确禁止 cost-aware beam）
