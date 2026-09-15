@@ -40,6 +40,19 @@ from src.models.denoiser import GraphFlowDenoiser
 from src.training.checkpoint import save_checkpoint
 from src.training.losses import LossWeights, recurrent_reverse_loss
 
+#: Path NLL + Sampled NULL 的拆分日志字段（loss_type="ce" 时全是 NaN，会被跳过）
+SAMPLED_NULL_METRICS = (
+    "path_nll",
+    "sampled_null_loss",
+    "active_branch_acc",
+    "mean_gt_branch_prob",
+    "sampled_null_acc",
+    "mean_sampled_null_prob",
+    "pred_active_rate",
+    "mean_num_active",
+    "mean_num_sampled_null",
+)
+
 
 def _try_load_coordinates(config) -> Optional[Dict[str, Any]]:
     """尽力加载 ``data.coords_file``；失败/缺失返回 None（DTW 自动降级为 NaN）。"""
@@ -56,6 +69,7 @@ def _try_load_coordinates(config) -> Optional[Dict[str, Any]]:
     if not path.is_absolute():
         path = _Path(__file__).resolve().parents[2] / path
     if not path.exists():
+        print(f"[trainer] data.coords_file not found ({path}) -> DTW disabled", flush=True)
         return None
     # 补缺失节点（原始坐标只覆盖 ~96%），否则部分样本的 DTW 会静默变 NaN
     graph_path = config.get("paths.data_dir", None)
@@ -69,7 +83,12 @@ def _try_load_coordinates(config) -> Optional[Dict[str, Any]]:
     try:
         coordinates, _stats = _didi.load_node_coordinates_filled(path, graph_file)
         return coordinates
-    except Exception:  # noqa: BLE001 - 可选依赖，失败不是错误
+    except Exception as error:  # noqa: BLE001 - 可选依赖，失败不是错误，但要出声
+        print(
+            f"[trainer] could not load coordinates ({type(error).__name__}: {error}) "
+            "-> DTW disabled",
+            flush=True,
+        )
         return None
 
 
@@ -119,25 +138,7 @@ class Trainer:
         self.use_amp = bool(training_cfg.get("amp", False)) if training_cfg else False
         self.seed = int(config.get("seed", 0)) if config is not None else 0
 
-        self.weights = LossWeights(
-            x0_ce=float(loss_cfg.get("x0_ce", 1.0)) if loss_cfg else 1.0,
-            null_weight=float(loss_cfg.get("null_weight", 1.0)) if loss_cfg else 1.0,
-            active_weight=float(loss_cfg.get("active_weight", 1.0)) if loss_cfg else 1.0,
-            goal_reach_weight=float(loss_cfg.get("goal_reach_weight", 0.1))
-            if loss_cfg
-            else 0.1,
-            goal_reach_eps=float(loss_cfg.get("goal_reach_eps", 1e-8)) if loss_cfg else 1e-8,
-            goal_timestep_weighting=str(
-                loss_cfg.get("goal_timestep_weighting", "alpha_bar")
-            )
-            if loss_cfg
-            else "alpha_bar",
-            goal_horizon_cap=(
-                int(loss_cfg.get("goal_horizon_cap"))
-                if loss_cfg and loss_cfg.get("goal_horizon_cap") is not None
-                else None
-            ),
-        )
+        self.weights = LossWeights.from_config(config)
         self.weights.validate()
         # km-based DTW 需要节点经纬度（可选文件）。训练期间也把它带上，这样
         # history.json 里的 val 指标与最终评测口径一致；加载失败就静默降级
@@ -209,6 +210,8 @@ class Trainer:
         total_goal = 0.0
         total_soft_goal = 0.0
         total_acc = 0.0
+        extra_total: Dict[str, float] = {}
+        extra_count: Dict[str, int] = {}
         start = time.time()
         for batch_index, samples in enumerate(batches):
             batch = collate_samples(samples, device=self.device)
@@ -248,6 +251,14 @@ class Trainer:
             total_goal += float(out.goal_loss.detach())
             total_soft_goal += float(out.soft_goal_mean)
             total_acc += out.final_accuracy
+            for metric_name in SAMPLED_NULL_METRICS:
+                metric_value = getattr(out, metric_name, None)
+                if metric_value is None or metric_value != metric_value:
+                    continue  # 该 loss_type 不产出这个字段
+                extra_total[metric_name] = (
+                    extra_total.get(metric_name, 0.0) + float(metric_value)
+                )
+                extra_count[metric_name] = extra_count.get(metric_name, 0) + 1
             if (batch_index + 1) % self.log_every == 0:
                 # 拆开的日志：只看总 loss 分不清是 CE 没学好还是 Goal reachability
                 # 没起来（第二轮修订第十二条）。
@@ -258,17 +269,34 @@ class Trainer:
                     f"goal={float(out.goal_loss.detach()):.4f} "
                     f"soft_goal={out.soft_goal_mean:.4f} "
                     f"x0_acc={out.final_accuracy:.3f} "
+                    f"act_acc={getattr(out, 'active_branch_acc', float('nan')):.3f} "
+                    f"gt_p={getattr(out, 'mean_gt_branch_prob', float('nan')):.3f} "
                     f"({time.time() - start:.1f}s)",
                     flush=True,
                 )
 
         batches_done = max(len(batches), 1)
+        # 统一加 train_ 前缀，和 train_loss / train_x0_acc 一致，也避免和
+        # 评测侧的指标名混淆
+        record = {
+            f"train_{key}": extra_total[key] / max(extra_count[key], 1)
+            for key in extra_total
+        }
         return {
+            **record,
             "train_loss": total_loss / batches_done,
             "train_ce_loss": total_ce / batches_done,
             "train_goal_loss": total_goal / batches_done,
             "train_soft_goal": total_soft_goal / batches_done,
-            "train_x0_acc": total_acc / batches_done,
+            # "对**全部** decision 等权"的 teacher-forced 准确率。
+            # 用 Path NLL + Sampled NULL 时它不是训练目标（模型只被监督 active +
+            # 采样到的 NULL），把它当 headline 会严重误读 —— 实测它会掉到 0.05，
+            # 而真正该看的 active_branch_acc 在同期从 0.37 涨到 0.54。
+            # 所以新目标下改名成 all_decision_acc（信息保留、语义显式），
+            # 并且不进主日志。
+            ("train_all_decision_acc" if self.weights.is_sampled_null else "train_x0_acc"): (
+                total_acc / batches_done
+            ),
             "train_seconds": time.time() - start,
         }
 
@@ -291,8 +319,13 @@ class Trainer:
             coordinates=self.coordinates,
         )
         metrics = dict(report.metrics)
-        metrics["val_x0_acc"] = report.debug.get("accuracy", float("nan"))
-        metrics["val_one_step_loss"] = report.debug.get("loss", float("nan"))
+        if self.weights.is_sampled_null:
+            # 同上：这两个是"全部 decision"口径的旧 debug 指标，改名后保留
+            metrics["val_all_decision_acc"] = report.debug.get("accuracy", float("nan"))
+            metrics["val_all_decision_ce"] = report.debug.get("loss", float("nan"))
+        else:
+            metrics["val_x0_acc"] = report.debug.get("accuracy", float("nan"))
+            metrics["val_one_step_loss"] = report.debug.get("loss", float("nan"))
         metrics["val_one_step_soft_goal"] = report.debug.get("soft_goal", float("nan"))
         if self.run_dir is not None:
             with open(self.run_dir / f"val_records_epoch{epoch}.json", "w", encoding="utf-8") as handle:
@@ -350,10 +383,16 @@ class Trainer:
         return self.history
 
     # ------------------------------------------------------------------
+    #: 不进主日志的字段（仍然完整写进 history.json）。
+    #: 这些是"对全部 decision 等权"的旧 debug 口径 —— 用 Path NLL + Sampled NULL 时
+    #: 模型只被监督 active + 采样到的 NULL，把它们当 headline 会误导。
+    LOG_HIDDEN = ("train_all_decision_acc", "val_all_decision_acc", "val_all_decision_ce")
+
     def _log(self, epoch: int, record: Dict[str, Any]) -> None:
         message = f"[epoch {epoch}] " + " ".join(
             f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
             for key, value in record.items()
+            if key not in self.LOG_HIDDEN
         )
         print(message, flush=True)
         if self.run_dir is not None:

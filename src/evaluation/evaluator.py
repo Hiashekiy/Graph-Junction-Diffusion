@@ -162,6 +162,7 @@ def evaluate_dataset(
     real_records: List[rpm.PathPairRecord] = []
     real_samples: List[Any] = []
     real_skipped = 0
+    missing_mapping = 0
     pred_paths: List[List[int]] = []
     gt_paths: List[List[int]] = []
     start_time = time.time()
@@ -240,6 +241,11 @@ def evaluate_dataset(
                 # 每个样本的 corridor 都被独立 relabel 成 0..N-1，直接混用局部编号
                 # 会把"样本 A 的边 (0,1)"和"样本 B 的边 (0,1)"当成同一条城市道路。
                 local_to_global = sample.meta.get("local_to_global")
+                if not local_to_global:
+                    # 缺反查表 -> to_global_path 会退化成恒等映射，KLEV/JSEV 会跑在
+                    # **局部编号空间**里（不同样本的 (0,1) 被当成同一条路），结果看着
+                    # 正常但完全错。宁可整段不报，也不能报错的数字。
+                    missing_mapping += 1
                 pred_global = rpm.to_global_path(list(result.path), local_to_global)
                 gt_global = rpm.to_global_path(list(sample.gt_path), local_to_global)
 
@@ -350,7 +356,19 @@ def evaluate_dataset(
     real_payload: Dict[str, Any] = {}
     if real_records:
         paired_metrics = rpm.aggregate_pair_records(real_records)
-        distribution = rpm.distribution_metrics(gt_paths, pred_paths)
+        if missing_mapping:
+            print(
+                f"[evaluator] WARNING: {missing_mapping} observed sample(s) have no "
+                "meta['local_to_global']. KLEV/JSEV can only be computed in the "
+                "GLOBAL OSM id space, so they are NOT reported for this run "
+                "(computing them on per-sample local ids would silently produce "
+                "meaningless numbers). Rebuild the dataset: "
+                "python scripts/prepare_didi.py --config <config> --build",
+                flush=True,
+            )
+            distribution: Dict[str, float] = {}
+        else:
+            distribution = rpm.distribution_metrics(gt_paths, pred_paths)
         real_payload = {
             "metrics": paired_metrics,
             "distribution": distribution,
@@ -358,7 +376,10 @@ def evaluate_dataset(
             "num_skipped_placeholder_gt": int(real_skipped),
             "gt_source": OBSERVED_GT_SOURCE,
             "dtw_enabled": bool(coordinates),
-            "distribution_node_space": "global_osm_id",
+            "distribution_node_space": (
+                "global_osm_id" if not missing_mapping else "INVALID_missing_local_to_global"
+            ),
+            "num_missing_local_to_global": int(missing_mapping),
             # 与 records 等长同序；没有观测 GT 的样本是 None，分桶时要跳过
             "records": _align_real_records(dataset, real_samples, real_records),
         }
@@ -369,8 +390,9 @@ def evaluate_dataset(
         metrics["pred_over_gt_cost_ratio"] = paired_metrics["pred_over_gt_cost_ratio"]
         metrics["dtw_km"] = paired_metrics["dtw_km"]
         metrics["dtw_km_success"] = paired_metrics["dtw_km_success"]
-        metrics["klev"] = distribution["klev"]
-        metrics["jsev"] = distribution["jsev"]
+        if distribution:
+            metrics["klev"] = distribution["klev"]
+            metrics["jsev"] = distribution["jsev"]
     elif real_skipped:
         # shuffled OD 集：GT 是 Dijkstra 占位，只报那些不需要真实 GT 的指标
         real_payload = {

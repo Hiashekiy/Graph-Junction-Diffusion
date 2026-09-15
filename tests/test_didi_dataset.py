@@ -765,6 +765,24 @@ def test_didi_config_declares_flow_steps_one():
     assert str(config.get("data.source")) == "didi_chengdu"
 
 
+def test_didi_config_loss_is_pure_ce_and_reaches_lossweights():
+    """soft goal 已关闭：LossWeights.from_config 必须给出 goal_reach_weight = 0。
+
+    ``from_config`` 是**唯一**的构造入口（Trainer / 基准脚本 / 工具都走它）。
+    之前基准脚本自己手写了一份 ``LossWeights()``（默认 goal_horizon_cap=None），
+    测出比真实训练慢 4~7 倍的数 —— 这条测试就是防止这种漂移再次发生。
+    """
+    from src.training.losses import LossWeights
+
+    config = load_config(str(DIDI_CONFIG))
+    weights = LossWeights.from_config(config)
+    assert weights.goal_reach_weight == 0.0
+    assert weights.x0_ce == 1.0
+    # 纯 CE：loss = x0_ce * CE + 0 * goal
+    assert weights.goal_reach_weight * 1.0 == 0.0
+    assert str(config.get("loss.goal_reach_weight")) in ("0.0", "0")
+
+
 def test_didi_config_flow_steps_reaches_the_model():
     pytest.importorskip("torch")
     from src.training.setup import build_model, model_kwargs

@@ -299,8 +299,13 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/g
 # 阶段 2：生成 train/val/test/test_1000/shuffled_od_1000（约 4 分钟，产出 ~1GB）
 E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --build
 
-# 自检（不需要 pytest / torch，20 条断言覆盖转换 / corridor / 指标 / 已生成数据集）
+# 自检（27 条断言：转换 / corridor / 指标 / 已生成数据集）
 E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+
+# 训练 / 评测 / 可视化：**完整命令见第 24.7 节**（含轻量探针、续训、三套评测、调参旋钮）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py --config configs/graph_flow_didi_weighted.yaml ^
+  --name didi_chengdu_flow1_weighted --data data/didi_chengdu_gjd/train.pkl ^
+  --val-data data/didi_chengdu_gjd/val.pkl --set training.batch_size=8 --set training.epochs=25
 ```
 
 **测试与静态检查**
@@ -1981,54 +1986,168 @@ JSON 结构与字段名一个字节都没改**）：
 * `buckets.length_buckets`（按 GT 长度等量三分）、`buckets.decision_buckets`
   （按 `num_decisions` 分 1-3 / 4-6 / 7-9 / >=10）。
 
-### 24.7 训练与评测
+### 24.7 训练与评测（全部命令）
 
-```bash
-# 正式训练（flow_steps=1、T=50、batch 16、AdamW lr 1e-4、AMP，100 epoch）
-python scripts/train.py --config configs/graph_flow_didi_weighted.yaml \
-  --name didi_chengdu_flow1_weighted \
-  --data data/didi_chengdu_gjd/train.pkl --val-data data/didi_chengdu_gjd/val.pkl
+解释器固定用 **`E:/CondaEnvData/envs/GGMPC/python.exe`**（torch 2.9.1+cu126 / CUDA / pytest）。
+下面命令按 **Windows cmd** 写（`^` 续行）；在 Git Bash 里把 `^` 换成 `\`。
 
-# 完整 test + Dijkstra baseline
-python scripts/evaluate.py --config configs/graph_flow_didi_weighted.yaml \
-  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt \
-  --data data/didi_chengdu_gjd/test.pkl --deterministic --baselines \
+**当前训练目标**（`configs/graph_flow_didi_weighted.yaml` 的 `loss.type`）：
+
+```text
+L = L_path + 0.3 * L_null                                       # 纯 CE + 采样 NULL
+    L_path = -(1/N_A) * sum_{i in active}  log p_i(b_i^GT)
+    L_null = -(1/K)   * sum_{j in S_N}     log p_j(NULL)
+    K_b    = min(N_N, ceil(2 * N_A), 64)                        # 每条轨迹自适应
+```
+
+Soft goal 已关闭（`goal_reach_weight: 0.0`）。开跑前会打印一行自证：
+
+```text
+objective   : loss=path_nll+0.3*sampled_null [ratio=2.0, max=64]
+```
+
+#### 阶段 0 · 前置验证（约 30 秒，不需要 GPU）
+
+```cmd
+E:/CondaEnvData/envs/GGMPC/python.exe -m pytest tests -q
+E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+```
+
+期望：`415 passed` + `all 27 unit checks passed`。
+
+#### 阶段 1 · 轻量探针（约 5 分钟）—— **上全量之前必做**
+
+先造一份小数据集（复用已缓存的候选池，约 1 分钟），再训 5 epoch：
+
+```cmd
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py ^
+  --config configs/graph_flow_didi_weighted.yaml ^
+  --build --max-samples 600 --out-dir data/didi_probe
+
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
+  --config configs/graph_flow_didi_weighted.yaml ^
+  --name didi_probe5 ^
+  --data data/didi_probe/train.pkl ^
+  --val-data data/didi_probe/val.pkl ^
+  --set diffusion.T=20 --set training.batch_size=8 --set training.epochs=5 ^
+  --set training.eval_every=1 --set training.log_every=20 ^
+  --set evaluation.batch_size=8
+```
+
+`--max-samples N` 控制的是**最终抽多少条候选**（不是 `--max-rows-per-file`）。
+600 条 → train 348 / val 40 / test 96。
+
+**注意**：`local_to_global` 是 2026-09-15 那次修复才加进样本 meta 的。在那之前的
+小数据集（例如残留的 `data/didi_chengdu_smoke/`）**没有**它，拿它训练会得到错的
+KLEV/JSEV 和 NaN 的 DTW，而且只打一行 warning 不报错。用当前代码重新 `--build`
+一份即可（自检脚本会断言这个字段存在）。
+
+#### 阶段 2 · 正式训练
+
+```cmd
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
+  --config configs/graph_flow_didi_weighted.yaml ^
+  --name didi_chengdu_flow1_weighted ^
+  --data data/didi_chengdu_gjd/train.pkl ^
+  --val-data data/didi_chengdu_gjd/val.pkl ^
+  --set training.batch_size=8 --set training.epochs=25
+```
+
+先只跑 25 epoch 看趋势，再决定续不续（`--extra-epochs` = 在已跑轮数之上再加多少）：
+
+```cmd
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/train.py ^
+  --config configs/graph_flow_didi_weighted.yaml ^
+  --name didi_chengdu_flow1_weighted ^
+  --data data/didi_chengdu_gjd/train.pkl ^
+  --val-data data/didi_chengdu_gjd/val.pkl ^
+  --resume outputs/runs/didi_chengdu_flow1_weighted/last.pt --extra-epochs 25
+```
+
+#### 阶段 3 · 评测
+
+```cmd
+REM 完整 test + Dijkstra baseline
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
+  --config configs/graph_flow_didi_weighted.yaml ^
+  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt ^
+  --data data/didi_chengdu_gjd/test.pkl --deterministic --baselines ^
   --out outputs/runs/didi_chengdu_flow1_weighted/eval_test.json
 
-# GDP 风格主表
-python scripts/evaluate.py ... --data data/didi_chengdu_gjd/test_1000.pkl
+REM GDP 风格主表（固定 1000 条）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
+  --config configs/graph_flow_didi_weighted.yaml ^
+  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt ^
+  --data data/didi_chengdu_gjd/test_1000.pkl --deterministic --baselines ^
+  --out outputs/runs/didi_chengdu_flow1_weighted/eval_test_1000.json
 
-# shuffled OD（自动跳过相似度指标，只报 GoalHit/Loop/Broken/CostRatio/时间）
-python scripts/evaluate.py ... --data data/didi_chengdu_gjd/shuffled_od_1000.pkl
-
-# 最干净的消融：同一份数据、同一网络、只切 model.use_edge_cost true/false
-python scripts/train.py --config configs/graph_flow_didi_weighted.yaml \
-  --name didi_chengdu_flow1_noedgecost --set model.use_edge_cost=false ...
+REM shuffled OD（无真实 GT，会自动跳过相似度指标）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
+  --config configs/graph_flow_didi_weighted.yaml ^
+  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt ^
+  --data data/didi_chengdu_gjd/shuffled_od_1000.pkl --deterministic ^
+  --out outputs/runs/didi_chengdu_flow1_weighted/eval_shuffled.json
 ```
 
-配置里三处与 synthetic 不同的关键项：`split.split_by_graph: false`（真实数据是
-**一张固定城市图**，必须按 path 划分）、`flow_steps: 1`（推理必须与训练同轮数）、
-`training.selection_metric: path_similarity_score`（`GoalHit` 在真实数据上会较早
-饱和，而路径相似度还在改善）。**loss 第一版没有改**：仍然是
-`L = CE + 0.1 * SoftGoal` —— 真实 GT 是司机选择而不是最优解，直接加 cost loss 会把
-模型拉回"只追最短路"，改变研究任务本身。
+#### 阶段 4 · 可视化
 
-OOM 时按 `16 -> 8 -> 4` 降 batch，**不要**先降模型维度。
+```cmd
+REM 预测路径 vs GT（普通拓扑布局）
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py ^
+  --run outputs/runs/didi_chengdu_flow1_weighted ^
+  --data data/didi_chengdu_gjd/test_1000.pkl --select random --num 16 ^
+  --out outputs/figures/didi_flow1_pred.png
 
-**先做小规模验证再上全量**（方案第 14 节阶段 3/4）。用 `--max-samples` 造小数据集，
-它控制的是"最终抽多少条候选"，不要用 `--max-rows-per-file` 去凑：
-
-```bash
-# 阶段 3：smoke test（约 1 分钟出数据）—— train ~580 / val ~80 / test ~150
-python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml \
-  --build --max-samples 1000 --out-dir data/didi_chengdu_smoke
-
-# 阶段 4：小样本 overfit（32~64 条，反复训到 x0 acc 接近 1、PathSim 明显升高）
-python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml \
-  --build --max-samples 220 --out-dir data/didi_chengdu_overfit
+REM 数据集本身（真实经纬度底图）
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_didi_samples.py --per-split 3
 ```
 
-真实小样本都过拟合不了，**不要**直接跑全量。
+#### 时间预算（实测，不是估算）
+
+| 配置 | 实测 | 全量 4678 条 / epoch |
+|---|---:|---:|
+| T=20 / batch 8 / 348 条 | 0.93 s/batch | — |
+| T=50 / batch 8 / 4678 条 | **2.14 s/batch**（585 batch） | **约 21 分钟** |
+
+单步耗时**近似正比于 T**。100 epoch ≈ 35 小时；25 epoch ≈ 9 小时。
+显存只用了 **0.09 / 12.9 GB**，所以 batch 往上开是纯赚（chain 对 batch 不敏感）。
+
+#### 看什么（**不要**看 `train_x0_acc`）
+
+用 Path NLL + Sampled NULL 时，日志里那一堆 `*_all_decision_acc` / `val_all_decision_acc`
+算的是"对**全部** decision 等权"的准确率 —— 里面 93.6% 是没被监督的 NULL，
+拿它当 headline 会严重误读（实测它掉到 0.05，而同期 `active_branch_acc` 从 0.37 涨到 0.54）。
+这些字段仍然写进 `history.json`，但已被 `Trainer.LOG_HIDDEN` 挡在主日志之外。
+
+主日志里该看的是：
+
+| 指标 | 含义 | 健康方向 |
+|---|---|---|
+| `train_active_branch_acc` | **真实 branch 选对的比例**（最重要） | ↑ |
+| `train_mean_gt_branch_prob` | 模型给 GT branch 的平均概率 | ↑ |
+| `train_path_nll` | 主监督项 | ↓ |
+| `train_pred_active_rate` | 模型预测 active 的比例（监督比例约 0.34） | 靠近 0.34 |
+| `train_sampled_null_acc` / `train_mean_sampled_null_prob` | 采样 NULL 侧的能力 | 不塌到 0 |
+| `train_mean_num_active` / `train_mean_num_sampled_null` | 自证采样比例 ≈ 1:2 | — |
+
+评测侧（`evaluate.py` 打印）：`PathSim` / `nLCS(success)` / `EdgeF1` / `CostRatio` /
+`Pred÷GT` / **`DTW(km)`** / `KLEV` / `JSEV` / `buckets`。
+
+> ⚠️ **KLEV 现在不能用来比较模型**：它主要由 `log(1/eps)` 决定（`eps=1e-12` 时同一组
+> 分布换 eps 到 0.1 会让 KLEV 从 23.25 掉到 0.29），实测 5 个 epoch 都停在 24.0 左右。
+> 主指标请用 **JSEV**（有界、稳定），KLEV 放附录并注明 eps 口径。详见 24.12。
+
+#### 调参旋钮（**单变量**，一次只动一个）
+
+| 旋钮 | 默认 | 什么时候动 |
+|---|---|---|
+| `loss.null_loss_weight` | `0.3` | `train_pred_active_rate` 明显高于 0.34、`loop_rate` 高 → 继续加到 0.4 |
+| `loss.null_sampling.ratio` | `2.0` | 想扩大 NULL 覆盖、降低梯度方差。**它不改变 L_null 的量级**（L_null 是 mean），所以调平衡只能调 λ |
+| `diffusion.T` | `50` | 只是嫌慢 → 降到 20（近似线性省时间），比降 `d_model` 划算 |
+| `training.batch_size` | `8` | 显存远没满，可以继续加到 16 |
+| `model.use_edge_cost` | `true` | 消融对照：`--set model.use_edge_cost=false`（同一份数据、同一网络，唯一变量是 cost 能不能进网络） |
+
+OOM 时按 `8 -> 4 -> 2` 降 batch，**不要**先降模型维度。
 
 ### 24.8 新增 / 修改的文件
 
@@ -2250,3 +2369,104 @@ KLEV / JSEV。`evaluate.py` 的 JSON 里 `real_path_metrics.distribution_node_sp
 
 idx 7 最典型：两条路**跳数完全一样、没有一条边重合**（Edge F1 = 0），但几何上
 平均只差 0.53 km —— 这正是 DTW 要补的那块信息。
+
+### 24.13 第三轮：训练目标换成 Path NLL + Sampled NULL（解决 NULL collapse）
+
+#### 问题：旧 CE 的平凡最优解就是"全押 NULL"
+
+旧目标对**每个 decision 等权平均**，而真实 corridor 里 **93.6% 的 decision 标签是 NULL**。
+实测（348 条 / T=20 / batch 8 / 5 epoch）模型从 epoch 2 起完全卡死：
+
+| epoch | `train_x0_acc` | `train_loss` | `goal_hit` | `mean_path_nodes` |
+|---:|---:|---:|---:|---:|
+| 1 | 0.9130 | 0.4818 | 0.000 | 2.08 |
+| 2 | 0.9336 | 0.3092 | 0.000 | 2.08 |
+| 3 | 0.9340 | 0.3005 | 0.000 | 2.05 |
+| 4 | 0.9338 | 0.2956 | 0.000 | 2.10 |
+| 5 | 0.9333 | 0.2979 | 0.000 | 2.05 |
+
+`x0_acc` 精确压在 **NULL 占比 0.936** 上，解码出来的路径只有 `[start, X]` 两个节点。
+手算可以证明这就是 CE 的全局最优平凡解：设模型给 NULL 概率 `q`、给 K≈4 条 branch
+均分 `(1-q)/K`，则
+
+```text
+L(q) = 0.936 * (-ln q) + 0.064 * ln(K / (1-q))
+       q=0.8 -> 0.312      q=0.9 -> 0.334      q=0.99 -> 0.393
+```
+
+最小值 ≈ 0.30 落在 `q ≈ 0.8~0.85`，与实测 `train_loss = 0.298` 完全吻合。
+
+#### 改法
+
+```text
+L = L_path + lambda_null * L_null                          lambda_null = 0.3
+    L_path = -(1/N_A) * sum_{i in active} log p_i(b_i^GT)
+    L_null = -(1/K)   * sum_{j in S_N}    log p_j(NULL)
+    K_b    = min(N_N^{(b)}, ceil(2 * N_A^{(b)}), 64)        # 每条轨迹自适应
+```
+
+四条硬约束（都有单测钉住，见 `tests/test_sampled_null_loss.py`）：
+
+1. **平均顺序是 decision 内 → sample 内 → batch**。把所有 decision 混在一起 mean 会让
+   30 个 active 的样本比 8 个的贡献大 3.75 倍，每条真实轨迹应当等权。
+2. **NULL 只采样不固定**：`K = min(N_N, ceil(2 N_A), 64)`，`active:null ≈ 1:2`
+   （原来 1:14.6），每个 batch 重新随机采、整条 reverse chain 复用同一批。
+3. **纯随机采样，不做 hard negative mining** —— 先回答"降 NULL 冗余本身能不能解决
+   collapse"，混入 hard negative 就没法归因。
+4. **`K` 不改变 `L_null` 的量级**（它是 mean），所以调平衡只能调 `lambda_null`，
+   不能调 `ratio`；`ratio` 只影响覆盖范围与梯度方差。
+
+`loss.type = "ce"` 时行为与改动前逐位一致（默认值），旧实验不受影响。
+GT active 全参与、NULL 候选 / decision field / categorical diffusion / decoder **一律未动**。
+
+#### 对照结果（同配置、只换 loss）
+
+| epoch | `path_nll` | **`active_branch_acc`** | `mean_gt_branch_prob` | `pred_active_rate` | **`goal_hit`** | `loop` | `broken` | `path_nodes` | `edge_f1` | `DTW(km)` |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1.3490 | 0.3721 | 0.271 | 0.755 | 0.000 | 0.90 | 0.10 | 4.70 | 0.0578 | 1.239 |
+| 2 | 1.2276 | 0.4393 | 0.319 | 0.696 | 0.075 | 0.75 | 0.17 | 6.42 | 0.1057 | 1.095 |
+| 3 | 1.1664 | 0.4807 | 0.346 | 0.673 | 0.075 | 0.62 | 0.30 | 7.95 | 0.0794 | 1.052 |
+| 4 | 1.1070 | 0.5160 | 0.370 | 0.640 | 0.050 | 0.80 | 0.15 | 7.17 | 0.1054 | 1.040 |
+| 5 | **1.0578** | **0.5363** | **0.394** | 0.609 | **0.175** | 0.65 | 0.17 | **10.20** | **0.1121** | **0.922** |
+
+**每一项都在单调改善** —— 这是"学起来了"和"收敛到平凡解"的本质区别。
+实测监督比例 `22.1 active : 42.8 null = 1 : 1.93`，与设计值一致。
+
+#### 新增日志（9 个）
+
+```text
+train_path_nll                 train_mean_gt_branch_prob
+train_sampled_null_loss        train_sampled_null_acc
+train_active_branch_acc        train_mean_sampled_null_prob
+train_pred_active_rate         train_mean_num_active
+                               train_mean_num_sampled_null
+```
+
+最重要是 **`train_active_branch_acc`** 和 **`train_mean_gt_branch_prob`** ——
+它们直接回答"真实路径有没有在被学会"。
+
+#### `train_x0_acc` / `val_x0_acc` 在本次改动中被改名并移出主日志
+
+这两个（以及 `val_one_step_loss`）算的是"对**全部** decision 等权"的准确率，
+里面 93.6% 是**没被监督**的 NULL。新目标下它会掉到 0.05，而同期
+`active_branch_acc` 从 0.37 涨到 0.54 —— 拿它当 headline 会严重误读。
+
+处理方式：
+
+* 改名成 `train_all_decision_acc` / `val_all_decision_acc` / `val_all_decision_ce`
+  （信息保留、语义写进名字）；
+* 加进 `Trainer.LOG_HIDDEN`，**不打印**但完整写进 `history.json`；
+* `src/evaluation/history.py` 的 `CURVE_KEYS` 补上 9 个新指标，否则 DiDi 的 run
+  在曲线工具里会什么都画不出来；
+* `loss.type == "ce"` 时键名**一个都没变**。
+
+`tools/collect_run.py`（用 `.get()`）与 `tools/final_report.py`（用 `in` 判断）
+已确认对缺 key 安全。
+
+#### 首次采用 `lambda_null = 0.3` 的原因
+
+5 epoch 探针里 `pred_active_rate` 收敛到 **0.609**，而监督比例只有约 **0.34** ——
+模型仍然**过度激活**，表现为 `loop_rate` 0.62~0.90。所以把 `lambda_null` 从 0.2 提到
+0.3（方案第 11 节的"错误激活多就把 0.2 → 0.3"）。**没有动 `ratio`**，理由见上面第 4 条。
+
+若之后仍见 `pred_active_rate` 偏高 + `loop_rate` 高，再单变量升到 0.4。

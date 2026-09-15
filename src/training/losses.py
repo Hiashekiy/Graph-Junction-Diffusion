@@ -46,16 +46,35 @@ from torch import Tensor
 from src.diffusion.categorical import CategoricalDiffusion
 from src.models.denoiser import GraphFlowDenoiser
 from src.training.soft_goal import soft_goal_loss, soft_goal_reachability
+from src.utils.segment_ops import segment_sum
 
 _EPS = 1e-12
 
 # goal loss 的 timestep 加权方式
 GOAL_TIMESTEP_WEIGHTINGS = ("alpha_bar", "uniform")
 
+#: 训练目标类型
+#:   "ce"                     —— 旧的纯 clean-state CE（对**全部** decision 平均）
+#:   "path_nll_sampled_null"  —— Path NLL + 采样 NULL 辅助损失（DiDi 主目标）
+LOSS_TYPES = ("ce", "path_nll_sampled_null")
+PATH_NLL_SAMPLED_NULL = "path_nll_sampled_null"
+
 
 # ---------------------------------------------------------------------------
 # loss definition
 # ---------------------------------------------------------------------------
+def _sampling_value(section, key: str, default):
+    """读 ``loss.null_sampling.<key>``；整个子节缺失时返回 default。"""
+    sub = section.get("null_sampling", None)
+    if sub is None:
+        return default
+    return sub.get(key, default)
+
+
+def _sampling_flag(section, key: str, default: bool) -> bool:
+    return bool(_sampling_value(section, key, default))
+
+
 @dataclass
 class LossWeights:
     """clean-state CE + Soft Goal Reachability 的权重（第二轮修订 B 项）。
@@ -76,6 +95,74 @@ class LossWeights:
     # 只在"路口数 > 上限"的图上改变数值；对 controlled 数据（≤10）完全无影响。
     goal_horizon_cap: Optional[int] = None
 
+    # ---- Path NLL + Sampled NULL（DiDi 主训练目标）-------------------------
+    #
+    # 为什么需要：真实 corridor 里 ~93.6% 的 decision 标签是 NULL，而旧 CE 对
+    # **每个 decision 等权平均**，于是"全押 NULL"就是 CE 的最优平凡解 —— 实测模型
+    # 5 个 epoch 就卡在 x0_acc = 0.933 ≈ NULL 占比，loss 不再下降。
+    #
+    # 新目标把两者分开、各自在样本内求 mean 再在 batch 上求 mean：
+    #
+    #     L = L_path + lambda_null * L_null
+    #
+    #     L_path = -1/N_A * sum_{i in active} log p_i(b_i^GT)
+    #     L_null = -1/K    * sum_{j in S_N}    log p_j(NULL)
+    #
+    # NULL 不再全量监督，而是每条轨迹随机采样
+    #     K = min(N_N, ceil(ratio * N_A), max_per_sample)
+    # （ratio=2、max=64 时 active:null ≈ 1:2，而不是 1:14.6），且每个 batch 重新采。
+    loss_type: str = "ce"
+    null_sampling_enabled: bool = True
+    null_sampling_ratio: float = 2.0
+    null_sampling_max: int = 64
+    null_loss_weight: float = 0.2
+
+    def describe(self) -> str:
+        if not self.is_sampled_null:
+            return f"loss=ce(null_w={self.null_weight}, active_w={self.active_weight})"
+        sampling = (
+            f"ratio={self.null_sampling_ratio}, max={self.null_sampling_max}"
+            if self.null_sampling_enabled
+            else "disabled(full NULL)"
+        )
+        return (
+            f"loss=path_nll+{self.null_loss_weight}*sampled_null "
+            f"[{sampling}]"
+        )
+
+    @classmethod
+    def from_config(cls, config) -> "LossWeights":
+        """从 ``config.loss`` 构造。
+
+        **唯一**的构造入口：Trainer、基准脚本、工具都走这里，不要再各自手写一遍 ——
+        之前基准脚本用 ``LossWeights()`` 默认值（``goal_horizon_cap=None``）测出
+        比真实训练慢 4~7 倍的数，就是因为手写副本和配置漂移了。
+        """
+        section = config.section("loss") if config is not None else None
+        if not section:
+            return cls()
+        horizon = section.get("goal_horizon_cap")
+        return cls(
+            x0_ce=float(section.get("x0_ce", 1.0)),
+            null_weight=float(section.get("null_weight", 1.0)),
+            active_weight=float(section.get("active_weight", 1.0)),
+            goal_reach_weight=float(section.get("goal_reach_weight", 0.1)),
+            goal_reach_eps=float(section.get("goal_reach_eps", 1e-8)),
+            goal_timestep_weighting=str(
+                section.get("goal_timestep_weighting", "alpha_bar")
+            ),
+            goal_horizon_cap=int(horizon) if horizon is not None else None,
+            loss_type=str(section.get("type", "ce")),
+            null_sampling_enabled=_sampling_flag(section, "enabled", True),
+            null_sampling_ratio=float(_sampling_value(section, "ratio", 2.0)),
+            null_sampling_max=int(_sampling_value(section, "max_per_sample", 64)),
+            null_loss_weight=float(section.get("null_loss_weight", 0.2)),
+        )
+
+    @property
+    def is_sampled_null(self) -> bool:
+        return self.loss_type == PATH_NLL_SAMPLED_NULL
+
     def validate(self) -> None:
         if self.goal_timestep_weighting not in GOAL_TIMESTEP_WEIGHTINGS:
             raise ValueError(
@@ -85,6 +172,24 @@ class LossWeights:
         if self.goal_horizon_cap is not None and int(self.goal_horizon_cap) < 1:
             raise ValueError(
                 f"loss.goal_horizon_cap must be >= 1 or None, got {self.goal_horizon_cap}"
+            )
+        if self.loss_type not in LOSS_TYPES:
+            raise ValueError(
+                f"loss.type={self.loss_type!r} is not supported "
+                f"(choose one of {LOSS_TYPES})"
+            )
+        if self.null_sampling_ratio <= 0:
+            raise ValueError(
+                f"loss.null_sampling.ratio must be > 0, got {self.null_sampling_ratio}"
+            )
+        if int(self.null_sampling_max) < 1:
+            raise ValueError(
+                f"loss.null_sampling.max_per_sample must be >= 1, got "
+                f"{self.null_sampling_max}"
+            )
+        if self.null_loss_weight < 0:
+            raise ValueError(
+                f"loss.null_loss_weight must be >= 0, got {self.null_loss_weight}"
             )
 
 
@@ -175,6 +280,145 @@ def _group_positions(candidate_owner: Tensor, sizes: Tensor) -> Tensor:
     ) - starts[candidate_owner]
 
 
+def sample_null_decisions(
+    is_null_target: Tensor,
+    decision_graph_id: Tensor,
+    num_graphs: int,
+    ratio: float = 2.0,
+    max_per_sample: int = 64,
+    enabled: bool = True,
+    generator: Optional[torch.Generator] = None,
+) -> Dict[str, Tensor]:
+    """为每张图**随机**采样要监督的 NULL decision。
+
+        K_b = min(N_N^{(b)}, ceil(ratio * N_A^{(b)}), max_per_sample)
+
+    设计要点（见《Path NLL + Sampled NULL》方案）：
+
+    * **不固定条数**，跟每条轨迹的 active decision 数自适应。实测 DiDi 的
+      ``N_A : N_N ≈ 1 : 14.6``，直接全量监督会让 NULL 主导梯度、模型收敛到
+      "全押 NULL"（CE 的平凡最优解）。
+    * ``max_per_sample`` 防止超长路径采太多。
+    * 纯随机采样（``torch.rand`` + topk 取最小的 K 个），**第一版不做 hard negative
+      mining** —— 先要回答"降 NULL 冗余本身能不能解决 collapse"，混入 hard
+      negative 会没法归因。
+    * 每个 batch 调用一次、在整条 reverse chain 上复用同一批 NULL（方案第 5、9 节
+      的公式里 ``S_b`` 没有 timestep 下标）。下一个 batch 会重新采，所以多个 epoch
+      下来覆盖的 off-path junction 仍然很广（低冗余 + 长期广覆盖）。
+
+    Returns:
+        ``{"selected": [M] bool, "num_active": [B], "num_null": [B],
+        "num_selected": [B]}``
+    """
+    device = is_null_target.device
+    num_decisions = int(is_null_target.numel())
+    is_active = ~is_null_target
+
+    num_active = segment_sum(
+        is_active.to(torch.float32), decision_graph_id, int(num_graphs)
+    )
+    num_null = segment_sum(
+        is_null_target.to(torch.float32), decision_graph_id, int(num_graphs)
+    )
+    if enabled:
+        quota = torch.clamp(
+            torch.ceil(num_active * float(ratio)), max=float(max_per_sample)
+        )
+        quota = torch.minimum(quota, num_null)
+    else:
+        # 关掉采样 = 退回"全量监督 NULL"（就是会 collapse 的那个口径），
+        # 只作为消融对照用。
+        quota = num_null.clone()
+    quota = quota.to(torch.long)
+
+    selected = torch.zeros(num_decisions, dtype=torch.bool, device=device)
+    if num_decisions and int(quota.sum().item()) > 0:
+        # 随机键在 CPU 上取（Trainer 传的是 CPU generator），再搬到张量设备，
+        # 这样不管模型在 CPU 还是 CUDA 上行为一致。
+        keys = torch.rand(num_decisions, generator=generator)
+        keys = torch.where(is_null_target.detach().cpu(), keys, torch.ones_like(keys))
+        keys = keys.to(device)
+        for graph_index in range(int(num_graphs)):
+            k = int(quota[graph_index].item())
+            if k <= 0:
+                continue
+            candidates = (decision_graph_id == graph_index) & is_null_target
+            index = candidates.nonzero(as_tuple=False).squeeze(1)
+            if index.numel() == 0 or k > int(index.numel()):
+                continue
+            order = torch.topk(keys[index], k, largest=False).indices
+            selected[index[order]] = True
+
+    return {
+        "selected": selected,
+        "num_active": num_active,
+        "num_null": num_null,
+        "num_selected": quota.to(torch.float32),
+    }
+
+
+def path_nll_sampled_null_loss(
+    candidate_log_prob: Tensor,
+    candidate_prob: Tensor,
+    target_candidate: Tensor,
+    candidate_owner: Tensor,
+    candidate_is_null: Tensor,
+    decision_graph_id: Tensor,
+    num_decisions: int,
+    num_graphs: int,
+    weights: LossWeights,
+    sampling: Dict[str, Tensor],
+) -> tuple[Tensor, Tensor, Tensor, Dict[str, Tensor]]:
+    """``L = L_path + lambda_null * L_null``；返回 ``(total, path, null, metrics)``。
+
+    平均顺序是 **decision 内 -> sample 内 -> batch**：
+
+        L_path = mean_b [ (1/N_A^{(b)}) * sum_{i in A_b} -log p_i(b_i^GT) ]
+        L_null = mean_b [ (1/K_b)     * sum_{j in S_b} -log p_j(NULL) ]
+
+    直接把所有 decision 丢一起求 mean 会让**长轨迹拿到更高权重**（30 个 active 的
+    样本比 8 个的贡献大 3.75 倍），这不是我们想要的 —— 每条真实轨迹应当等权。
+    没有 active / 没有采到 NULL 的样本会被排除在对应均值之外。
+    """
+    selected = sampling["selected"]
+    is_active = ~candidate_is_null[target_candidate]
+    log_prob = candidate_log_prob[target_candidate]
+    prob = candidate_prob[target_candidate]
+    nll = -log_prob
+
+    def per_sample_mean(values: Tensor, mask: Tensor) -> Tensor:
+        mask_f = mask.to(values.dtype)
+        total = segment_sum(values * mask_f, decision_graph_id, int(num_graphs))
+        count = segment_sum(mask_f, decision_graph_id, int(num_graphs))
+        valid = (count > 0).to(values.dtype)
+        mean = total / count.clamp_min(1.0)
+        return (mean * valid).sum() / valid.sum().clamp_min(1.0)
+
+    path_nll = per_sample_mean(nll, is_active)
+    null_nll = per_sample_mean(nll, selected)
+    total = path_nll + float(weights.null_loss_weight) * null_nll
+
+    def masked_mean(values: Tensor, mask: Tensor) -> Tensor:
+        mask_f = mask.to(values.dtype)
+        return (values * mask_f).sum() / mask_f.sum().clamp_min(1.0)
+
+    # 指标只看数，不建图：argmax 走的 topk 不需要梯度
+    predicted = grouped_argmax(
+        candidate_log_prob.detach(), candidate_owner, int(num_decisions)
+    )
+    correct = (predicted == target_candidate).to(torch.float32)
+    metrics = {
+        "active_branch_acc": masked_mean(correct, is_active),
+        "mean_gt_branch_prob": masked_mean(prob.detach(), is_active),
+        "sampled_null_acc": masked_mean(correct, selected),
+        "mean_sampled_null_prob": masked_mean(prob.detach(), selected),
+        "pred_active_rate": (~candidate_is_null[predicted]).to(torch.float32).mean(),
+        "mean_num_active": sampling["num_active"].mean(),
+        "mean_num_sampled_null": sampling["num_selected"].mean(),
+    }
+    return total, path_nll, null_nll, metrics
+
+
 def accuracy(
     candidate_log_prob: Tensor,
     target_candidate: Tensor,
@@ -220,6 +464,16 @@ class RecurrentLossOutput:
     per_step_accuracy: List[float] = field(default_factory=list)
     final_log_prob: Optional[Tensor] = None
     final_accuracy: float = 0.0
+    # ---- Path NLL + Sampled NULL 的拆分日志（loss_type="ce" 时全是 NaN）----
+    path_nll: float = float("nan")
+    sampled_null_loss: float = float("nan")
+    active_branch_acc: float = float("nan")
+    mean_gt_branch_prob: float = float("nan")
+    sampled_null_acc: float = float("nan")
+    mean_sampled_null_prob: float = float("nan")
+    pred_active_rate: float = float("nan")
+    mean_num_active: float = float("nan")
+    mean_num_sampled_null: float = float("nan")
 
 
 def goal_timestep_weight(diffusion: CategoricalDiffusion, t: int, mode: str) -> float:
@@ -274,6 +528,23 @@ def recurrent_reverse_loss(
     # 2) 只初始化一次
     H_t = model.init_nodes(batch)
 
+    # Path NLL + Sampled NULL：每个 batch 采一次，整条 reverse chain 复用同一批
+    # NULL（方案第 9 节的 S_b 没有 timestep 下标）。下个 batch 会重新采。
+    sampling = None
+    if weights.is_sampled_null:
+        sampling = sample_null_decisions(
+            batch.candidate_is_null[batch.target_candidate],
+            batch.decision_graph_id,
+            int(batch.num_graphs),
+            ratio=weights.null_sampling_ratio,
+            max_per_sample=weights.null_sampling_max,
+            enabled=weights.null_sampling_enabled,
+            generator=generator,
+        )
+
+    path_nlls: List[float] = []
+    null_nlls: List[float] = []
+    metric_accum: Dict[str, List[float]] = {}
     ce_losses: List[Tensor] = []
     goal_losses: List[Tensor] = []
     goal_weights: List[float] = []
@@ -289,14 +560,34 @@ def recurrent_reverse_loss(
         z_t = z_path[t]
 
         out = model.step(batch, H_t, z_t, t)
-        step_loss = clean_state_loss(
-            out.candidate_log_prob,
-            batch.target_candidate,
-            batch.candidate_owner,
-            batch.candidate_is_null,
-            batch.num_decisions,
-            weights,
-        )
+        if sampling is not None:
+            step_loss, step_path, step_null, step_metrics = path_nll_sampled_null_loss(
+                out.candidate_log_prob,
+                out.candidate_prob,
+                batch.target_candidate,
+                batch.candidate_owner,
+                batch.candidate_is_null,
+                batch.decision_graph_id,
+                batch.num_decisions,
+                batch.num_graphs,
+                weights,
+                sampling,
+            )
+            path_nlls.append(float(step_path.detach()))
+            null_nlls.append(float(step_null.detach()))
+            for metric_key, metric_value in step_metrics.items():
+                metric_accum.setdefault(metric_key, []).append(
+                    float(metric_value.detach())
+                )
+        else:
+            step_loss = clean_state_loss(
+                out.candidate_log_prob,
+                batch.target_candidate,
+                batch.candidate_owner,
+                batch.candidate_is_null,
+                batch.num_decisions,
+                weights,
+            )
         ce_losses.append(step_loss)
 
         # Soft Goal Reachability（可微代理指标，直接吃 grouped softmax 概率）
@@ -366,6 +657,9 @@ def recurrent_reverse_loss(
         if final_log_prob is not None
         else 0.0
     )
+    def _mean_or_nan(values: List[float]) -> float:
+        return float(sum(values) / len(values)) if values else float("nan")
+
     return RecurrentLossOutput(
         loss=loss,
         ce_loss=ce_loss,
@@ -377,6 +671,12 @@ def recurrent_reverse_loss(
         per_step_accuracy=step_accuracies,
         final_log_prob=final_log_prob,
         final_accuracy=final_accuracy,
+        path_nll=_mean_or_nan(path_nlls),
+        sampled_null_loss=_mean_or_nan(null_nlls),
+        **{
+            key: _mean_or_nan(values)
+            for key, values in metric_accum.items()
+        },
     )
 
 

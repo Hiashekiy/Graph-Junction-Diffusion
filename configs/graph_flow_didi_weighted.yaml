@@ -12,9 +12,15 @@
 #   3. model.flow_steps: 1         -> 真实 corridor 图明显更大，先用 1 控制训练时间；
 #      注意推理必须与训练同轮数，**不能**训练 1 轮、推理 3 轮
 #
-# loss 第一版**不改**：仍然是 L = CE + 0.1 * SoftGoal。
-# 真实 GT 是司机的历史选择而不是最优解，直接加 cost-minimization loss 会把模型
-# 拉回"只追最短路"，改变研究任务本身（方案第 11 节）。
+# loss 第三版（当前）：L = L_path + 0.3 * L_null，即 Path NLL + 下采样 NULL。
+# 第一版的 L = CE + 0.1 * SoftGoal 已废弃：真实 corridor 里 93.6% 的 decision
+# 标签是 NULL，而旧 CE 对每个 decision 等权平均，"全押 NULL"就是它的平凡最优解
+# （实测 5 epoch 就卡死在 x0_acc = 0.933 ≈ NULL 占比、goal_hit 恒为 0）。
+# 详见 README §24.13；soft goal 已整段关闭（goal_reach_weight: 0.0）。
+#
+# 仍然**没有**引入 cost-minimization loss：真实 GT 是司机的历史选择而不是最优解，
+# 直接加"最短路径"式监督会把模型拉回只追最短路，改变研究任务本身（方案第 11 节）。
+# 道路长度只是作为输入特征进入模型（见下面 model.use_edge_cost）。
 
 seed: 0
 
@@ -188,25 +194,51 @@ training:
   selection_mode: max
 
 loss:
-  # 第一版保持 CE，不加 cost-aware loss（方案第 11 节）。
+  # ===== 主训练目标：Path NLL + Sampled NULL ==============================
+  #
+  #     L = L_path + lambda_null * L_null
+  #
+  #     L_path = -1/N_A * sum_{i in active} log p_i(b_i^GT)
+  #     L_null = -1/K    * sum_{j in S_N}    log p_j(NULL)
+  #
+  # 为什么换掉旧 CE：真实 corridor 里 93.6% 的 decision 标签是 NULL，而旧 CE 对
+  # **每个 decision 等权平均**，于是"全押 NULL"就是 CE 的平凡最优解 —— 实测 5 epoch
+  # 就卡在 x0_acc = 0.933 ≈ NULL 占比、loss 不再下降、goal_hit 恒为 0。
+  #
+  # 新目标把 active 当主监督、NULL 只做**下采样**的辅助约束：
+  #   * 平均顺序 decision 内 -> sample 内 -> batch（每条真实轨迹等权，
+  #     否则 30 个 active 的样本会比 8 个的贡献大 3.75 倍）；
+  #   * NULL 不再全量监督，每条轨迹随机采 K = min(N_N, ceil(2*N_A), 64)，
+  #     即 active:null ≈ 1:2（原来是 1:14.6），且每个 batch 重新采；
+  #   * 第一版纯随机采样，**不做 hard negative mining**（先回答"降 NULL 冗余本身
+  #     能不能解决 collapse"，混入 hard negative 就没法归因）。
+  type: path_nll_sampled_null
+
+  null_sampling:
+    enabled: true
+    ratio: 2.0              # K = min(N_N, ceil(ratio * N_A), max_per_sample)
+    max_per_sample: 64      # 超长路径的上限
+    resample_each_batch: true
+
+  # lambda_null：NULL 的平衡旋钮。**采样条数 K 不影响 L_null 的量级**
+  # （它是 mean），所以调平衡只能调这个，不能调 ratio。
+  #
+  # 5 epoch 探针（348 条 / T=20）显示：active_branch_acc 0.372 -> 0.536、
+  # goal_hit 0 -> 0.175（方向对了），但 pred_active_rate 收敛到 0.609，而监督比例
+  # 只有约 0.34 —— 模型仍然**过度激活**，表现为 loop_rate 0.62~0.90 偏高。
+  # 所以把 lambda_null 从 0.2 提到 0.3（方案 §11 的"错误激活多就把 0.2 -> 0.3"）。
+  null_loss_weight: 0.3
+
+  # ---- 旧 CE 口径的字段（type=ce 时才用；这里保留只为向后兼容）----------
   x0_ce: 1.0
   null_weight: 1.0
   active_weight: 1.0
 
-  # ---- Soft Goal Reachability：**本轮关闭** ------------------------------
+  # ---- Soft Goal Reachability：本轮关闭 --------------------------------
   # 设成 0 后代码会**整段跳过** soft_goal_reachability（不是算完再乘 0），
-  # loss 严格退化成纯 CE：`L = CE`。
-  #
-  # 为什么关：它是一个 Python for-loop 的 value iteration，每个 reverse step
-  # 迭代 min(decision 数, horizon_cap) 轮、每轮 5~6 个极小的 tensor op。
-  # 合成图（≤10 decision）上无所谓，但真实 DiDi corridor 有 200~970 个 decision，
-  # profile 实测它占单步训练耗时的 60%+（tottime 2.22s / 总 3.56s）。
-  # 关掉实测约 2.2× 加速。
-  #
-  # 代价：丢掉 "Goal Reachability" 这个可微代理约束。它原本是为了缓解
-  # "模型走不到终点"，但在 93.6% 的 decision 都是 NULL 标签的真实数据上，这个
-  # 软约束本来也很难起作用 —— 先用纯 CE 把 baseline 跑出来，之后单独做
-  # goal_reach_weight 消融（0 vs 0.1）再决定要不要加回来。
+  # loss 严格不含 goal 项。它是一个 Python for-loop 的 value iteration，每个
+  # reverse step 迭代 min(decision 数, cap) 轮，profile 实测在真实 corridor 上占
+  # 单步训练耗时 60%+，关掉约 2.2× 加速。
   goal_reach_weight: 0.0
   goal_reach_eps: 1.0e-8
   goal_timestep_weighting: alpha_bar

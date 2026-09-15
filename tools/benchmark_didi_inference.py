@@ -125,20 +125,7 @@ def main() -> int:
     # LossWeights() 的默认 goal_horizon_cap 是 None，soft-goal 的 value iteration
     # 会迭代到"每张图自己的 decision 数"（DiDi 是几百上千），在真实数据上比
     # cap=24 慢 4~7 倍。用默认值测出来的是最坏情况，不是实际训练成本。
-    loss_cfg = config.section("loss") if config is not None else None
-    weights = LossWeights(
-        x0_ce=float(loss_cfg.get("x0_ce", 1.0)) if loss_cfg else 1.0,
-        null_weight=float(loss_cfg.get("null_weight", 1.0)) if loss_cfg else 1.0,
-        active_weight=float(loss_cfg.get("active_weight", 1.0)) if loss_cfg else 1.0,
-        goal_reach_weight=float(loss_cfg.get("goal_reach_weight", 0.1)) if loss_cfg else 0.1,
-        goal_reach_eps=float(loss_cfg.get("goal_reach_eps", 1e-8)) if loss_cfg else 1e-8,
-        goal_timestep_weighting=str(loss_cfg.get("goal_timestep_weighting", "alpha_bar")) if loss_cfg else "alpha_bar",
-        goal_horizon_cap=(
-            int(loss_cfg.get("goal_horizon_cap"))
-            if loss_cfg and loss_cfg.get("goal_horizon_cap") is not None
-            else None
-        ),
-    )
+    weights = LossWeights.from_config(config)
     weights.validate()
     print(f"loss weights : goal_reach_weight={weights.goal_reach_weight} "
           f"goal_horizon_cap={weights.goal_horizon_cap}")

@@ -218,24 +218,51 @@ def _pad_2d(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[Tensor, Tensor]:
-    """把 ragged 的 [C, *] 整数表 padding 成 [C, L] + lengths [C]。"""
-    width = max((len(row) for row in values), default=1)
-    width = max(width, 1)
-    lengths = torch.tensor([len(row) for row in values], dtype=torch.long, device=device)
-    out = torch.zeros(len(values), width, dtype=dtype, device=device)
-    for row_index, row in enumerate(values):
-        if row:
-            out[row_index, : len(row)] = torch.as_tensor(row, dtype=dtype, device=device)
-    return out, lengths
+    """把 ragged 的 [C, *] 整数表 padding 成 [C, L] + lengths [C]。
+
+    实现要点：**一次**扁平构造 + index scatter，而不是逐行 ``torch.as_tensor``。
+
+    旧写法是 ``for row in values: out[i, :len(row)] = torch.as_tensor(row, device=...)``，
+    而 ``values`` 是"每个 candidate 一行"的分支成员表。在 CUDA 上每行就是一次微型
+    H2D 传输：8 条 DiDi 样本（8625 个 candidate）实测 **13,310 次
+    ``torch.as_tensor``，占 collate 总耗时的 94%**。改成一次构造后这部分基本消失。
+    """
+    row_count = len(values)
+    lengths = torch.tensor([len(row) for row in values], dtype=torch.long)
+    width = max(int(lengths.max()) if row_count else 1, 1)
+    out = torch.zeros(row_count, width, dtype=dtype)
+    total = int(lengths.sum())
+    if total:
+        flat = torch.tensor([v for row in values for v in row], dtype=dtype)
+        row_index = torch.repeat_interleave(torch.arange(row_count), lengths)
+        offsets = torch.cumsum(lengths, 0) - lengths
+        column_index = torch.arange(total) - torch.repeat_interleave(offsets, lengths)
+        out[row_index, column_index] = flat
+    return out.to(device), lengths.to(device)
 
 
 def collate_samples(
     samples: Sequence[GraphSample], device: torch.device | str = "cpu"
 ) -> Batch:
-    """把一组 :class:`GraphSample` 拼成一个 :class:`Batch`。"""
+    """把一组 :class:`GraphSample` 拼成一个 ``Batch``。
+
+    **实现在 CPU 上拼装，最后整体 ``.to(device)`` 一次**（对外行为完全不变）。
+
+    为什么不能直接在 CUDA 上逐个建小张量：``torch.tensor(list, device="cuda")``
+    和 ``torch.as_tensor(row, device="cuda")`` 每调用一次就是一次微型 H2D。
+    这里大约有 20 个拼接张量 + 每个 candidate 一行的分支表，8 条 DiDi 样本实测
+    **13,310 次逐行 CUDA 构造**。同一份数据：
+
+        collate(device="cuda")  1.202 s
+        collate(device="cpu")   0.388 s     ← 只改拼接设备就差 3.1x
+
+    所以这里先在 CPU 拼好（连续内存、一次拷贝），需要时再整体搬过去。
+    """
     if not samples:
         raise ValueError("collate_samples() got an empty sample list")
-    device = torch.device(device)
+    target_device = torch.device(device)
+    # 下面所有张量一律在 CPU 上构造；函数末尾统一 .to(target_device)
+    device = torch.device("cpu")
 
     node_type: List[int] = []
     edge_index: List[List[int]] = [[], []]
@@ -446,7 +473,8 @@ def collate_samples(
         },
         device=device,
     )
-    return batch
+    # 一次性搬到目标设备（CPU 目标时零拷贝，直接返回）
+    return batch if target_device.type == "cpu" else batch.to(target_device)
 
 
 def null_candidate_of_decision(batch: Batch) -> Tensor:

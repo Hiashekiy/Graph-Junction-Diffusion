@@ -130,6 +130,7 @@ def main() -> int:
         run_dir=run_dir,
         generator=generator,
     )
+    print(f"objective   : {trainer.weights.describe()}")
 
     if args.resume:
         payload = load_checkpoint(

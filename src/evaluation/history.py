@@ -29,6 +29,19 @@ CURVE_KEYS = (
     "loop_rate",
     "broken_rate",
     "val_x0_acc",
+    # ---- Path NLL + Sampled NULL 目标下真正该看的曲线 --------------------
+    # 用新目标时 train_x0_acc / val_x0_acc 会被改名成 *_all_decision_acc
+    # （"对全部 decision 等权"，包含大量没被监督的 NULL），所以这里必须补上
+    # 新目标的拆分指标，否则 DiDi 的 run 在曲线工具里什么都画不出来。
+    "train_path_nll",
+    "train_sampled_null_loss",
+    "train_active_branch_acc",
+    "train_mean_gt_branch_prob",
+    "train_sampled_null_acc",
+    "train_mean_sampled_null_prob",
+    "train_pred_active_rate",
+    "train_mean_num_active",
+    "train_mean_num_sampled_null",
 )
 
 
