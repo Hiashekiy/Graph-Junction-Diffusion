@@ -425,6 +425,43 @@ def test_zero_goal_weight_reproduces_the_pure_ce_loss(chain_batch):
     assert abs(float(out.loss.detach()) - float(out.ce_loss.detach())) < 1e-12
 
 
+def test_zero_goal_weight_skips_the_value_iteration(chain_batch, monkeypatch):
+    """``goal_reach_weight = 0`` 时必须**整段跳过** soft_goal_reachability。
+
+    它是一段 Python for-loop 的 value iteration（每个 reverse step 迭代
+    min(decision 数, horizon_cap) 轮）。真实 DiDi corridor 有 200~970 个 decision，
+    实测占单步训练耗时 60%+；乘 0 与跳过在梯度上等价，所以只乘 0 是纯浪费。
+    这条测试钉住"真的没算"，而不是只看 loss 数值相等。
+    """
+    import src.training.losses as losses_module
+
+    calls = {"n": 0}
+    original = losses_module.soft_goal_reachability
+
+    def counting(*args, **kwargs):
+        calls["n"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(losses_module, "soft_goal_reachability", counting)
+    model = GraphFlowDenoiser(d_model=16, ffn_hidden=32)
+    diffusion = CategoricalDiffusion(
+        NoiseSchedule(T=4, schedule="linear", beta_start=0.05, beta_end=0.5)
+    )
+
+    off = recurrent_reverse_loss(
+        model, diffusion, chain_batch, LossWeights(goal_reach_weight=0.0), max_steps=4
+    )
+    assert calls["n"] == 0, "goal_reach_weight=0 时不该调用 value iteration"
+    assert float(off.goal_loss.detach()) == 0.0
+    # NaN 表示"没算"，与"算出来是 0"区分开
+    assert off.soft_goal_mean != off.soft_goal_mean
+
+    recurrent_reverse_loss(
+        model, diffusion, chain_batch, LossWeights(goal_reach_weight=0.1), max_steps=4
+    )
+    assert calls["n"] == 4, "每个 reverse step 应该各调用一次"
+
+
 def test_positive_goal_weight_changes_the_loss(chain_batch):
     model = GraphFlowDenoiser(d_model=16, ffn_hidden=32)
     diffusion = CategoricalDiffusion(

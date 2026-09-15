@@ -121,7 +121,27 @@ def main() -> int:
     T = diffusion.T
     print(f"T            : {T}")
 
-    weights = LossWeights()
+    # ⚠️ 必须按 Trainer 的方式**从配置**构造 LossWeights：
+    # LossWeights() 的默认 goal_horizon_cap 是 None，soft-goal 的 value iteration
+    # 会迭代到"每张图自己的 decision 数"（DiDi 是几百上千），在真实数据上比
+    # cap=24 慢 4~7 倍。用默认值测出来的是最坏情况，不是实际训练成本。
+    loss_cfg = config.section("loss") if config is not None else None
+    weights = LossWeights(
+        x0_ce=float(loss_cfg.get("x0_ce", 1.0)) if loss_cfg else 1.0,
+        null_weight=float(loss_cfg.get("null_weight", 1.0)) if loss_cfg else 1.0,
+        active_weight=float(loss_cfg.get("active_weight", 1.0)) if loss_cfg else 1.0,
+        goal_reach_weight=float(loss_cfg.get("goal_reach_weight", 0.1)) if loss_cfg else 0.1,
+        goal_reach_eps=float(loss_cfg.get("goal_reach_eps", 1e-8)) if loss_cfg else 1e-8,
+        goal_timestep_weighting=str(loss_cfg.get("goal_timestep_weighting", "alpha_bar")) if loss_cfg else "alpha_bar",
+        goal_horizon_cap=(
+            int(loss_cfg.get("goal_horizon_cap"))
+            if loss_cfg and loss_cfg.get("goal_horizon_cap") is not None
+            else None
+        ),
+    )
+    weights.validate()
+    print(f"loss weights : goal_reach_weight={weights.goal_reach_weight} "
+          f"goal_horizon_cap={weights.goal_horizon_cap}")
     results: List[Dict[str, Any]] = []
 
     flow_options = args.flow_steps or [model.flow_steps]
@@ -141,6 +161,8 @@ def main() -> int:
                 "batch_size": batch_size,
                 "num_batches": len(batches),
             }
+            outcome_totals: Dict[str, int] = {}
+            cost_ratios: List[float] = []
             try:
                 with torch.no_grad():
                     # ---- warmup + 计时 ----
@@ -163,6 +185,8 @@ def main() -> int:
                             z0 = single_path_state(chain, batch, SINGLE_READOUT_ARGMAX)
                             offsets = decision_offsets(chunk)
                             starts = candidate_offsets(chunk)
+                            outcomes = {"goal": 0, "loop": 0, "broken": 0}
+                            gt_ratios = []
                             for index, sample in enumerate(chunk):
                                 result = decode_flat(
                                     sample, z0,
@@ -170,13 +194,25 @@ def main() -> int:
                                     candidate_offset=starts[index],
                                     max_branches=8192,
                                 )
-                                evaluate_sample(sample, result, 0.0)
+                                record_row = evaluate_sample(sample, result, 0.0)
+                                outcomes[record_row.status] = (
+                                    outcomes.get(record_row.status, 0) + 1
+                                )
+                                if record_row.goal_hit:
+                                    gt_ratios.append(record_row.cost_ratio)
                             sync(device)
                             t3 = time.perf_counter()
                             if repeat > 0:  # 第一次是 warmup，不计入
                                 timings["collate"].append(t1 - t0)
                                 timings["chain"].append(t2 - t1)
                                 timings["decode"].append(t3 - t2)
+                            for key, value in outcomes.items():
+                                outcome_totals[key] = outcome_totals.get(key, 0) + value
+                            cost_ratios.extend(gt_ratios)
+                    record["outcomes"] = dict(outcome_totals)
+                    record["mean_cost_ratio_success"] = (
+                        statistics.fmean(cost_ratios) if cost_ratios else float("nan")
+                    )
                     record.update(
                         {
                             "collate_s": statistics.median(timings["collate"]),
@@ -192,9 +228,21 @@ def main() -> int:
 
                 # ---- 训练一步（forward + backward）----
                 # 必须在 no_grad 外面，否则 loss 不带 grad_fn（第一版就踩了这个）
+                # 也**必须预热**：第一次 backward 会触发 cuDNN autotune / 显存池增长，
+                # 冷启动一次能比稳态慢 5~10 倍（第一版没预热，把 1.5s 报成了 16s）。
                 if not args.no_train_step:
                     optimizer = build_optimizer(config, model)
                     model.train()
+                    for _ in range(3):
+                        warm = collate_samples(batches[0], device=device)
+                        warm_out = recurrent_reverse_loss(
+                            model, diffusion, warm, weights=weights,
+                            generator=generator, max_steps=T,
+                        )
+                        warm_out.loss.backward()
+                        optimizer.zero_grad(set_to_none=True)
+                    sync(device)
+
                     step_times = []
                     for repeat in range(args.repeat):
                         chunk = batches[repeat % len(batches)]
@@ -212,6 +260,7 @@ def main() -> int:
                         step_times.append(time.perf_counter() - t0)
                     model.eval()
                     record["train_step_s"] = statistics.median(step_times)
+                    record["train_step_min_s"] = min(step_times)
                     record["train_step_per_query_s"] = (
                         record["train_step_s"] / batch_size
                     )
@@ -224,6 +273,7 @@ def main() -> int:
     header = (
         f"{'flow':>5}{'batch':>6}{'collate':>9}{'chain':>9}{'decode':>9}"
         f"{'total/batch':>12}{'s/query':>9}{'peakGB':>8}{'trainstep':>10}"
+        f"{'  decode outcome (goal/loop/broken)':>36}"
     )
     print(header)
     print("-" * 96)
@@ -237,6 +287,8 @@ def main() -> int:
             f"{row['total_s_per_batch']:>12.4f}{row['per_query_s']:>9.4f}"
             f"{row['peak_memory_gb']:>8.2f}"
             f"{row.get('train_step_s', float('nan')):>10.4f}"
+            f"   {row['outcomes'].get('goal',0)}/{row['outcomes'].get('loop',0)}"
+            f"/{row['outcomes'].get('broken',0)}"
         )
     print("=" * 96)
 

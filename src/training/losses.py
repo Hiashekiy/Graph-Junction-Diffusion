@@ -300,15 +300,23 @@ def recurrent_reverse_loss(
         ce_losses.append(step_loss)
 
         # Soft Goal Reachability（可微代理指标，直接吃 grouped softmax 概率）
-        p_goal = soft_goal_reachability(
-            out.candidate_prob, batch, horizon_cap=weights.goal_horizon_cap
-        )
-        step_goal_loss = soft_goal_loss(p_goal, weights.goal_reach_eps)
-        goal_losses.append(step_goal_loss)
-        goal_weights.append(
-            goal_timestep_weight(diffusion, t, weights.goal_timestep_weighting)
-        )
-        soft_goal_means.append(p_goal.mean().detach())
+        #
+        # ``goal_reach_weight == 0`` 时**整个跳过**，而不是算完再乘 0。
+        # 它是一个 **Python for-loop 的 value iteration**：每个 reverse step 迭代
+        # ``min(decision 数, horizon_cap)`` 轮、每轮 5~6 个极小的 tensor op。
+        # 合成图（≤10 decision）上无所谓，真实 DiDi corridor（200~970 decision）
+        # 上它占单步耗时的 60%+。而 ``0 * loss`` 的梯度恒为 0，所以跳过与乘 0
+        # 在**数值和梯度上完全等价** —— 算它纯粹是浪费。
+        if weights.goal_reach_weight > 0:
+            p_goal = soft_goal_reachability(
+                out.candidate_prob, batch, horizon_cap=weights.goal_horizon_cap
+            )
+            step_goal_loss = soft_goal_loss(p_goal, weights.goal_reach_eps)
+            goal_losses.append(step_goal_loss)
+            goal_weights.append(
+                goal_timestep_weight(diffusion, t, weights.goal_timestep_weighting)
+            )
+            soft_goal_means.append(p_goal.mean().detach())
 
         steps_done += 1
         if record:
@@ -334,11 +342,17 @@ def recurrent_reverse_loss(
             H_t = H_t.detach()
 
     ce_loss = torch.stack(ce_losses).mean()
-    # 注意：必须除以 sum_t omega_t，否则改 T 会改变 loss 的整体尺度
-    omega = torch.tensor(goal_weights, device=ce_loss.device, dtype=ce_loss.dtype)
-    goal_loss = (torch.stack(goal_losses) * omega).sum() / omega.sum().clamp_min(_EPS)
+    if goal_losses:
+        # 注意：必须除以 sum_t omega_t，否则改 T 会改变 loss 的整体尺度
+        omega = torch.tensor(goal_weights, device=ce_loss.device, dtype=ce_loss.dtype)
+        goal_loss = (torch.stack(goal_losses) * omega).sum() / omega.sum().clamp_min(_EPS)
+        soft_goal_mean = float(torch.stack(soft_goal_means).mean())
+    else:
+        # goal_reach_weight == 0：soft goal 整段没算（见上面的跳过逻辑）。
+        # loss 严格等于纯 CE；soft_goal_mean 记 NaN，好和"真的算出来是 0"区分开。
+        goal_loss = ce_loss.new_zeros(())
+        soft_goal_mean = float("nan")
     loss = ce_loss + float(weights.goal_reach_weight) * goal_loss
-    soft_goal_mean = float(torch.stack(soft_goal_means).mean())
 
     final_accuracy = (
         float(
@@ -407,12 +421,17 @@ def one_step_clean_state_metrics(
         batch.candidate_owner,
         batch.num_decisions,
     )
-    p_goal = soft_goal_reachability(
-        out.candidate_prob, batch, horizon_cap=weights.goal_horizon_cap
+    p_goal = (
+        soft_goal_reachability(
+            out.candidate_prob, batch, horizon_cap=weights.goal_horizon_cap
+        )
+        if weights.goal_reach_weight > 0
+        else None
     )
     return {
         "loss": float(loss),
         "accuracy": float(acc),
-        "soft_goal": float(p_goal.mean()),
+        # 关掉 soft goal 时它是"没算"，不是"算出来是 0"
+        "soft_goal": float(p_goal.mean()) if p_goal is not None else float("nan"),
         "t": float(step),
     }

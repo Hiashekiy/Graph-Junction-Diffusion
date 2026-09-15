@@ -188,13 +188,29 @@ training:
   selection_mode: max
 
 loss:
-  # 第一版保持当前 loss，不加 cost-aware loss（方案第 11 节）
+  # 第一版保持 CE，不加 cost-aware loss（方案第 11 节）。
   x0_ce: 1.0
   null_weight: 1.0
   active_weight: 1.0
-  goal_reach_weight: 0.1
+
+  # ---- Soft Goal Reachability：**本轮关闭** ------------------------------
+  # 设成 0 后代码会**整段跳过** soft_goal_reachability（不是算完再乘 0），
+  # loss 严格退化成纯 CE：`L = CE`。
+  #
+  # 为什么关：它是一个 Python for-loop 的 value iteration，每个 reverse step
+  # 迭代 min(decision 数, horizon_cap) 轮、每轮 5~6 个极小的 tensor op。
+  # 合成图（≤10 decision）上无所谓，但真实 DiDi corridor 有 200~970 个 decision，
+  # profile 实测它占单步训练耗时的 60%+（tottime 2.22s / 总 3.56s）。
+  # 关掉实测约 2.2× 加速。
+  #
+  # 代价：丢掉 "Goal Reachability" 这个可微代理约束。它原本是为了缓解
+  # "模型走不到终点"，但在 93.6% 的 decision 都是 NULL 标签的真实数据上，这个
+  # 软约束本来也很难起作用 —— 先用纯 CE 把 baseline 跑出来，之后单独做
+  # goal_reach_weight 消融（0 vs 0.1）再决定要不要加回来。
+  goal_reach_weight: 0.0
   goal_reach_eps: 1.0e-8
   goal_timestep_weighting: alpha_bar
+  # 仅在 goal_reach_weight > 0 时才有意义（现在没用到）
   goal_horizon_cap: 24
 
 evaluation:
