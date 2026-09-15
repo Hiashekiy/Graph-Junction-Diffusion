@@ -103,6 +103,7 @@ def evaluate_dataset(
     beam_width: int = 64,
     null_policy: str = "stop",
     filter_dead_branches: bool = False,
+    strict_decode: bool = False,
     coordinates: Optional[Mapping[Any, Sequence[float]]] = None,
 ) -> EvaluationReport:
     """在 dataset 上跑完整评测。
@@ -129,6 +130,31 @@ def evaluate_dataset(
       decision node"的非 NULL branch（默认关闭 = 历史行为逐位可复现）。
       ``optimal_coverage_rate`` 现在按**真实 cost** 判定：weighted 图上是 Dijkstra
       最小 cost，无权图上等价于原来的跳数口径。
+
+    ``strict_decode``（默认 ``False`` = 上面那套历史口径，逐位可复现）：
+
+      ``True`` 时改走 :mod:`src.evaluation.strict_beam_decoder` 的**三池**语义 ——
+
+          alive      还能继续扩展的路径（全局最多 ``beam_width`` 条）
+          success    完整走到 Goal 的路径   ← 最终候选集**只有它**
+          discarded  NULL / loop / dead-end / 步数超限，**仅用于统计**
+
+          P* = argmax_{P in success} log P_theta(P)，success 为空才判失败
+
+      与历史口径的本质差别：历史实现把 goal / NULL / loop / dead-end **一起**塞进
+      ``finished`` 再统一按累计 log 概率排序，于是"最早被 NULL 打断的残骸"因为负数
+      加得少、log 概率反而最大而当选（DiDi test_1000 实测 ``multi.best`` 平均只有
+      7.30 个节点，而真正到终点的路径平均 18.49 个节点）。strict 下失败路径直接淘汰，
+      永远不会出现在最终候选里。
+
+      同时合法性判定**前置到 top-k 之前**：NULL、会重复经过已访问节点的 branch、
+      终点既不是 Goal 也不是 decision node 的 branch 一律 mask，然后在**剩下的合法
+      branch**里重新取 top-k。mask 掉一条候选不会让整条路径死掉，只有"一条合法
+      branch 都没有"时该路径才进 ``discarded``。
+
+      ``strict=True`` 时 ``null_policy`` 失效（NULL 永远不合法）、
+      ``filter_dead_branches`` 恒为真；``report.metrics`` 里的
+      ``mean_finished_paths`` 语义变为"平均找到多少条**完整**路线"。
     """
     if decode not in SINGLE_READOUTS + ("multi",):
         raise ValueError(
@@ -157,6 +183,11 @@ def evaluate_dataset(
     finished_paths_total = 0
     goal_paths_total = 0
     filtered_dead_branches_total = 0
+    #: 仅 strict 模式非 0：被合法性 mask 剔除的候选 branch / 被淘汰的路径
+    masked_null_total = 0
+    masked_loop_total = 0
+    masked_dead_end_total = 0
+    discarded_total = 0
     weighted_seen = False
     # 真实观测 GT（DiDi）才会被填；synthetic 数据集全程为空
     real_records: List[rpm.PathPairRecord] = []
@@ -207,6 +238,7 @@ def evaluate_dataset(
                     beam_width=beam_width,
                     null_policy=null_policy,
                     filter_dead_branches=filter_dead_branches,
+                    strict=strict_decode,
                 )
                 best = multi.best
                 if best is None:  # pragma: no cover - frontier 非空，理论上不会发生
@@ -219,6 +251,10 @@ def evaluate_dataset(
                 finished_paths_total += len(multi.finished)
                 goal_paths_total += len(multi.goal_paths)
                 filtered_dead_branches_total += int(multi.num_filtered_dead_branches)
+                masked_null_total += int(multi.num_masked_null)
+                masked_loop_total += int(multi.num_masked_loop)
+                masked_dead_end_total += int(multi.num_masked_dead_end)
+                discarded_total += len(multi.discarded)
                 weighted_seen = weighted_seen or bool(getattr(batch, "is_weighted", False))
             else:
                 result = decode_flat(
@@ -324,6 +360,13 @@ def evaluate_dataset(
         metrics["mean_goal_paths"] = goal_paths_total / total
         metrics["mean_finished_paths"] = finished_paths_total / total
         metrics["mean_filtered_dead_branches"] = filtered_dead_branches_total / total
+        if strict_decode:
+            # strict 三池语义下才有意义：被 mask 的非法 branch 与被淘汰的路径。
+            # 旧口径下这些字段恒为 0，所以只在 strict 时暴露，旧 JSON 结构不变。
+            metrics["mean_masked_null"] = masked_null_total / total
+            metrics["mean_masked_loop"] = masked_loop_total / total
+            metrics["mean_masked_dead_end"] = masked_dead_end_total / total
+            metrics["mean_discarded_paths"] = discarded_total / total
         if weighted_seen:
             # 名字点明"按真实 cost 判定"。无权图上它与 optimal_coverage_rate 是同一件事，
             # 所以只在 weighted 数据集上额外暴露这个别名，旧 JSON 的结构保持不变。
@@ -336,6 +379,7 @@ def evaluate_dataset(
             "beam_width": int(beam_width),
             "null_policy": null_policy,
             "filter_dead_branches": bool(filter_dead_branches),
+            "strict": bool(strict_decode),
             "dataset_is_weighted": bool(weighted_seen),
             "coverage_rate": metrics["coverage_rate"],
             "optimal_coverage_rate": metrics["optimal_coverage_rate"],
@@ -343,6 +387,19 @@ def evaluate_dataset(
             "mean_finished_paths": metrics["mean_finished_paths"],
             "mean_filtered_dead_branches": metrics["mean_filtered_dead_branches"],
         }
+        if strict_decode:
+            multi_payload["info"].update(
+                {
+                    # strict 下 finished == success：mean_finished_paths 就是"找到多少条
+                    # 完整路线"；失败路径只进 discarded，不参与最终排名。
+                    "mean_success_paths": metrics["mean_finished_paths"],
+                    "mean_discarded_paths": metrics["mean_discarded_paths"],
+                    "mean_masked_null": metrics["mean_masked_null"],
+                    "mean_masked_loop": metrics["mean_masked_loop"],
+                    "mean_masked_dead_end": metrics["mean_masked_dead_end"],
+                    "best_readout": "argmax_{P in success} log_prob",
+                }
+            )
     debug = (
         {key: value / max(debug_count, 1) for key, value in debug_accum.items()}
         if debug_count

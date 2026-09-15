@@ -127,6 +127,13 @@ def parse_args() -> argparse.Namespace:
              "skip=NULL 不停，只在非 NULL 候选里取 top-k",
     )
     parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="--multi-k 时改用**三池**语义（src.evaluation.strict_beam_decoder）："
+             "NULL / loop / dead-end 在 top-k 之前 mask 掉、失败路径淘汰，"
+             "路径表里只剩完整到 Goal 的路径（严格存活路径竞争）。",
+    )
+    parser.add_argument(
         "--multi-max-draw", type=int, default=60,
         help="--multi-k 时每张图最多画多少条细线路径（按概率从高到低），防画面糊掉",
     )
@@ -194,6 +201,7 @@ def decode_pool(model, diffusion, dataset, device, generator, args) -> List[Dict
                     top_k=args.multi_k,
                     beam_width=args.beam_width,
                     null_policy=args.null_policy,
+                    strict=bool(getattr(args, "strict", False)),
                 )
                 best = multi.best
                 if best is None:  # pragma: no cover
@@ -740,7 +748,9 @@ def main() -> int:
         f"{select_note}  ·  sample_seed={seed}"
         + (
             f"  ·  multi_k={args.multi_k}(beam={args.beam_width},"
-            f"null={args.null_policy})"
+            f"null={args.null_policy}"
+            + (", strict" if getattr(args, "strict", False) else "")
+            + ")"
             if getattr(args, "multi_k", 0) and args.multi_k > 0
             else ""
         )

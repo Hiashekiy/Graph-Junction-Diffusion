@@ -136,6 +136,15 @@ def parse_args() -> argparse.Namespace:
         choices=["stop", "skip"],
         help="stop：NULL 参与排名、选中即该路径终止；skip：NULL 不停，只在非 NULL 候选里取 top-k",
     )
+    parser.add_argument(
+        "--strict-decode",
+        action="store_true",
+        help="多分支解码改用**三池**语义（src.evaluation.strict_beam_decoder）："
+             "NULL / loop / dead-end 一律在 top-k 之前 mask 掉、失败路径直接淘汰，"
+             "最终候选集**只有完整走到 Goal 的路径**，"
+             "P* = argmax_{P in success} log_prob；success 为空才判失败。"
+             "默认关闭 = 历史口径（goal/loop/NULL/broken 一起排序，逐位可复现）。",
+    )
     parser.add_argument("--baselines", action="store_true", help="顺带跑 shortest/greedy baseline")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument(
@@ -178,11 +187,23 @@ def main() -> int:
         )
     print(f"model        : {model.flow_steps_label}")
     if args.decode == "multi":
-        print(
-            f"decode       : multi (top_k={args.top_k}, beam_width={args.beam_width}, "
-            f"null_policy={args.null_policy})  —— 主指标取累计概率最高的路径，"
-            "额外报告 coverage_rate / optimal_coverage_rate"
-        )
+        if args.strict_decode:
+            print(
+                f"decode       : multi STRICT (top_k={args.top_k}, "
+                f"beam_width={args.beam_width})  —— 三池语义：NULL / loop / dead-end 在 "
+                "top-k 之前 mask，失败路径直接淘汰，最终候选只有完整到 Goal 的路径，"
+                "P* = argmax_{P in success} log_prob"
+            )
+            print(
+                "               null_policy 与 filter_dead_branches 在 strict 下失效"
+                "（NULL 永远不合法、dead-end 恒被过滤）"
+            )
+        else:
+            print(
+                f"decode       : multi (top_k={args.top_k}, beam_width={args.beam_width}, "
+                f"null_policy={args.null_policy})  —— 主指标取累计概率最高的路径，"
+                "额外报告 coverage_rate / optimal_coverage_rate"
+            )
     else:
         print("decode       : single（按采样 z_0 解码，历史口径）")
 
@@ -207,6 +228,7 @@ def main() -> int:
         beam_width=args.beam_width,
         null_policy=args.null_policy,
         filter_dead_branches=args.filter_dead_branches,
+        strict_decode=args.strict_decode,
         coordinates=coordinates,
     )
 
@@ -307,6 +329,7 @@ def main() -> int:
             "filter_dead_branches": bool(args.filter_dead_branches)
             if args.decode == "multi"
             else None,
+            "strict": bool(args.strict_decode) if args.decode == "multi" else None,
         },
         "records": records_to_dicts(report.records),
     }

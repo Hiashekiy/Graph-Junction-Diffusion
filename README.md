@@ -2091,14 +2091,41 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py ^
 
 #### 阶段 4 · 可视化
 
+**主图：真实街道底图 + 模型最终选中的路径**（推荐用这个，`tools/visualize_didi_paths.py`）。
+底图是 OSMnx 的真实经纬度路网，蓝虚线是**真实司机历史路径**，橙粗线是模型选中的路径；
+`--mode both` 同时出「分支解码」和「多分支解码」两张图：
+
 ```cmd
-REM 预测路径 vs GT（普通拓扑布局）
+E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_didi_paths.py ^
+  --run outputs/runs/didi_chengdu_flow1_weighted ^
+  --num 6 --cols 2 --select mixed --goal-fraction 0.6 ^
+  --mode both --multi-k 2 --deterministic
+```
+
+输出 `outputs/figures/didi_paths_single.png` / `didi_paths_multi.png`（外加同名 `.txt`
+表格和 `.json`）。几个要点：
+
+* `--select mixed`（默认）按 6:4 混成功/失败案例。只看成功会严重高估模型，只看失败
+  又看不出它对在哪；`--select random` 无偏，`--select goal|broken|loop` 单看一类。
+* `--deterministic` 用 posterior argmax rollout。**不加这个开关时，反向链是随机采样的，
+  结果依赖 batch 组成**（RNG 流按 batch 里所有样本的 decision 数消耗），换个 `--batch-size`
+  同一张图就会变。加了之后跨 batch 逐位一致（实测 batch=1 vs batch=8 路径完全相同），
+  所以论文/汇报里的图建议固定加它。
+* 每张 panel 标题里给了三个代价：`GT/最短` 说明**这条 GT 本身绕不绕路**，`预测/最短`
+  说明模型的路径离最短路有多远。GT 是司机路径不是最短路，所以"预测比 GT 便宜"很常见，
+  必须配合 `GT/最短` 才判得出是司机绕路还是模型走歪。
+* `--no-street` 关掉街道底图，`--no-crop` 不裁到样本范围（看它在整座城市里的位置）。
+
+**辅助图**（拓扑布局，没有地理含义，单位是"图结构"而不是公里）：
+
+```cmd
+REM 预测 vs GT，spring 拓扑布局（这张图**没有**街道背景，形状也不代表地理）
 E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_paths.py ^
   --run outputs/runs/didi_chengdu_flow1_weighted ^
   --data data/didi_chengdu_gjd/test_1000.pkl --select random --num 16 ^
   --out outputs/figures/didi_flow1_pred.png
 
-REM 数据集本身（真实经纬度底图）
+REM 数据集本身（真实经纬度底图，不看模型）
 E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_didi_samples.py --per-split 3
 ```
 
@@ -2161,6 +2188,7 @@ OOM 时按 `8 -> 4 -> 2` 降 batch，**不要**先降模型维度。
 | `tests/test_real_path_metrics.py` | 新增 | 每个指标的手算小样例 |
 | `tools/verify_didi_pipeline.py` | 新增 | 不依赖 pytest / torch 的自检脚本（23 条断言） |
 | `tools/visualize_didi_samples.py` | 新增 | 把数据集样本画在**真实经纬度底图**上（见 24.11） |
+| `tools/visualize_didi_paths.py` | 新增 | **模型的路径规划图**：真实街道底图 + 模型选中路径 + GT + 多分支路径表（见 24.7 阶段 4） |
 | `src/data/dataset_builder.py` | 改 | **新增** `relabel_graph_and_path_to_contiguous()` / `build_sample_from_observed_path()`；**旧函数语义一字未改** |
 | `src/data/decision_field.py` | 改 | 校验第 6 条放宽：允许"绕回 owner 的 loop branch"（见 24.9） |
 | `src/data/dataset.py` | 改 | docstring 说明 GT 语义；`summary()` 增 `gt_cost` / `gt_cost_ratio` / `gt_source` |

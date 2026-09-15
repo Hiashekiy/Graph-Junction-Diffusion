@@ -698,3 +698,289 @@ def test_evaluate_dataset_reports_weighted_optimal_coverage_on_weighted_data():
     assert report.metrics["weighted_optimal_coverage_rate"] == pytest.approx(
         report.metrics["optimal_coverage_rate"]
     )
+
+
+# ---------------------------------------------------------------------------
+# strict 三池语义（src/evaluation/strict_beam_decoder.py）
+#
+# 这一组测试钉死的是"失败路径淘汰、最终候选只有完整到 Goal 的路径"这条规格。
+# 历史路径（strict=False）的 27 个测试全部保持不变。
+# ---------------------------------------------------------------------------
+def test_strict_null_is_masked_instead_of_killing_the_path(sample, batch):
+    """J1 的 top-1 是 NULL：历史口径当场 broken，strict 会 mask 掉改走第二名。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, None): 0.6,     # NULL 概率最高 -> 历史口径在这里死
+            _cand(sample, j1, J2): 0.4,
+            _cand(sample, j2, G): 0.9,
+            _cand(sample, j2, D2): 0.1,
+        },
+    )
+    historical = decode_multi_path(sample, prob, top_k=2, beam_width=3, null_policy="stop")
+    assert historical.best.status == "broken"
+    assert historical.best.reason.startswith("NULL selected")
+    # 完整路线其实就在同一张表里 —— 历史口径只是把它排到了残骸后面
+    assert historical.best_goal is not None
+    assert historical.best_goal.nodes == [S, A, J1, B, J2, C, G]
+
+    strict = decode_multi_path(sample, prob, top_k=2, beam_width=3, strict=True)
+    assert strict.strict is True
+    assert strict.best.status == "goal"
+    assert strict.best.nodes == [S, A, J1, B, J2, C, G]
+    assert strict.coverage
+    assert strict.num_masked_null == 2          # J1 一个、J2 一个
+    assert strict.discarded == []               # mask 掉候选不等于路径死亡
+
+
+def test_strict_loop_branch_is_masked_and_reselected(sample, batch):
+    """J1 的 top-1 是回到 S 的 loop branch：mask 掉它，重新在剩下的里选。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, S): 0.7,        # -> 回到已访问节点，非法
+            _cand(sample, j1, J2): 0.3,
+            _cand(sample, j2, G): 0.9,
+            _cand(sample, j2, D2): 0.1,
+        },
+    )
+    historical = decode_multi_path(sample, prob, top_k=2, beam_width=3)
+    assert historical.best.status == "loop"      # 历史口径把这条 loop 当候选留着
+
+    strict = decode_multi_path(sample, prob, top_k=2, beam_width=3, strict=True)
+    assert strict.best.status == "goal"
+    assert strict.num_masked_loop >= 1
+    assert all(path.status == "goal" for path in strict.finished)
+
+
+def test_strict_dead_end_branch_is_masked_before_top_k(sample, batch):
+    """J1 的 top-1 通向 dead-end：strict 在 top-k **之前**就把它 mask 掉。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, D1): 0.55,      # dead-end，但概率最高
+            _cand(sample, j1, J2): 0.45,
+            _cand(sample, j2, G): 0.9,
+            _cand(sample, j2, D2): 0.1,
+        },
+    )
+    strict = decode_multi_path(sample, prob, top_k=2, beam_width=3, strict=True)
+    assert strict.num_masked_dead_end >= 2       # J1 的 D1、J2 的 D2
+    assert strict.best.status == "goal"
+
+
+def test_strict_finished_is_the_success_pool(sample, batch):
+    """``finished`` 在 strict 下就是 success 池：只有完整路线，没有残骸。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, None): 0.5,
+            _cand(sample, j1, J2): 0.5,
+            _cand(sample, j2, None): 0.5,
+            _cand(sample, j2, G): 0.5,
+        },
+    )
+    strict = decode_multi_path(sample, prob, top_k=2, beam_width=2, strict=True)
+    assert strict.finished is strict.success
+    assert all(path.status == "goal" for path in strict.finished)
+    assert strict.goal_paths == strict.finished
+    assert strict.alive_left == 0
+
+    historical = decode_multi_path(sample, prob, top_k=2, beam_width=2, null_policy="stop")
+    # 历史口径的 finished 里混着 NULL 残骸
+    assert any(path.status != "goal" for path in historical.finished)
+
+
+def test_strict_picks_the_long_complete_route_over_the_short_corpse(sample, batch):
+    """这条就是那个荒谬现象的回归测试。
+
+    历史口径下，一条 3 个节点就撞 NULL 的残骸因为累计 log 概率更大（负数加得少），
+    排到了真正 7 个节点走到 Goal 的完整路线前面，成为 ``best``。
+    strict 下残骸根本不进候选集，``best`` 必然是完整路线。
+    """
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            # J1 的第一名是 NULL（高概率）-> 残骸 log_prob = log 0.9，只有 3 个节点
+            _cand(sample, j1, None): 0.9,
+            # 第二名通向 J2，再走到 Goal：链更长，负数累加更多，log 概率更低
+            _cand(sample, j1, J2): 0.1,
+            _cand(sample, j2, G): 0.9,
+            _cand(sample, j2, D2): 0.1,
+        },
+    )
+    historical = decode_multi_path(sample, prob, top_k=2, beam_width=4, null_policy="stop")
+    corpse = historical.best
+    assert corpse.status == "broken" and len(corpse.nodes) == 3
+    assert historical.best_goal is not None            # 完整路线就在同一个表里
+    assert len(historical.best_goal.nodes) == 7
+    assert corpse.log_prob > historical.best_goal.log_prob   # 残骸概率更高 -> 历史口径选它
+
+    strict = decode_multi_path(sample, prob, top_k=2, beam_width=4, strict=True)
+    assert strict.best.status == "goal"
+    assert strict.best.nodes == [S, A, J1, B, J2, C, G]
+    assert all(len(path.nodes) == 7 for path in strict.finished)
+
+
+def test_strict_legal_candidates_returns_empty_when_everything_is_illegal(sample, batch):
+    """mask 规则的单测：四条合法性判定全不通过时返回空表。
+
+    这张手工图每个 decision 恰好只有一条合法 branch，所以没法靠概率造出"无路可走"，
+    直接测 mask 函数本身。
+    """
+    from src.evaluation.multi_path_decoder import MultiDecodeResult
+    from src.evaluation.strict_beam_decoder import _legal_candidates
+
+    candidates = sample.field.candidates
+    decision_of = {int(n): i for i, n in enumerate(sample.segments.decision_nodes)}
+    group = [i for i, owner in enumerate(candidates.candidate_owner) if int(owner) == 0]
+    assert len(group) == 4
+    probs = [0.4, 0.3, 0.2, 0.1]
+    result = MultiDecodeResult(strict=True)
+
+    # seen = {0,1,2}（真实初始状态）：->J2 的 branch 合法
+    legal = _legal_candidates(candidates, group, probs, {0, 1, 2}, G, decision_of, result)
+    assert len(legal) == 1
+
+    # seen = {0,1,2,3}：->J2 的 branch 经过已访问的 3，也被 mask -> 一条合法 branch 都没有
+    result = MultiDecodeResult(strict=True)
+    legal = _legal_candidates(candidates, group, probs, {0, 1, 2, 3}, G, decision_of, result)
+    assert legal == []
+    assert result.num_masked_null == 1        # cand0
+    assert result.num_masked_loop == 2        # cand1 回到 0、cand2 经过 3
+    assert result.num_masked_dead_end == 1    # cand3 -> 7
+    assert result.num_masked == 4
+
+
+def test_strict_step_limit_path_goes_to_discarded(sample, batch):
+    """路径死亡时进 discarded（这里用 max_branches 触发），且不进最终候选集。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, J2): 0.6,
+            _cand(sample, j1, D1): 0.4,
+            _cand(sample, j2, G): 1.0,
+        },
+    )
+    strict = decode_multi_path(
+        sample, prob, top_k=2, beam_width=3, max_branches=1, strict=True
+    )
+    assert not strict.coverage
+    assert strict.finished == [] and strict.success == []
+    assert len(strict.discarded) == 1
+    assert strict.discarded[0].reason == "step limit exceeded"
+    assert strict.alive_left == 0
+
+
+def test_strict_ignores_null_policy_and_dead_branch_filter(sample, batch):
+    """strict 内置 NULL mask 与 dead-end mask，两个旧开关不再起作用。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, None): 0.5,
+            _cand(sample, j1, J2): 0.5,
+            _cand(sample, j2, G): 1.0,
+        },
+    )
+    a = decode_multi_path(sample, prob, top_k=2, beam_width=3, null_policy="stop", strict=True)
+    b = decode_multi_path(sample, prob, top_k=2, beam_width=3, null_policy="skip", strict=True)
+    c = decode_multi_path(
+        sample, prob, top_k=2, beam_width=3, null_policy="stop",
+        filter_dead_branches=True, strict=True,
+    )
+    for other in (b, c):
+        assert [p.nodes for p in other.finished] == [p.nodes for p in a.finished]
+        assert other.num_masked_null == a.num_masked_null
+
+
+def test_strict_beam_width_bounds_alive_paths_only(sample, batch):
+    """beam_width 限制的是"同时活着的路径数"，不是最终候选数。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, None): 0.3,
+            _cand(sample, j1, J2): 0.4,
+            _cand(sample, j1, D1): 0.3,
+            _cand(sample, j2, None): 0.3,
+            _cand(sample, j2, G): 0.5,
+            _cand(sample, j2, D2): 0.2,
+        },
+    )
+    narrow = decode_multi_path(sample, prob, top_k=2, beam_width=1, strict=True)
+    wide = decode_multi_path(sample, prob, top_k=2, beam_width=8, strict=True)
+    assert narrow.coverage and wide.coverage
+    assert narrow.alive_left == 0 and wide.alive_left == 0
+    assert len(wide.success) >= len(narrow.success)
+
+
+def test_strict_summary_exposes_the_three_pools(sample, batch):
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, None): 0.5,
+            _cand(sample, j1, J2): 0.5,
+            _cand(sample, j2, G): 1.0,
+        },
+    )
+    payload = decode_multi_path(sample, prob, top_k=2, beam_width=3, strict=True).summary()
+    assert payload["strict"] is True
+    assert payload["num_success"] == 1
+    assert payload["num_discarded"] == 0
+    assert payload["num_masked_null"] == 2
+    assert payload["num_masked"] == 6          # null 2 + loop 2 + dead-end 2
+    assert payload["alive_left"] == 0
+    assert payload["best_status"] == "goal"
+
+
+def test_strict_rejects_bad_arguments(sample, batch):
+    prob = torch.zeros(batch.num_candidates)
+    with pytest.raises(ValueError):
+        decode_multi_path(sample, prob, top_k=0, strict=True)
+    with pytest.raises(ValueError):
+        decode_multi_path(sample, prob, beam_width=0, strict=True)
+
+
+def test_strict_matches_greedy_when_there_is_exactly_one_legal_route(sample, batch):
+    """退化检查：整张图只有一条合法 s->g 路线时，strict 必须逐位走出它。"""
+    j1, j2 = _decisions(sample)
+    prob = _prob(
+        batch,
+        {
+            _cand(sample, j1, None): 0.4,
+            _cand(sample, j1, S): 0.3,       # loop
+            _cand(sample, j1, D1): 0.2,      # dead-end
+            _cand(sample, j1, J2): 0.1,      # 唯一的合法出口
+            _cand(sample, j2, None): 0.4,
+            _cand(sample, j2, D2): 0.35,
+            _cand(sample, j2, G): 0.25,      # 唯一的合法出口
+        },
+    )
+    strict = decode_multi_path(sample, prob, top_k=2, beam_width=1, strict=True)
+    assert strict.coverage
+    assert strict.best.nodes == [S, A, J1, B, J2, C, G]
+    assert strict.num_masked_null == 2
+    assert strict.num_masked_loop == 2       # J1 的 ->S、J2 的 ->J1（经已访问的 3）
+    assert strict.num_masked_dead_end == 2   # J1 的 ->7、J2 的 ->8
+
+
+def test_evaluate_dataset_supports_strict_decode(sample):
+    """evaluator 层要能把 strict 一路传下去（并且只有当 strict 时才报 mask 指标）。"""
+    report = _tiny_report(sample, top_k=2, beam_width=3, strict_decode=True)
+    info = report.multi["info"]
+    assert info["strict"] is True
+    assert info["best_readout"] == "argmax_{P in success} log_prob"
+    assert "mean_masked_null" in report.metrics
+    assert "mean_discarded_paths" in report.metrics
+
+    legacy = _tiny_report(sample, top_k=2, beam_width=3)
+    assert legacy.multi["info"]["strict"] is False
+    assert "mean_masked_null" not in legacy.metrics

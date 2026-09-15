@@ -133,6 +133,32 @@ class MultiDecodeResult:
     #: 被"必死 branch 预筛选"剔除的候选数（开关打开时才可能非 0）
     num_filtered_dead_branches: int = 0
 
+    # ---- 以下字段只在 ``strict=True``（:mod:`strict_beam_decoder`）时有意义 ----
+    #: ``strict`` 模式下 ``finished`` 的语义是"最终候选集 = success 池"（只有完整走到
+    #: Goal 的路径）；失败路径一律进 :attr:`discarded`、**永不参与最终排名**。
+    strict: bool = False
+    #: 已经走到 Goal 的**完整**路径。strict 模式下它就是 ``finished``（同一个列表）。
+    success: List[PathCandidate] = field(default_factory=list)
+    #: NULL / loop / dead-end / 步数超限 —— **仅用于统计**，不是候选路径。
+    discarded: List[PathCandidate] = field(default_factory=list)
+    #: 合法性 mask 计数（在 top-k **之前**被剔除的候选 branch 条数）
+    num_masked_null: int = 0
+    num_masked_loop: int = 0
+    num_masked_dead_end: int = 0
+    num_masked_missing_branch: int = 0
+    #: 搜索结束时仍活着的路径数。strict 模式下按定义必然是 0（``while alive``）。
+    alive_left: int = 0
+
+    @property
+    def num_masked(self) -> int:
+        """被合法性 mask 剔除的候选 branch 总数。"""
+        return (
+            self.num_masked_null
+            + self.num_masked_loop
+            + self.num_masked_dead_end
+            + self.num_masked_missing_branch
+        )
+
     @property
     def goal_paths(self) -> List[PathCandidate]:
         return [path for path in self.finished if path.goal_hit]
@@ -192,7 +218,7 @@ class MultiDecodeResult:
         return [path.to_dict() for path in self.goal_paths_by_cost(top_n)]
 
     def summary(self) -> Dict[str, Any]:
-        return {
+        payload = {
             "num_finished": len(self.finished),
             "num_goal_paths": len(self.goal_paths),
             "coverage": self.coverage,
@@ -205,6 +231,21 @@ class MultiDecodeResult:
             "max_depth": self.max_depth,
             "num_filtered_dead_branches": self.num_filtered_dead_branches,
         }
+        if self.strict:
+            payload.update(
+                {
+                    "strict": True,
+                    "num_success": len(self.success),
+                    "num_discarded": len(self.discarded),
+                    "num_masked": self.num_masked,
+                    "num_masked_null": self.num_masked_null,
+                    "num_masked_loop": self.num_masked_loop,
+                    "num_masked_dead_end": self.num_masked_dead_end,
+                    "num_masked_missing_branch": self.num_masked_missing_branch,
+                    "alive_left": self.alive_left,
+                }
+            )
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +257,7 @@ def decode_multi_path(
     null_policy: str = "stop",
     max_branches: int = 512,
     filter_dead_branches: bool = False,
+    strict: bool = False,
 ) -> MultiDecodeResult:
     """对一个样本做"存活路径表"式解码。
 
@@ -225,11 +267,18 @@ def decode_multi_path(
                          形状 ``[C_local]``。批量评测时用 candidate offset 切片。
         top_k:           每个 decision 保留概率最高的几条 branch（>= 1）。
         beam_width:      存活路径表的最大长度（按累计 log 概率保留最好的）。
-        null_policy:     ``stop`` / ``skip``，见模块 docstring。
+        null_policy:     ``stop`` / ``skip``，见模块 docstring。**``strict=True`` 时
+                         无效**（NULL 在 strict 下永远被 mask）。
         max_branches:    单条路径的步数上限（防御用；loop 检查已经在起作用）。
         filter_dead_branches:
                          指南第 3 节：top-k 之前剔除"终点既不是 Goal 也不是
                          decision node"的非 NULL branch。默认 ``False``（历史行为）。
+                         **``strict=True`` 时恒为真**。
+        strict:          ``True`` 时改走 :mod:`src.evaluation.strict_beam_decoder`
+                         的**三池**语义：失败路径（NULL / loop / dead-end）一律淘汰、
+                         只有完整到 Goal 的路径进最终候选集，
+                         ``P* = argmax_{P in success} log P_theta(P)``。
+                         默认 ``False`` = 历史行为，逐位可复现。
 
     执行顺序（指南第 3.5 节）::
 
@@ -238,6 +287,18 @@ def decode_multi_path(
             -> filter_dead_branches=True 时删除必死的非 NULL branch
             -> 按 candidate_prob 降序取 top_k
     """
+    if strict:
+        # 延迟 import：strict_beam_decoder 反向 import 本模块的 PathCandidate /
+        # MultiDecodeResult / edge_weight，放模块顶部会成环。
+        from src.evaluation.strict_beam_decoder import decode_strict_beam
+
+        return decode_strict_beam(
+            sample,
+            candidate_prob,
+            top_k=top_k,
+            beam_width=beam_width,
+            max_branches=max_branches,
+        )
     if int(top_k) < 1:
         raise ValueError(f"top_k must be >= 1, got {top_k}")
     if int(beam_width) < 1:
