@@ -165,6 +165,18 @@ def build_datasets(
     config: Config, progress_every: int = 500
 ) -> Dict[str, GraphQueryDataset]:
     data_cfg = config.section("data")
+    # 真实数据（DiDi）**不能现场生成**：它是一张固定城市图 + 真实车辆历史路径，
+    # 必须先跑 `scripts/prepare_didi.py --build`。忘了传 --data 时如果不拦，
+    # 这里会静默退化成 data.graph_type 的默认值 "er"，用随机图跑一遍"真实数据实验"
+    # 却得到一份看起来正常的曲线 —— 这是最贵的一类错误。
+    if str(data_cfg.get("source", "")) == "didi_chengdu":
+        raise RuntimeError(
+            "data.source=didi_chengdu cannot be generated on the fly. Run "
+            "`python scripts/prepare_didi.py --config <config> --build` first, "
+            "then train with:\n"
+            "  python scripts/train.py --config <config> --name <run> \\\n"
+            "    --data <paths.data_dir>/train.pkl --val-data <paths.data_dir>/val.pkl"
+        )
     split_cfg = config.get("split", {})
     fractions = {
         "train": float(split_cfg.get("train", 0.8)),

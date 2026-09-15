@@ -115,6 +115,37 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/generate_dataset.py --config confi
 | `smoke_test.pkl` | 24 KB | 3 条 | 同上 |
 | `smoke_summary.json` | 4 KB | — | 三个 split 的统计 |
 
+## didi_chengdu_gjd/ —— DiDi 成都真实道路数据（README 第 24 节）
+
+来源：`data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu/`（10 天轨迹 CSV +
+`dicts.pkl` + `edge_features.csv`）。**GT 是真实车辆历史路径，不是最短路**：93.7%
+的 GT 都不是 Dijkstra 最优，cost ratio 中位数 1.12。
+
+| 文件 | 大小 | 规模 | 用途 |
+|---|---|---|---|
+| `graph_global.pkl` | 227 KB | 2891 节点 / 4403 边 | 折叠后的全局无向有权成都路网 |
+| `train.pkl` / `val.pkl` | 519 MB / 62 MB | 4687 / 533 条 | 训练 / 模型选择 |
+| `test.pkl` | 149 MB | 1275 条 | 完整 test 指标 |
+| `test_1000.pkl` | 117 MB | 1000 条 | GDP 风格固定子集（论文主表） |
+| `shuffled_od_1000.pkl` | 95 MB | 741 条 | OD 打乱重配，**无真实 GT** |
+| `split_manifest.csv` | 904 KB | 6495 行 | 逐样本 order_id / split / gt_cost / gt_cost_ratio |
+| `metadata.json` | 2 KB | — | 建图统计、rho、过滤条件、划分 |
+| `stats.json` | 9 KB | — | 清洗漏斗 + corridor retention + 各 split 摘要 |
+| `scan_only.json` / `scan_corridor.json` | 3 KB / 3 KB | — | 阶段 0 / 阶段 1 的扫描产物 |
+| `_didi_candidates.pkl` | 10 MB | 36610 条 | 候选缓存（换配置自动失效） |
+
+规模偏大是因为真实 corridor 比 synthetic 大两个量级：一个 ~350 decision 的样本
+pickle 之后约 110 KB，`segments` + `field` 占大头。缩小的办法是调小
+`data.max_dataset_samples` 或 `data.corridor.rho`（见 README 第 24.4 / 24.5 节）。
+
+```bash
+# 三个阶段（约 4 分钟）+ 自检（不需要 torch）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-only
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-corridor
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --build
+E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+```
+
 ## public_graphs/ —— 公开图数据（下载而来）
 
 由 `scripts/download_graph_datasets.py` 下载（只用标准库，零第三方依赖）。默认 profile

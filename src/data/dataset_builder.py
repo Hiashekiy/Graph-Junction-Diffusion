@@ -16,6 +16,16 @@ decision node、off-path junction 为 NULL）。不满足语义的 OD 对直接�
   语义与改动前完全一致。
 - **P1-2**：``build_sample`` 一进来就把 graph / start / goal 统一 relabel 到
   0..N-1，之后 graph / gt_path / segments 全部共用同一套编号。
+
+真实数据接入（实施方案第 5 节）新增两个函数，**旧函数的语义一个字都没改**：
+
+    relabel_graph_and_path_to_contiguous()    graph 与整条 GT 一起重编号
+    build_sample_from_observed_path()         GT = 真实观测路径（不是 Dijkstra）
+
+两条 pipeline 的分工是硬约束，不要互相调用：
+
+    synthetic  ->  build_sample()                    （GT = 最短路）
+    real DiDi  ->  build_sample_from_observed_path() （GT = 历史车辆路径）
 """
 
 from __future__ import annotations
@@ -64,6 +74,96 @@ def relabel_to_contiguous(
     mapping = {node: index for index, node in enumerate(sorted(nodes))}
     relabelled = nx.relabel_nodes(graph, mapping, copy=True)
     return relabelled, mapping[start], mapping[goal]
+
+
+def relabel_graph_and_path_to_contiguous(
+    graph: nx.Graph,
+    gt_path: Sequence[Any],
+) -> Tuple[nx.Graph, List[int], Dict[Any, int]]:
+    """把 graph **和整条 gt_path** 一起重编号到 0..N-1（方案第 5.3 节）。
+
+    只 relabel ``graph/start/goal`` 是不够的：``segments``、``field`` 与
+    ``gt_path`` 必须全部落在**同一套**编号空间里，否则 ``build_decision_field``
+    会拿旧编号的 GT 去匹配新编号的 branch，静默产出错误的 z_0。
+
+    Returns:
+        ``(relabelled_graph, relabelled_gt_path, old_to_new)``。已经是 0..N-1 的
+        图原样返回（不复制），此时 ``old_to_new`` 是恒等映射。
+    """
+    path = list(gt_path)
+    nodes = list(graph.nodes())
+    if nodes == list(range(len(nodes))):
+        return graph, [int(node) for node in path], {node: node for node in nodes}
+
+    mapping = {node: index for index, node in enumerate(sorted(nodes))}
+    for node in path:
+        if node not in mapping:
+            raise ValueError(
+                f"gt_path node {node!r} is not a node of the graph; the observed "
+                "path and the graph must come from the same construction"
+            )
+    relabelled = nx.relabel_nodes(graph, mapping, copy=True)
+    return relabelled, [int(mapping[node]) for node in path], mapping
+
+
+# ---------------------------------------------------------------------------
+# observed GT sample（方案第 5 节）
+# ---------------------------------------------------------------------------
+def build_sample_from_observed_path(
+    graph: nx.Graph,
+    gt_path: Sequence[Any],
+    meta: Optional[Dict[str, Any]] = None,
+    graph_id: Optional[int] = None,
+) -> GraphSample:
+    """用**真实车辆历史路径**当 GT 构造样本（方案第 5.2 节）。
+
+    与 :func:`build_sample` 的唯一、也是本质的差别：
+
+        build_sample()                    weighted graph -> Dijkstra -> GT 是最短路
+        build_sample_from_observed_path() GT 就是传进来的观测路径
+
+    真实司机路线**未必**是最短路（实测成都数据 GT/Dijkstra cost ratio 中位数
+    1.11、p99 2.77），所以真实数据这条链上绝不能出现 ``nx.shortest_path``。
+    旧函数语义一个字都没改，synthetic pipeline 完全可复现。
+
+    处理顺序（方案第 5.2 节的硬要求）：
+
+        gt_path 长度 >= 2
+          -> start = gt_path[0], goal = gt_path[-1]
+          -> graph 与整条 gt_path 一起 relabel 到 0..N-1
+          -> bs.set_od()
+          -> bs.extract_segments(relabel=False)
+          -> build_decision_field(segments, gt_path)
+          -> validate_decision_field(segments, field, gt_path)
+    """
+    path = list(gt_path)
+    if len(path) < 2:
+        raise ValueError(f"observed gt_path needs at least 2 nodes, got {len(path)}")
+
+    graph, path, _mapping = relabel_graph_and_path_to_contiguous(graph, path)
+    start, goal = int(path[0]), int(path[-1])
+    if start == goal:
+        raise ValueError("observed gt_path starts and ends at the same node")
+
+    graph = bs.set_od(graph, start, goal)
+    segments = bs.extract_segments(graph, start, goal, relabel=False)
+    field = build_decision_field(segments, path)
+    validate_decision_field(segments, field, path)
+
+    sample_meta = dict(meta or {})
+    sample_meta.setdefault("graph_id", -1 if graph_id is None else int(graph_id))
+    # 自证：这份样本的 GT 不是 Dijkstra 算出来的，事后能从 meta 查出来
+    sample_meta.setdefault("gt_source", "observed")
+
+    return GraphSample(
+        graph=graph,
+        start=start,
+        goal=goal,
+        gt_path=path,
+        segments=segments,
+        field=field,
+        meta=sample_meta,
+    )
 
 
 # ---------------------------------------------------------------------------

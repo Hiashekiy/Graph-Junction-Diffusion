@@ -39,9 +39,15 @@ from src.evaluation.readout import (
     SINGLE_READOUT_ARGMAX,
     single_path_state,
 )
+from src.evaluation import real_path_metrics as rpm
 from src.models.denoiser import GraphFlowDenoiser
 from src.training.losses import LossWeights, one_step_clean_state_metrics
 from src.training.soft_goal import soft_goal_reachability
+
+
+#: ``GraphSample.meta['gt_source']`` 取这个值时，GT 是真实观测的历史车辆路径，
+#: 才会计算 normalize LCS / paired edge F1 这类"和真实路线比"的指标。
+OBSERVED_GT_SOURCE = "observed"
 
 
 @dataclass
@@ -52,6 +58,9 @@ class EvaluationReport:
     #: 仅 ``decode="multi"`` 时非空：三条口径（multi_best / multi_best_goal /
     #: multi_best_goal_cost）各自的 aggregate + 本次搜索的配置与集合语义指标。
     multi: Dict[str, Any] = field(default_factory=dict)
+    #: 仅当数据集带**真实观测 GT**（``meta['gt_source'] == 'observed'``）时非空。
+    #: 结构与旧 JSON 隔离，旧实验的 eval_*.json 一个字段都没被改。
+    real: Dict[str, Any] = field(default_factory=dict)
 
     def summary(self) -> str:
         return format_metrics(self.metrics)
@@ -148,6 +157,12 @@ def evaluate_dataset(
     goal_paths_total = 0
     filtered_dead_branches_total = 0
     weighted_seen = False
+    # 真实观测 GT（DiDi）才会被填；synthetic 数据集全程为空
+    real_records: List[rpm.PathPairRecord] = []
+    real_samples: List[Any] = []
+    real_skipped = 0
+    pred_paths: List[List[int]] = []
+    gt_paths: List[List[int]] = []
     start_time = time.time()
     batches = iter_batches(list(dataset), batch_size=batch_size, shuffle=False)
 
@@ -214,6 +229,27 @@ def evaluate_dataset(
 
             record = evaluate_sample(sample, result, per_sample_time)
             records.append(record)
+
+            # 真实数据指标（方案第 12、17-G 节）：只有 GT 是**观测历史路径**时才
+            # 计算。synthetic 数据集 meta 里没有这个标记 -> 整段跳过，旧实验的
+            # records / metrics / JSON 结构一个字节都没变。
+            gt_source = str(sample.meta.get("gt_source", "shortest"))
+            if gt_source == OBSERVED_GT_SOURCE:
+                paired = rpm.pair_record(
+                    list(result.path),
+                    list(sample.gt_path),
+                    bool(record.goal_hit),
+                    gt_cost_ratio=float(sample.meta.get("gt_cost_ratio", float("nan"))),
+                    pred_cost_ratio=float(record.cost_ratio),
+                )
+                real_records.append(paired)
+                real_samples.append(sample)
+                pred_paths.append(list(result.path))
+                gt_paths.append(list(sample.gt_path))
+            elif gt_source != "shortest":
+                # shuffled OD 之类：GT 是 Dijkstra 占位，绝不能进相似度指标
+                real_skipped += 1
+
             if multi is not None:
                 # 主口径（multi.best）与 records 共用同一条记录，避免重复算一遍
                 multi_records["multi_best"].append(record)
@@ -292,9 +328,70 @@ def evaluate_dataset(
         if debug_count
         else {}
     )
+
+    # ---- 真实数据指标（方案第 12 / 17-G 节）------------------------------
+    # 只有存在"观测 GT"样本时才产出。**同时**把主指标里的 path_similarity_score
+    # 提到顶层 metrics —— Trainer._maybe_save 是按 record 里的名字选 best.pt 的，
+    # 放在 real 里就选不到模型（DiDi 配置 training.selection_metric 用的就是它）。
+    real_payload: Dict[str, Any] = {}
+    if real_records:
+        paired_metrics = rpm.aggregate_pair_records(real_records)
+        distribution = rpm.distribution_metrics(gt_paths, pred_paths)
+        real_payload = {
+            "metrics": paired_metrics,
+            "distribution": distribution,
+            "num_paired": len(real_records),
+            "num_skipped_placeholder_gt": int(real_skipped),
+            "gt_source": OBSERVED_GT_SOURCE,
+            # 与 records 等长同序；没有观测 GT 的样本是 None，分桶时要跳过
+            "records": _align_real_records(dataset, real_samples, real_records),
+        }
+        metrics["path_similarity_score"] = paired_metrics["path_similarity_score"]
+        metrics["normalized_lcs_success"] = paired_metrics["normalized_lcs_success"]
+        metrics["edge_f1"] = paired_metrics["edge_f1"]
+        metrics["gt_cost_ratio"] = paired_metrics["gt_cost_ratio"]
+        metrics["pred_over_gt_cost_ratio"] = paired_metrics["pred_over_gt_cost_ratio"]
+        metrics["klev"] = distribution["klev"]
+        metrics["jsev"] = distribution["jsev"]
+    elif real_skipped:
+        # shuffled OD 集：GT 是 Dijkstra 占位，只报那些不需要真实 GT 的指标
+        real_payload = {
+            "metrics": {},
+            "distribution": {},
+            "num_paired": 0,
+            "num_skipped_placeholder_gt": int(real_skipped),
+            "gt_source": "dijkstra_placeholder",
+            "note": (
+                "this split has NO real GT path; only Goal Hit / Loop / Broken / "
+                "CostRatio / inference time are meaningful"
+            ),
+        }
+
     return EvaluationReport(
-        metrics=metrics, records=records, debug=debug, multi=multi_payload
+        metrics=metrics,
+        records=records,
+        debug=debug,
+        multi=multi_payload,
+        real=real_payload,
     )
+
+
+def _align_real_records(
+    dataset: Sequence[Any],
+    samples_seen: Sequence[Any],
+    real_records: Sequence[rpm.PathPairRecord],
+) -> List[Optional[Dict[str, Any]]]:
+    """把 paired 记录摊回**与 dataset 等长同序**的列表（缺席处为 ``None``）。
+
+    分桶（``length_buckets`` / ``decision_buckets``）是按样本下标取数的，
+    所以这里必须对齐；否则桶里会混进别的样本的相似度。
+    """
+    by_id = {id(sample): record for sample, record in zip(samples_seen, real_records)}
+    aligned: List[Optional[Dict[str, Any]]] = []
+    for sample in dataset:
+        record = by_id.get(id(sample))
+        aligned.append(record.to_dict() if record is not None else None)
+    return aligned
 
 
 @torch.no_grad()

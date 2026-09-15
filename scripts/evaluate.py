@@ -19,6 +19,18 @@
 （weighted 数据集上后者按 Dijkstra 最小 cost 判定，并额外暴露
 ``weighted_optimal_coverage_rate`` 这个名字）/ ``mean_goal_paths`` /
 ``mean_filtered_dead_branches``。结果 JSON 里放在 ``multi`` 键下。
+
+**真实数据（DiDi）**：当数据集里的样本带 ``meta['gt_source'] == 'observed'``
+（即 GT 是真实车辆历史路径，不是最短路）时，会额外产出并写进 JSON：
+
+    real_path_metrics.metrics       PathSimilarityScore / nLCS / paired Edge F1 /
+                                    PredCostRatio / GTCostRatio ...
+    real_path_metrics.distribution  KLEV / JSEV（dataset-level）
+    buckets.length_buckets          按 GT 长度等量三分（GDP 风格）
+    buckets.decision_buckets        按 num_decisions 分桶（长决策链诊断）
+
+这些字段**只在真实数据上出现**，旧实验的 eval_*.json 结构与字段名完全不变。
+shuffled OD 集（``meta['no_real_gt']``）没有真实 GT，会自动跳过相似度指标。
 """
 
 from __future__ import annotations
@@ -27,6 +39,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any, Dict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,7 +47,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data.dataset import GraphQueryDataset  # noqa: E402
-from src.evaluation.baselines import baseline_summary  # noqa: E402
+from src.evaluation import real_path_metrics as rpm  # noqa: E402
+from src.evaluation.baselines import baseline_summary, real_baseline_summary  # noqa: E402
 from src.evaluation.evaluator import evaluate_dataset, records_to_dicts  # noqa: E402
 from src.training.checkpoint import load_checkpoint  # noqa: E402
 from src.training.setup import build_diffusion, build_model, get_device  # noqa: E402
@@ -170,6 +184,70 @@ def main() -> int:
         print(f"debug metric : one_step_x0_acc={report.debug.get('accuracy', float('nan')):.4f} "
               f"(只作诊断，不作模型选择)")
 
+    # ---- 真实数据指标（方案第 12、17-J 节）-------------------------------
+    real_payload: Dict[str, Any] = {}
+    buckets_payload: Dict[str, Any] = {}
+    dataset_is_shuffled_od = bool(len(dataset)) and all(
+        sample.meta.get("no_real_gt") for sample in dataset
+    )
+    if report.real:
+        real_payload = {
+            "metrics": report.real.get("metrics", {}),
+            "distribution": report.real.get("distribution", {}),
+            "num_paired": report.real.get("num_paired", 0),
+            "num_skipped_placeholder_gt": report.real.get("num_skipped_placeholder_gt", 0),
+            "gt_source": report.real.get("gt_source"),
+        }
+        metrics = real_payload["metrics"]
+        if metrics:
+            print(
+                "real metrics : "
+                f"goal_hit={metrics.get('goal_hit_rate', float('nan')):.4f} | "
+                f"PathSim={metrics.get('path_similarity_score', float('nan')):.4f} | "
+                f"nLCS(success)={metrics.get('normalized_lcs_success', float('nan')):.4f} | "
+                f"EdgeF1={metrics.get('edge_f1', float('nan')):.4f} | "
+                f"PredCostRatio={metrics.get('pred_cost_ratio', float('nan')):.4f} | "
+                f"GTCostRatio={metrics.get('gt_cost_ratio', float('nan')):.4f} | "
+                f"Pred/GT={metrics.get('pred_over_gt_cost_ratio', float('nan')):.4f}"
+                "   (Pred/GT 是 C(P_pred)/C(P_GT)：模型比真实司机绕多少)"
+            )
+            distribution = real_payload["distribution"]
+            print(
+                "distribution : "
+                f"KLEV={distribution.get('klev', float('nan')):.6f} | "
+                f"JSEV={distribution.get('jsev', float('nan')):.6f} | "
+                f"shared_edge_support={distribution.get('shared_edge_support', 0):.0f}"
+                "  (dataset-level，不是单样本指标)"
+            )
+        # 分桶：GDP 风格按 GT 长度等量三分 + 项目特有的 decision 链长度分桶
+        aligned = report.real.get("records") or []
+        if aligned:
+            buckets_payload["length_buckets"] = rpm.bucket_report(
+                dataset, aligned, rpm.length_buckets(dataset, 3)
+            )
+            buckets_payload["decision_buckets"] = rpm.bucket_report(
+                dataset, aligned, rpm.decision_buckets(dataset)
+            )
+            for group_name, table in buckets_payload.items():
+                print(f"{group_name}:")
+                for bucket, row in table.items():
+                    print(
+                        f"    {bucket:<10s} n={int(row.get('real_num_queries', 0)):>4d} "
+                        f"goal_hit={row.get('goal_hit_rate', float('nan')):.4f} "
+                        f"PathSim={row.get('path_similarity_score', float('nan')):.4f} "
+                        f"nLCS={row.get('normalized_lcs_success', float('nan')):.4f} "
+                        f"EdgeF1={row.get('edge_f1', float('nan')):.4f} "
+                        f"CostRatio={row.get('pred_cost_ratio', float('nan')):.4f}"
+                    )
+    elif dataset_is_shuffled_od:
+        # 方案第 7.5 / 16.3 节：shuffled OD 集**没有真实 GT path**，
+        # 只报 Goal Hit / Loop / Broken / CostRatio / 推理时间。
+        print(
+            "real metrics : skipped —— this split has no real GT path "
+            "(shuffled OD); only Goal Hit / Loop / Broken / CostRatio / "
+            "inference time are meaningful"
+        )
+
     payload = {
         # 评测产物自己记录数据集：看板不再靠文件名猜（加权 run 的 eval_test.json
         # 与无权 run 同名，只靠文件名会认错数据集）。
@@ -190,11 +268,32 @@ def main() -> int:
         },
         "records": records_to_dicts(report.records),
     }
+    if real_payload:
+        payload["real_path_metrics"] = real_payload
+    if buckets_payload:
+        payload["buckets"] = buckets_payload
+    if real_payload.get("distribution"):
+        payload["distribution_metrics"] = real_payload["distribution"]
     if report.multi:
         payload["multi"] = report.multi
     if args.baselines:
         payload["baselines"] = baseline_summary(dataset)
         print("baselines    :", json.dumps(payload["baselines"], ensure_ascii=False))
+        # 真实数据上额外给 Dijkstra / greedy 的 nLCS / Edge F1（方案第 13 节）
+        try:
+            real_baselines = real_baseline_summary(dataset)
+        except Exception:  # pragma: no cover - baseline 只是附加产物，不该拖垮评测
+            real_baselines = {}
+        if real_baselines:
+            payload["baselines_real"] = real_baselines
+            for name, row in real_baselines.items():
+                print(
+                    f"baseline {name:<14s} "
+                    f"PathSim={row.get('path_similarity_score', float('nan')):.4f} "
+                    f"nLCS={row.get('normalized_lcs_success', float('nan')):.4f} "
+                    f"EdgeF1={row.get('edge_f1', float('nan')):.4f} "
+                    f"CostRatio={row.get('pred_cost_ratio', float('nan')):.4f}"
+                )
 
     if args.out:
         out_path = Path(args.out)

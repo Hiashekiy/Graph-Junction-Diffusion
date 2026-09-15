@@ -31,7 +31,7 @@ z_t  ->  E_t = Psi(z_t)  ->  H_{t-1} = F_theta(H_t, E_t, tau_t)  ->  p_theta(z_0
 > 下面所有命令都是**单行**、不带 shell 变量、不带续行符，可以直接粘贴到 Git Bash 里执行。
 > 解释器统一写成 `E:/CondaEnvData/envs/GGMPC/python.exe`（PATH 里的 `python` 没装 torch）。
 
-### 0.1 数据集（`data/` 下按来源分 5 组，被 .gitignore 忽略，不进版本库）
+### 0.1 数据集（`data/` 下按来源分 6 组，被 .gitignore 忽略，不进版本库）
 
 文件名一律保持不变——历史 `eval*.json` / `mp_*.json` 是按**文件名**记录数据集的，改名会让
 它们对不上号——只是按来源挪进子目录，逐份索引见 `data/README.md`。
@@ -112,6 +112,20 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/visualize_public_graphs.py
 
 每条边 w ~ U(1, 10)（可用 `data.edge_weight.distribution` 换 loguniform），GT 是 Dijkstra 最小 cost 路径。
 实测：conflict rate 0.460、bfs cost ratio 1.034、`gt_path_is_weighted_optimal_fraction` 1.0。
+
+**H. DiDi 成都真实道路数据集 —— `data/didi_chengdu_gjd/`（第 24 节，**GT 是真实车辆历史路径**）**
+
+| 文件 | 是什么 | 规模 | 用途 |
+|---|---|---|---|
+| `train.pkl` / `val.pkl` | 真实路网 OD 训练/验证集 | 4687 / 533 条 | `didi_chengdu_flow1_weighted` |
+| `test.pkl` | 完整测试集 | 1275 条 | 全量 test 指标 |
+| `test_1000.pkl` | GDP 风格固定子集 | 1000 条 | 论文主表 |
+| `shuffled_od_1000.pkl` | OD 打乱重配，**无真实 GT** | 741 条 | 只测 GoalHit/Loop/Broken/CostRatio/时间 |
+| `graph_global.pkl` | 全局无向有权成都路网 | 2891 节点 / 4403 边 | 建图复现与可视化 |
+| `split_manifest.csv` / `metadata.json` / `stats.json` | 逐样本清单 / 建图与 rho 元数据 / 清洗漏斗与各 split 摘要 | — | 可复现性与数据质量 |
+
+GT 是 CSV 里真实车辆走过的路径（93.7% 都不是最短路，cost ratio 中位数 1.12），
+corridor 用 rho=1.5 的 OD 椭球。生成命令与全部实测结论见**第 24 节**。
 
 ### 0.2 训练好的模型（`outputs/runs/`，checkpoint 不进版本库）
 
@@ -271,6 +285,22 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/merge_datasets.py --out data/mixed/m
 
 # 图级泄漏检查（必须 0 重叠才能训；有任何一对重叠就退出码 1）
 E:/CondaEnvData/envs/GGMPC/python.exe tools/check_leakage.py --pair data/mixed/mixed_oldv1_train.pkl data/mixed/mixed_oldv1_val.pkl --pair data/mixed/mixed_oldv1_train.pkl data/oldv1/oldv1_test.pkl --pair data/mixed/mixed_oldv1_train.pkl data/controlled/controlled_test.pkl
+```
+
+**DiDi 成都真实道路数据（第 24 节）**
+
+```bash
+# 阶段 0：扫描原始文件，确认道路长度列名 / 转换率 / GT cost ratio（不建数据）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-only
+
+# 阶段 1：在 train split 上比较 rho 候选，选 corridor 参数并冻结进配置
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-corridor
+
+# 阶段 2：生成 train/val/test/test_1000/shuffled_od_1000（约 4 分钟，产出 ~1GB）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --build
+
+# 自检（不需要 pytest / torch，20 条断言覆盖转换 / corridor / 指标 / 已生成数据集）
+E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
 ```
 
 **测试与静态检查**
@@ -1797,3 +1827,263 @@ sampled z0 = [2, 5, 10, 16, 19]   -> broken  16 跳 / cost  92.35   NULL selecte
 > **注**：第 0.2 节模型表里较早那些 `controlled_test` / `long` / `oldv1_test` 的 single 数字是在本次
 > 改动**之前**测的（等价于现在的 `single_sampled`），没有重跑；要看新口径请用第 23.5 节或
 > `docs/REPORT_multipath_and_weighted.md`。
+
+---
+
+## 24. DiDi 成都真实道路数据接入（真实车辆历史路径当 GT）
+
+对应实施方案 `Graph_Junction_Diffusion_DiDi_RealData_Implementation_Plan.md`。
+这一节是这条链路的**唯一使用说明**：数据语义、实测结论、四个命令、与方案的偏离。
+
+### 24.1 任务变了：GT 不再是最短路
+
+合成数据那条链是 `随机图 -> BFS/Dijkstra -> 最短路当 GT`。真实数据这条链是：
+
+```
+固定成都路网 G + 道路长度 W + OD(s,g)  ->  CSV 里真实车辆走过的 junction 路径（GT）
+                                      ->  OD corridor 子图
+                                      ->  Branch Segment -> z0 -> Diffusion
+```
+
+**必须区分"边权进入模型"和"GT 必须是最短路"**：
+
+| | 合成数据 | DiDi 真实数据 |
+|---|---|---|
+| 模型输入 | 可选 edge weight | 道路长度（`length`，米） |
+| GT | Dijkstra 最小 cost 路径 | **真实司机历史路线** |
+| Dijkstra 的角色 | 生成 GT | 只当 `C*` 标尺（CostRatio 的分母） |
+
+实测成都数据 **93.7% 的 GT 都不是最短路**，GT/Dijkstra cost ratio 中位数 1.12、
+max 2.24。所以 `Optimal Path Rate` 在真实数据上不再是"模型对不对"的判据 —— 它必须
+降级成 secondary metric，主指标换成路径相似度（见 24.6）。
+
+### 24.2 原始文件与语义
+
+数据在 `data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu/`：
+
+| 文件 | 用途 |
+|---|---|
+| `dicts.pkl` | `road_id -> (u, v, key)`，重建 junction graph + road path 转 junction path |
+| `edge_features.csv` | 道路静态属性；第一版只取 **`length`**（已确认列名）当 edge weight |
+| `20161010~19.csv` | 真实车辆轨迹，核心字段 `path` = **road id 序列**（不是 junction id） |
+| `line_graph_edge_idx.npy` | 只用于校验 road 转移；**不作为主模型图** |
+| `transition_prob_mat.npy` | 第一版不进模型 |
+
+### 24.3 实测结论（这些数决定了实现方式，改代码前先读）
+
+* **折叠后的成都路网只有 2891 节点 / 4403 边**，单连通分量。6639 条 road segment
+  里有 2226 对平行路段（同一 `(u,v)` 多个 `key`）按方案第 3.3 节折叠成最短的那条，
+  另丢弃 10 条自环 road。
+* 2466 / 2891 个节点度 >= 3 —— 这是一张**很密**的城市图，"junction" 几乎就是全部
+  路口。所以 corridor 里 decision 数天然就大（中位数 ~300）。
+* 轨迹相邻 road 在 `idx2edge` 的**存储方向**上 100% 连续（80000 行实测，没有一条
+  需要反向）。所以 road -> junction 转换的主算法用存储方向（精确、天然处理掉头），
+  方案第 4.1 节的端点集合写法作为兜底（它的前两条 road 必须**一起消费**，否则每条
+  road 都会算错一次）。
+* 约 1.6% 的相邻 road 对是"平行路段掉头"（`{u,v}` 相同、方向相反），会形成重复
+  junction，由 `require_simple_gt` 过滤；实测 80000 行里 37.8% 的轨迹含环路。
+* 清洗漏斗（80000 行）：parse 100% -> road id 100% -> 连续 100% -> 长度区间与简单
+  路径各 36610/80000 = 45.8% -> 去重后 27570（轨迹重复率 24.7%）-> 抽样 8000 ->
+  corridor 保留 81.4%。
+
+### 24.4 corridor 的 rho：方案里的 98% 在这张网上拿不到
+
+方案第 6.3 节要求"train GT containment >= 98% 的最小 rho"。实测（train split
+4320 条候选，weighted 距离口径，见 `data/didi_chengdu_gjd/scan_corridor.json`）：
+
+| rho | train GT containment | mean corridor nodes | mean decisions |
+|---:|---:|---:|---:|
+| 1.1 | 0.479 | 151 | 114 |
+| 1.2 | 0.686 | 263 | 210 |
+| 1.3 | 0.804 | 362 | 296 |
+| 1.4 | 0.868 | 456 | 375 |
+| **1.5** | **0.912** | **545** | **452** |
+| 1.8 | 0.966 | 790 | 663 |
+| 2.0 | 0.979 | 940 | 792 |
+| 2.5 | 0.994 | 1276 | 1081（44% 的整张城图）|
+
+**98% 只有 rho >= 2.4 才够，那时 corridor 已经吞掉半座城市、每个样本 1000+ decision，
+"走廊"这个设计本身失效了。** 所以第一版取 **rho = 1.5**：corridor 只保留 ~19% 的
+城市节点、train containment 0.912，剩下 ~9% 按方案第 6.3 节记 `corridor_miss`
+并从数据集里剔除，`stats.json` 里单独报 `corridor_retention`。
+
+想更贴近方案的 98% 就把 `data.corridor.rho` 改成 1.8（retention 0.97，但 decision
+数 +47%、样本体积与训练时间按比例上升）。rho 只在 train 上选、选定后冻结，val/test
+不得重新按 GT 调整。
+
+附带一个反直觉但重要的结论：**hop 距离口径比 weighted 差**。同样 containment 下
+hop 椭球要大得多（rho_hop=2.5 才 98.7%，而 weighted rho=1.5 就 91.2%、节点数只有
+它的 44%）。所以 corridor 用道路长度算距离是对的。
+
+### 24.5 四个命令
+
+```bash
+# 阶段 0：扫描（不改数据）—— 确认 edge_features 列名、道路长度统计、转换率、
+#         invalid road id、连续性失败率、环路 GT 率、唯一路径数、GT cost ratio 分布
+python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-only
+
+# 阶段 1：corridor rho 扫描，选出并冻结 rho
+python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --scan-corridor
+
+# 阶段 2：生成正式数据集
+python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml --build
+
+# 自检（不需要 pytest / torch；20 条断言 + 已生成数据集复核）
+python tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd
+```
+
+`--max-samples N` 覆盖 `data.max_dataset_samples`（最终数据集规模）。它和
+`data.max_candidates` **不是一回事**：后者只是解析期的内存/时间闸门。候选要读满
+10 个日期文件才有 OD/时段多样性，所以先尽量多收集、再按固定 seed 均匀抽到目标规模。
+
+`--set data.corridor.rho=1.8` 之类的覆盖照旧可用。候选轨迹会缓存到
+`data/didi_chengdu_gjd/_didi_candidates.pkl`（签名含文件 mtime/size + 过滤条件），
+换配置会自动失效重读，`--refresh-cache` 强制重读。
+
+### 24.6 产出与指标
+
+```
+data/didi_chengdu_gjd/
+├── graph_global.pkl          全局无向有权 junction graph + 建图统计
+├── train.pkl / val.pkl / test.pkl
+├── test_1000.pkl             GDP 风格固定 1000 条
+├── shuffled_od_1000.pkl      OD 打乱重配；没有真实 GT，只测 GoalHit/Loop/Broken/CostRatio/时间
+├── split_manifest.csv        sample_id/order_id/date/split/长度/decision/gt_cost/gt_cost_ratio
+├── metadata.json             建图统计 / rho / 过滤条件 / 划分 / 规模
+├── stats.json                funnel（每步保留率）/ corridor_retention / 各 split 摘要
+├── scan_only.json            --scan-only 的产物
+└── scan_corridor.json        --scan-corridor 的产物
+```
+
+当前这份（seed 0、rho 1.5、`max_dataset_samples=8000`）：
+
+| split | n | decision 均值 | corridor 节点均值 | NULL 候选占比 | corridor retention |
+|---|---:|---:|---:|---:|---:|
+| train | 4687 | 348 | 426 | 0.230 | 0.814 |
+| val | 533 | 361 | — | 0.230 | 0.833 |
+| test | 1275 | 361 | — | 0.230 | 0.797 |
+| test_1000 | 1000 | — | — | — | — |
+| shuffled_od_1000 | 741 | — | — | — | 无真实 GT |
+
+train/val/test 的轨迹键两两零交集（`stats.json` 里 `split_overlaps` 全 0，自检脚本
+也会断言）。三个 split 的 GT 都带 `gt_source == "observed"`。
+
+真实数据多出来的指标（只在 `meta['gt_source'] == 'observed'` 时计算，**旧实验的
+JSON 结构与字段名一个字节都没改**）：
+
+* `path_similarity_score = mean( 1(goal_hit) * nLCS )`，`nLCS = LCS(pred, gt)/|gt|`
+  —— 没到终点记 0，用来选 `best.pt`；
+* `normalized_lcs_success`（只在成功样本上算）、paired `edge_precision/recall/f1`
+  （无向边规范化后比较）；
+* `gt_cost_ratio` / `pred_cost_ratio`（辅助指标，不是主指标）；
+* `klev` / `jsev`（dataset-level 的 edge visit 分布散度，DiffPath 风格）；
+* `buckets.length_buckets`（按 GT 长度等量三分）、`buckets.decision_buckets`
+  （按 `num_decisions` 分 1-3 / 4-6 / 7-9 / >=10）。
+
+### 24.7 训练与评测
+
+```bash
+# 正式训练（flow_steps=1、T=50、batch 16、AdamW lr 1e-4、AMP，100 epoch）
+python scripts/train.py --config configs/graph_flow_didi_weighted.yaml \
+  --name didi_chengdu_flow1_weighted \
+  --data data/didi_chengdu_gjd/train.pkl --val-data data/didi_chengdu_gjd/val.pkl
+
+# 完整 test + Dijkstra baseline
+python scripts/evaluate.py --config configs/graph_flow_didi_weighted.yaml \
+  --checkpoint outputs/runs/didi_chengdu_flow1_weighted/best.pt \
+  --data data/didi_chengdu_gjd/test.pkl --deterministic --baselines \
+  --out outputs/runs/didi_chengdu_flow1_weighted/eval_test.json
+
+# GDP 风格主表
+python scripts/evaluate.py ... --data data/didi_chengdu_gjd/test_1000.pkl
+
+# shuffled OD（自动跳过相似度指标，只报 GoalHit/Loop/Broken/CostRatio/时间）
+python scripts/evaluate.py ... --data data/didi_chengdu_gjd/shuffled_od_1000.pkl
+
+# 最干净的消融：同一份数据、同一网络、只切 model.use_edge_cost true/false
+python scripts/train.py --config configs/graph_flow_didi_weighted.yaml \
+  --name didi_chengdu_flow1_noedgecost --set model.use_edge_cost=false ...
+```
+
+配置里三处与 synthetic 不同的关键项：`split.split_by_graph: false`（真实数据是
+**一张固定城市图**，必须按 path 划分）、`flow_steps: 1`（推理必须与训练同轮数）、
+`training.selection_metric: path_similarity_score`（`GoalHit` 在真实数据上会较早
+饱和，而路径相似度还在改善）。**loss 第一版没有改**：仍然是
+`L = CE + 0.1 * SoftGoal` —— 真实 GT 是司机选择而不是最优解，直接加 cost loss 会把
+模型拉回"只追最短路"，改变研究任务本身。
+
+OOM 时按 `16 -> 8 -> 4` 降 batch，**不要**先降模型维度。
+
+**先做小规模验证再上全量**（方案第 14 节阶段 3/4）。用 `--max-samples` 造小数据集，
+它控制的是"最终抽多少条候选"，不要用 `--max-rows-per-file` 去凑：
+
+```bash
+# 阶段 3：smoke test（约 1 分钟出数据）—— train ~580 / val ~80 / test ~150
+python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml \
+  --build --max-samples 1000 --out-dir data/didi_chengdu_smoke
+
+# 阶段 4：小样本 overfit（32~64 条，反复训到 x0 acc 接近 1、PathSim 明显升高）
+python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml \
+  --build --max-samples 220 --out-dir data/didi_chengdu_overfit
+```
+
+真实小样本都过拟合不了，**不要**直接跑全量。
+
+### 24.8 新增 / 修改的文件
+
+| 文件 | 状态 | 内容 |
+|---|---|---|
+| `src/data/didi_dataset.py` | 新增 | dicts/edge_features 读取、建全局有权图、road->junction 转换、corridor、距离缓存、过滤/去重/划分、funnel 统计 |
+| `scripts/prepare_didi.py` | 新增 | `--scan-only` / `--scan-corridor` / `--build` 三个阶段 + 候选缓存 |
+| `configs/graph_flow_didi_weighted.yaml` | 新增 | DiDi 配置（含 rho 取舍的实测表） |
+| `src/evaluation/real_path_metrics.py` | 新增 | LCS / nLCS / paired Edge PRF / PathSimilarityScore / KLEV / JSEV / cost ratio / 分桶 |
+| `tests/test_didi_dataset.py` | 新增 | 转换 / corridor 无泄漏 / observed GT 不被替换 / 划分无交集 / flow_steps=1 |
+| `tests/test_real_path_metrics.py` | 新增 | 每个指标的手算小样例 |
+| `tools/verify_didi_pipeline.py` | 新增 | 不依赖 pytest / torch 的自检脚本 |
+| `src/data/dataset_builder.py` | 改 | **新增** `relabel_graph_and_path_to_contiguous()` / `build_sample_from_observed_path()`；**旧函数语义一字未改** |
+| `src/data/decision_field.py` | 改 | 校验第 6 条放宽：允许"绕回 owner 的 loop branch"（见 24.9） |
+| `src/data/dataset.py` | 改 | docstring 说明 GT 语义；`summary()` 增 `gt_cost` / `gt_cost_ratio` / `gt_source` |
+| `src/training/trainer.py` | 改 | `training.selection_metric` / `selection_mode`，默认仍是 `goal_hit_rate` / `max` |
+| `src/evaluation/evaluator.py` | 改 | `EvaluationReport.real`；有观测 GT 时把 `path_similarity_score` 等提到顶层 metrics |
+| `src/evaluation/baselines.py` | 改 | 新增 `real_baseline_summary()`：Dijkstra/greedy 的 nLCS / Edge F1 / CostRatio |
+| `scripts/evaluate.py` | 改 | 输出 `real_path_metrics` / `distribution_metrics` / `buckets`；shuffled OD 自动跳过相似度指标 |
+
+### 24.9 实现时踩到的坑
+
+1. **corridor 裁剪会造出"绕回 owner 的 loop branch"。** 子图提取会**降低节点度**，
+   把原本度 >= 3 的节点降成度 2，于是出现 `O -> X -> Y -> O` 这样的分支。它在语义上
+   完全合法（`branch_reach_target` 认出这是"绕行回到自己"的候选，而且永远不可能成为
+   GT branch），但 `validate_decision_field` 的"branch 节点不得重复"断言会把整条样本
+   丢掉 —— 实测会丢掉 **13.4%** 的样本。修法是只放行"首尾相同、内部不重复"这一种
+   情形，这是**严格更宽松**的改动：合成管线的 branch 本来就无重复节点，旧行为逐位不变。
+   修完 build 失败率从 13.4% 降到 0，这类 branch 只占全部 branch 的 0.02%。
+2. **端点集合兜底的前两条 road 必须一起消费**，否则每条 road 都会算错一次位置。
+3. **`target_gt_containment` 不能照抄 0.98**（见 24.4）。
+4. **样本体积**：一个 ~350 decision 的 corridor 样本 pickle 之后约 110KB，其中
+   `segments` 与 `field` 远大于 `graph` 本身。所以 8000 条落地约 1GB。
+   `data.max_dataset_samples` 就是为这个加的闸门。
+
+### 24.10 方案的刻意偏离与未完成项
+
+**刻意偏离（都有实测依据）**
+
+* `rho` 从"方案要求 98%"改成"train containment >= 0.91 的最小 rho = 1.5"（24.4）。
+* `data.length_column` 直接写成 `length`（已用 `--scan-only` 核实），而不是留
+  `null` —— 留 null 会让 `--build` 直接报错；代码里"不许猜列名、不许退化成
+  `weight=1`"的硬校验一条都没少。
+* 放宽了 `validate_decision_field` 的 branch 唯一性断言（24.9 第 1 条）。
+* 方案第 12.5 节的 km-based DTW **没有实现**：`dicts.pkl` 只有 OSM node id，没有
+  junction 经纬度，所以不伪造 DTW。
+
+**未完成（本机环境限制）**
+
+* 本机 `torch` 未安装（也没有网络装包），所以**方案第 14 节的阶段 3（256 样本
+  smoke test）、阶段 4（32~64 样本 overfit）、阶段 5（正式训练）以及第 16 节的
+  全部评测都没有跑**。数据侧（阶段 0~2）已完整跑通并自检通过；
+  `tests/` 里的两个新测试文件也**没有被执行过**（`tests/conftest.py` 要 import
+  torch —— 本机 pytest 也没装）。请在有 torch 的环境里先跑：
+
+  ```bash
+  python -m pytest tests/test_didi_dataset.py tests/test_real_path_metrics.py -q
+  python tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd   # 不需要 torch，已通过
+  ```

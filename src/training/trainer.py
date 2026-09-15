@@ -9,12 +9,23 @@
     2. 跑完整 reverse chain 算 Goal Hit / Optimal / Cost Ratio / Loop / Broken。
 
 模型选择主指标默认是 goal hit rate，而不是 decision accuracy（指南第 24 节）。
+
+**best.pt 的选择指标可配置**（方案第 15 节）：
+
+    training.selection_metric: goal_hit_rate        （默认，旧行为）
+                              path_similarity_score （真实 DiDi 数据用）
+    training.selection_mode:   max | min            （默认 max）
+
+真实数据上 GoalHit 会较早饱和，而"路径与真实司机路线有多像"还在继续改善，
+所以 DiDi 配置改用 ``path_similarity_score``（未到达 goal 的 query 记 0）。
+两个键的默认值都写死成旧行为，老配置读出来完全不变。
 """
 
 from __future__ import annotations
 
 import contextlib
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -115,6 +126,28 @@ class Trainer:
         self.global_step = 0
         self.start_epoch = 0
         self.best_metric = float("-inf")
+
+        # ---- best.pt 的选择指标（方案第 15 节）---------------------------
+        # 默认值必须写死成 goal_hit_rate / max：老配置里没有这两个键，读出来就是
+        # 旧行为，旧 run 的 best.pt 语义逐位不变。
+        # 真实 DiDi 数据用 path_similarity_score：GoalHit 在真实数据上会较早饱和，
+        # 而"路径像不像司机走的那条"还在继续改善；而且该指标对没到 goal 的 query
+        # 记 0，不会让"没到终点但前半段很像"拿到虚高分。
+        self.selection_metric = (
+            str(training_cfg.get("selection_metric", "goal_hit_rate"))
+            if training_cfg
+            else "goal_hit_rate"
+        )
+        self.selection_mode = (
+            str(training_cfg.get("selection_mode", "max")).lower()
+            if training_cfg
+            else "max"
+        )
+        if self.selection_mode not in ("max", "min"):
+            raise ValueError(
+                f"training.selection_mode={self.selection_mode!r} is not "
+                "'max' or 'min'"
+            )
 
     # ------------------------------------------------------------------
     def _autocast(self):
@@ -289,6 +322,34 @@ class Trainer:
             with open(self.run_dir / "history.json", "w", encoding="utf-8") as handle:
                 json.dump(self.history, handle, indent=1)
 
+    def _selection_score(self, record: Dict[str, Any]) -> Optional[float]:
+        """把 ``record`` 里的选择指标转成"越大越好"的分值。
+
+        ``None`` 表示"这一轮不更新 best.pt"。两种情况：
+
+        * 配置的就是默认的 ``goal_hit_rate`` —— 走**历史回退链**
+          （``goal_hit_rate`` -> ``-train_loss``），旧 run 的 best.pt 逐位不变；
+        * 配置了别的指标（例如真实数据的 ``path_similarity_score``）而这一轮
+          没算出来（``eval_every`` 没到、或 val 里没有观测 GT）—— **直接跳过**。
+          退回 ``-train_loss`` 会把"这一轮没评测"当成"表现变好了"，是很隐蔽的
+          选模型 bug。
+        """
+        if self.selection_metric == "goal_hit_rate":
+            metric = record.get("goal_hit_rate")
+            if metric is None:
+                metric = -record.get("train_loss", float("inf"))
+        else:
+            metric = record.get(self.selection_metric)
+            if metric is None:
+                return None
+        try:
+            value = float(metric)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(value):
+            return None
+        return value if self.selection_mode == "max" else -value
+
     def _maybe_save(self, epoch: int, record: Dict[str, Any]) -> None:
         if self.run_dir is None:
             return
@@ -302,11 +363,11 @@ class Trainer:
             model_config=self.config.to_dict().get("model") if self.config else None,
             diffusion_config=self.config.to_dict().get("diffusion") if self.config else None,
         )
-        metric = record.get("goal_hit_rate")
-        if metric is None:
-            metric = -record.get("train_loss", float("inf"))
-        if metric > self.best_metric:
-            self.best_metric = float(metric)
+        score = self._selection_score(record)
+        if score is None:
+            return
+        if score > self.best_metric:
+            self.best_metric = float(score)
             save_checkpoint(
                 self.run_dir / "best.pt",
                 self.model,
@@ -317,4 +378,9 @@ class Trainer:
                 model_config=self.config.to_dict().get("model") if self.config else None,
                 diffusion_config=self.config.to_dict().get("diffusion") if self.config else None,
             )
-            print(f"[epoch {epoch}] new best (metric={self.best_metric:.4f})", flush=True)
+            print(
+                f"[epoch {epoch}] new best "
+                f"({self.selection_metric}/{self.selection_mode}="
+                f"{record.get(self.selection_metric, record.get('goal_hit_rate'))})",
+                flush=True,
+            )

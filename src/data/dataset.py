@@ -3,11 +3,16 @@
 一个 :class:`GraphSample` = 一张图上的一个 (s, g) query：
 
     graph       : NetworkX 图（只用于 evaluation / 调试，训练不读它）
-    gt_path     : GT 最短路，节点序列 [s, ..., g]
+    gt_path     : GT route，节点序列 [s, ..., g]。synthetic 数据是 GT 最短路；
+                  real DiDi 数据是**真实车辆历史路径**（未必是最短路）
     segments    : Branch Segment 分解结果
     field       : z_0（clean decision field）与扁平 candidate 表
 
 训练与推理阶段的模型只消费这里预先算好的结构，不再做 NetworkX 遍历。
+
+真实数据接入后 ``gt_path`` 的语义变宽了，所以判据必须是
+``sample.meta['gt_source']``（``"shortest"`` / ``"observed"``）而不是"它一定是
+最短路"。任何假设 ``gt_path == Dijkstra`` 的代码在真实数据上都是错的。
 """
 
 from __future__ import annotations
@@ -110,7 +115,7 @@ class GraphQueryDataset:
     def summary(self) -> Dict[str, Any]:
         if not self.samples:
             return {"num_samples": 0}
-        return {
+        summary: Dict[str, Any] = {
             "num_samples": len(self.samples),
             "num_nodes": _stats([s.num_nodes for s in self.samples]),
             "num_decisions": _stats([s.num_decisions for s in self.samples]),
@@ -123,6 +128,21 @@ class GraphQueryDataset:
                 ]
             ),
         }
+        # 真实数据（方案第 17-C 节）：gt_cost / gt_cost_ratio 只存在于 meta 里，
+        # 不进 dataclass —— GraphSample 的结构对旧实验保持逐位兼容。
+        for key in ("gt_cost", "gt_cost_ratio", "dijkstra_cost"):
+            values = [
+                float(sample.meta[key])
+                for sample in self.samples
+                if isinstance(sample.meta.get(key), (int, float))
+            ]
+            if values:
+                summary[key] = _stats(values)
+        sources = {
+            str(sample.meta.get("gt_source", "unknown")) for sample in self.samples
+        }
+        summary["gt_source"] = sorted(sources)
+        return summary
 
 
 def _stats(values: Sequence[float]) -> Dict[str, float]:

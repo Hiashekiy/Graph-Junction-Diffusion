@@ -124,3 +124,53 @@ def baseline_summary(dataset, rng=None) -> Dict[str, Dict[str, float]]:
             "mean_cost_ratio": (sum(finite) / len(finite)) if finite else float("nan"),
         }
     return stats
+
+
+def real_baseline_summary(dataset, rng=None) -> Dict[str, Dict[str, float]]:
+    """真实数据上的 baseline 口径（方案第 13 节）。
+
+    Dijkstra 的价值不是"比模型更短"，而是回答：
+
+        真实司机路线 / 模型生成的路线，相对几何最短路到底偏离了多少？
+
+    所以这里对齐真实 GT 报 **nLCS / paired Edge F1 / CostRatio**，而不只是
+    GoalHit。没有 ``gt_source == 'observed'`` 的样本（shuffled OD 的 Dijkstra
+    占位 GT）会被跳过 —— 拿占位 GT 算相似度等于自己跟自己比。
+    """
+    import numpy as np
+
+    from src.evaluation import real_path_metrics as rpm
+
+    rng = rng if rng is not None else np.random.default_rng(0)
+    stats: Dict[str, Dict[str, float]] = {}
+
+    for name in ("shortest_path", "greedy_bfs", "random_greedy"):
+        rows: List[Dict[str, float]] = []
+        for sample in dataset:
+            if str(sample.meta.get("gt_source", "shortest")) != "observed":
+                continue
+            graph = sample.graph
+            optimal = shortest_path_cost(graph, sample.start, sample.goal)
+            if name == "shortest_path":
+                path = shortest_path(graph, sample.start, sample.goal)
+            elif name == "greedy_bfs":
+                path = greedy_bfs_path(graph, sample.start, sample.goal)
+            else:
+                path = random_greedy_path(graph, sample.start, sample.goal, rng)
+            if path is None:
+                continue
+            cost = sum(
+                float(graph.edges[u, v].get("weight", 1.0))
+                for u, v in zip(path[:-1], path[1:])
+            )
+            record = rpm.pair_record(
+                path,
+                sample.gt_path,
+                goal_hit=True,
+                gt_cost_ratio=float(sample.meta.get("gt_cost_ratio", float("nan"))),
+                pred_cost_ratio=(cost / optimal) if optimal > 0 else float("inf"),
+            )
+            rows.append(record.to_dict())
+        if rows:
+            stats[name] = rpm.aggregate_pair_dicts(rows)
+    return stats

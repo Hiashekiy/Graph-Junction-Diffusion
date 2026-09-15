@@ -1,0 +1,195 @@
+# Graph-Junction-Diffusion V2：DiDi 成都**真实道路数据**配置（实施方案第 10 节）
+#
+# 这是一份**新增的独立配置**，configs/graph_flow.yaml 与
+# configs/graph_flow_weighted.yaml 的默认行为一个字节都没改。
+#
+# 与 synthetic weighted 配置的三处本质差别：
+#
+#   1. data.source: didi_chengdu   -> 固定真实成都路网 + 真实车辆历史路径当 GT
+#      （GT **不是** Dijkstra 最短路；实测 GT/Dijkstra cost ratio 中位数 1.11）
+#   2. split.split_by_graph: false -> 真实数据是一张固定城市图，必须按 path 划分
+#      沿用 split_by_graph=true 只会得到"整张图都进 train 或都进 test"
+#   3. model.flow_steps: 1         -> 真实 corridor 图明显更大，先用 1 控制训练时间；
+#      注意推理必须与训练同轮数，**不能**训练 1 轮、推理 3 轮
+#
+# loss 第一版**不改**：仍然是 L = CE + 0.1 * SoftGoal。
+# 真实 GT 是司机的历史选择而不是最优解，直接加 cost-minimization loss 会把模型
+# 拉回"只追最短路"，改变研究任务本身（方案第 11 节）。
+
+seed: 0
+
+data:
+  source: didi_chengdu
+
+  # 原始数据根目录（相对项目根）。里面是 20161010~19.csv / dicts.pkl /
+  # edge_features.csv / line_graph_edge_idx.npy。
+  root: data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu
+
+  dicts_file: dicts.pkl
+  edge_features_file: edge_features.csv
+  line_graph_file: line_graph_edge_idx.npy
+  trajectory_glob: "201610*.csv"
+
+  # **必须显式确认，代码绝不猜**（方案第 3.2 节）。
+  # 已用 `prepare_didi.py --scan-only` 核实：edge_features.csv 的列名是
+  #   road_id, oneway, lanes, highway, length, bridge, tunnel,
+  #   highway_id, length_id, road_speed, traj_speed
+  # 道路长度就是 length（单位：米）。填 null 会让 prepare 直接报错，
+  # 而不是静默退化成 weight=1。
+  length_column: length
+
+  # 边权真的进入任务：GT 是真实路径，模型输入是道路长度
+  weighted: true
+  edge_weight:
+    distribution: uniform
+    range: [1.0, 10.0]
+
+  # ---- 轨迹清洗（方案第 4.3 节，工程初始值，不是论文标准）------------------
+  min_road_segments: 10
+  max_road_segments: 100
+  require_simple_gt: true
+
+  # ---- OD corridor（方案第 6 节）----------------------------------------
+  corridor:
+    # 由 `prepare_didi.py --scan-corridor` 在 train split 上选出，然后**冻结**。
+    # 选定口径：能让 train GT containment 达标的最小 rho。
+    #
+    # 【实测结论，别照抄方案里的 0.98】
+    # 成都路网折叠后只有 2891 节点 / 4403 边，其中 2466 个节点度 >= 3，是一张
+    # 很密的城市图。方案第 6.3 节的"等距椭球" rho 与 containment / 规模的关系
+    # （train split 4320 条候选实测，weighted 距离口径，见 scan_corridor.json）：
+    #
+    #     rho   containment   mean corridor nodes   mean decisions
+    #     1.1      0.479              151                  114
+    #     1.2      0.686              263                  210
+    #     1.3      0.804              362                  296
+    #     1.4      0.868              456                  375
+    #     1.5      0.912              545                  452      <- 第一版选它
+    #     1.8      0.966              790                  663
+    #     2.0      0.979              940                  792
+    #     2.5      0.994             1276                 1081      (44% 的整张城图)
+    #
+    # 也就是说 **98% 的 train containment 在这张网上只有 rho >= 2.4 才拿得到，
+    # 而那时 corridor 已经吞掉半座城市、每个样本 1000 个 decision**，"走廊"这个
+    # 设计本身就失效了。因此第一版取 rho = 1.5：
+    #   * corridor 只保留 ~19% 的城市节点（545 / 2891），median 305 个 decision；
+    #   * train GT containment 0.91，剩下 9% 按方案第 6.3 节记 corridor_miss 并
+    #     **单独报告 corridor retention**，不混进模型指标。
+    # 想更接近方案的 98% 就把 rho 改成 1.8（retention 0.97，但 decision 数 +47%），
+    # 训练成本与样本体积也按比例上升。
+    rho: 1.5
+    rho_candidates: [1.1, 1.2, 1.3, 1.4, 1.5, 1.8, 2.0, 2.5]
+    # 方案原文写的是 target=0.98，实测在这张网上只有 rho >= 2.4 才够，而那时
+    # corridor 已经吞掉 43% 的城市节点、每个样本 1000+ decision，"走廊"设计失效。
+    # 所以第一版把口径改成"train containment >= 0.91 的最小 rho"，得到 1.5。
+    # 这个数只由 train split 决定，选定后冻结；val/test 不得重新按 GT 调整。
+    target_gt_containment: 0.91
+    # corridor 超过这个规模就丢弃该样本（防止长 OD 的尾巴把显存和 NULL 比例打爆）。
+    # rho=1.5 时 p95 约 1650，1200 大约丢掉 8~10% 的尾巴。
+    max_corridor_nodes: 1200
+
+  # ---- 数据准备规模（prepare_didi.py）-------------------------------------
+  # 每个 CSV 最多读多少行。**每个日期文件读同样多行**，这样 10 天都进数据集
+  # （OD / 时段有多样性），而不是被前几个文件垄断。
+  max_rows_per_file: 8000
+  # 清洗后候选轨迹的硬上限（解析期的内存/时间闸门）
+  max_candidates: 60000
+  # **最终数据集规模**（去重之后、划分之前抽多少条）。
+  #
+  # 为什么要和 max_candidates 分开：真实 corridor 样本比 synthetic 大两个量级
+  # （一个 ~300 decision 的样本 pickle 之后约 110KB，其中 segments + field 占大头），
+  # 8000 条候选落地大约 train 570MB + val 60MB + test 150MB。
+  # 候选读满 10 个文件再均匀抽样，既有多样性又能控制体积。8000 条按 72/8/20
+  # 划分、corridor retention ~0.81 之后：train ~4700 / val ~520 / test ~1290，
+  # test 足够撑起 GDP 风格的固定 test_1000。
+  max_dataset_samples: 8000
+  # 扫描阶段每个文件读多少行（--scan-only）
+  scan_rows_per_file: 3000
+  # 缓存候选轨迹；同一份配置重跑 --scan-corridor / --build 不必重新解析 CSV
+  use_cache: true
+  refresh_cache: false
+
+split:
+  # 主实验：与 DiffPath 接近的 path-level split（原 80% training 再取 10% 做 val）
+  train: 0.72
+  val: 0.08
+  test: 0.20
+  seed: 0
+  # 真实城市是**一张固定图**，不能沿用 synthetic 的按图划分
+  split_by_graph: false
+
+  # GDP 风格固定子集（方案第 7.4 / 7.5 节）
+  test_subset_size: 1000
+  shuffled_od_size: 1000
+
+model:
+  d_model: 128
+  node_types: 4
+  edge_states: 2
+  ffn_hidden: 256
+  dropout: 0.0
+
+  # 本轮明确改回 1（工程预算，不是理论变化）
+  flow_steps: 1
+  flow_slot_embedding: true
+  flow_slot_scale: 1.0
+
+  # 道路长度进入模型（方案第 8 节）：graph_mean 归一化 + 连续 cost 编码器
+  use_edge_cost: true
+  edge_cost:
+    normalization: graph_mean
+    hidden_dim: 128
+
+time:
+  encoding: sinusoidal
+  d_time: 128
+  conditioning: adaln
+
+diffusion:
+  T: 50
+  schedule: linear
+  beta_start: 0.02
+  beta_end: 0.20
+  base_noise: uniform
+
+training:
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  amp: true
+
+  # 真实 corridor 图比 controlled graph 大得多（median ~305 decisions/sample），
+  # 所以 batch 从 4 起步测显存，再按 4 -> 8 -> 16 往上试，**能上多少上多少**；
+  # 反过来 OOM 就 4 -> 2 -> 1。降 batch 而不是先降模型维度。
+  batch_size: 4
+  epochs: 100
+  max_bptt_steps: 0
+  log_every: 10
+  eval_every: 5
+  device: auto
+
+  # 真实数据上 GoalHit 会较早饱和，而路径相似度还在改善，所以 best.pt 改用
+  # path_similarity_score（未到 goal 记 0）。默认仍是 goal_hit_rate，旧实验不变。
+  selection_metric: path_similarity_score
+  selection_mode: max
+
+loss:
+  # 第一版保持当前 loss，不加 cost-aware loss（方案第 11 节）
+  x0_ce: 1.0
+  null_weight: 1.0
+  active_weight: 1.0
+  goal_reach_weight: 0.1
+  goal_reach_eps: 1.0e-8
+  goal_timestep_weighting: alpha_bar
+  goal_horizon_cap: 24
+
+evaluation:
+  stochastic_sampling: true
+  batch_size: 8
+  max_steps: 0
+
+paths:
+  data_dir: data/didi_chengdu_gjd
+  output_dir: outputs/runs
+  run_name: didi_chengdu_flow1_weighted

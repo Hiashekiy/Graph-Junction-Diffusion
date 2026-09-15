@@ -28,6 +28,33 @@ from src.data.branch_segments import (
 )
 
 
+# ---------------------------------------------------------------------------
+# closed-cycle branch（绕回 owner 的环）
+# ---------------------------------------------------------------------------
+def is_closed_cycle_branch(branch: Branch) -> bool:
+    """``branch`` 是否是 ``O -> X -> Y -> O`` 这种**闭合环**（方案第 2 节的保护条件）。
+
+    真实数据接入时 corridor 子图裁剪会**降低节点度**，把原本 deg >= 3 的节点降成
+    deg == 2，于是 ``trace_branch`` 会从 owner 出发绕一圈又回到 owner，产生
+    ``branch.end == branch.owner`` 的 branch（实测成都 corridor 上约 13% 的样本含
+    这种 branch，占全部 branch 的 0.02%）。
+
+    判定条件（三条必须同时满足）：
+
+    1. ``branch.nodes[0] == branch.nodes[-1]``（首尾相同）；
+    2. 长度 >= 3（``O -> X -> O`` 在简单图里不可能，最短是 4 个节点）；
+    3. 内部节点全部唯一（``len(set) == len - 1``）。
+
+    第 3 条把"只在首尾重复"和"内部也重复"分开：后者仍然是结构错误，必须继续报错
+    （见 ``validate_decision_field`` 第 6 条与
+    ``tests/test_didi_dataset.py::test_internal_repeat_branch_still_rejected``）。
+    """
+    nodes = list(branch.nodes)
+    if len(nodes) < 3 or nodes[0] != nodes[-1]:
+        return False
+    return len(set(nodes)) == len(nodes) - 1
+
+
 @dataclass
 class DecisionField:
     """z_0 及其扁平候选表。"""
@@ -226,8 +253,39 @@ def validate_decision_field(
             f"branch at {branch.owner}: {len(branch.nodes)} nodes vs "
             f"{len(branch.physical_edges)} physical edges"
         )
-        assert len(set(branch.nodes)) == len(branch.nodes), (
-            f"branch at {branch.owner} visits a node twice: {branch.nodes}"
+        nodes = list(branch.nodes)
+        is_unique = len(set(nodes)) == len(nodes)
+        # 唯一允许的例外：**绕回 owner 的 closed-cycle branch**（``O -> X -> Y -> O``，
+        # 见 :func:`is_closed_cycle_branch`）。corridor 裁剪会把 deg >= 3 的节点降成
+        # deg == 2，从而造出这种环；实测成都数据上约 13% 的样本含它，不放行就只能
+        # 整条丢弃。它是**严格更宽松**的放宽：合成管线的 branch 本来就无重复节点，
+        # 旧行为逐位不变；而且内部节点仍然不许重复。
+        assert is_unique or is_closed_cycle_branch(branch), (
+            f"branch at {branch.owner} visits a node twice: {nodes}"
+        )
+
+    # 7. closed-cycle branch 永远不能是 GT target（保护条件第 3 条）
+    #
+    # 这是放宽第 6 条时必须补上的那道保险：closed-cycle branch 在结构上合法、可以
+    # 当干扰项，但 z_0(i) 一旦指向它，等于**用真实 GT 去训练模型制造 loop**。
+    # 理论上不可能发生（``branch_covers_path`` 要求 branch 是 GT 尾部的前缀，而
+    # require_simple_gt 保证 GT 里没有重复节点，所以 ``O -> ... -> O`` 永远匹配不上），
+    # 但这条不变式是数据正确性的最后一道闸门，必须显式断言而不是"靠推理成立"。
+    #
+    # 等价说法：GT branch 必须是**离开 owner 的开放 branch**，即 end != owner。
+    for decision_index, candidate_index in enumerate(candidates.target_candidate):
+        if candidates.candidate_is_null[candidate_index]:
+            continue
+        branch = candidates.candidate_branch[candidate_index]
+        assert branch is not None
+        assert not is_closed_cycle_branch(branch), (
+            f"decision {segments.decision_nodes[decision_index]} has a closed-cycle "
+            f"branch ({branch.nodes}) as its GT target. GT must never be a loop; "
+            "this would train the model to reproduce loops instead of routes."
+        )
+        assert branch.end != branch.owner, (
+            f"decision {segments.decision_nodes[decision_index]} has a GT branch "
+            f"that returns to its own owner: {branch.nodes}"
         )
 
 
