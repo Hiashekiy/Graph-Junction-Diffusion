@@ -199,6 +199,17 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 }
 
+/**
+ * 数字格式化。**这是文件作用域的函数，不要顺手删掉**：2026-09-16 删指标页时它被
+ * 一起删了，而 `renderDiffusionFrame()` 的最后一行还在用它 —— 于是每一帧都抛
+ * ReferenceError，异常从 `renderDiffusionGraph()` 里冒出来，把紧随其后的
+ * `startDiffusion()` 一起吞掉，最终表现成"扩散过程不能自动播放、只能拖时间轴"。
+ * `tests/test_dashboard.py` 里有一条作用域检查专门守这类"调用了但已不存在"。
+ */
+function fmt(value, digits = 3) {
+  return value == null ? "—" : Number(value).toFixed(digits);
+}
+
 async function updateDatasetInfo() {
   const id = $("#path-dataset").value;
   if (!id) return;
@@ -561,9 +572,11 @@ function edgePathData(source, target, routeIndex, step, coordinates, usage) {
   const c1y = a.y + uy * join + lane.ny * lane.offset;
   const c2x = b.x - ux * join + lane.nx * lane.offset;
   const c2y = b.y - uy * join + lane.ny * lane.offset;
-  const fmt = (value) => value.toFixed(2);
+  // 注意：这里刻意**不用** fmt 这个名字 —— 文件里还有一个同名的全局格式化函数，
+  // 局部遮蔽会让"这一行到底调的哪个"全靠上下文猜
+  const coord = (value) => value.toFixed(2);
   return {
-    d: `M${fmt(a.x)},${fmt(a.y)} C${fmt(c1x)},${fmt(c1y)} ${fmt(c2x)},${fmt(c2y)} ${fmt(b.x)},${fmt(b.y)}`,
+    d: `M${coord(a.x)},${coord(a.y)} C${coord(c1x)},${coord(c1y)} ${coord(c2x)},${coord(c2y)} ${coord(b.x)},${coord(b.y)}`,
     strokeWidth: lane.strokeWidth,
     shared: lane.shared
   };
@@ -946,6 +959,15 @@ function stopDiffusion() {
   state.diffusionPlaying = false;
 }
 
+//: 扩散播放 1× 时每帧的毫秒数。2×（默认）就是 130ms，T=50 走完约 6.5 秒。
+//: 原来写死 260ms 且没有调速入口，T=50 要 13 秒，实测"太慢"。
+const DIFFUSION_BASE_MS = 260;
+
+function diffusionDelay() {
+  const speed = Number($("#diffusion-speed")?.value || 2) || 1;
+  return Math.max(30, Math.round(DIFFUSION_BASE_MS / speed));
+}
+
 function startDiffusion(reset = false) {
   stopDiffusion();
   const frames = state.pathData?.diffusion?.frames || [];
@@ -961,7 +983,7 @@ function startDiffusion(reset = false) {
       return;
     }
     renderDiffusionFrame(state.diffusionFrame + 1);
-  }, 260);
+  }, diffusionDelay());
 }
 
 function toggleDiffusion() {
@@ -1179,6 +1201,11 @@ function bindEvents() {
   $("#state-noisy").addEventListener("click", () => setDiffusionMode("noisy"));
   $("#diffusion-replay").addEventListener("click", () => startDiffusion(true));
   $("#diffusion-play").addEventListener("click", toggleDiffusion);
+  $("#diffusion-speed").addEventListener("change", () => {
+    // 正在播就按新速度重开定时器；startDiffusion(false) 不会把帧号重置回 0，
+    // 所以画面不会跳，只是接下来每帧的间隔变了。
+    if (state.diffusionPlaying) startDiffusion(false);
+  });
   $("#diffusion-step").addEventListener("input", (event) => {
     stopDiffusion();
     $("#diffusion-play").textContent = "继续";

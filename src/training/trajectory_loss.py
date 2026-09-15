@@ -299,26 +299,59 @@ def mine_success_and_failure(
         "raw_no_decision": unscoreable,
     }
 
-    # 成功：按**平均** log 概率降序（= 模型当前最相信的），取前 max_success
-    success.sort(key=lambda item: -_mean_log_prob(probs, item.candidate_indices))
+    # ---- 训练候选筛选：**全部**按 S(P) = mean log p 排序 --------------------
+    #
+    # 这里有一条必须守住的分工：
+    #
+    #   搜索阶段（historical decoder）: 累计 prefix log p —— beam search 的排序规则，
+    #                                   只负责产出 finished trajectories，不参与筛选
+    #   候选筛选阶段（本函数）        : mean log p —— success 取前 K、每类 failure 取代表、
+    #                                   failure 剩余补位，全部同一个分数
+    #   最终 trajectory set           : S(P) = mean log p —— softmax 后进
+    #                                   L_succ / L_sim / L_fail
+    #
+    # "搜索评分"和"训练评分"允许不同，但**一旦进入候选筛选就必须统一用 mean**：
+    # 累计口径系统性偏好短轨迹（0.75^3 = -0.863 会赢过 0.85^6 = -0.975，而模型其实
+    # 更相信后者），而最终打分用的是 mean —— 不统一就等于"按累计挑进来、按平均打分"，
+    # 被选中的恰好是平均分更低的那批，正是 S(P) 用 mean 想避免的偏置。
+
+    def score(item: MinedTrajectory) -> float:
+        return _mean_log_prob(probs, item.candidate_indices)
+
+    failure_order = ("null", "loop", "dead_end", "broken")
+
+    # 成功：按平均 log 概率降序（= 模型当前最相信的），取前 max_success
+    success.sort(key=score, reverse=True)
     success = success[: max(0, cfg.max_success)]
 
-    # 失败：**先按类型各取 1**（保证多样性），不足再用剩余高分 failure 补满
-    picked: List[MinedTrajectory] = []
-    for kind in ("null", "loop", "dead_end", "broken"):
-        if failures[kind]:
-            picked.append(failures[kind][0])
-    if len(picked) < cfg.max_failure:
+    # 失败：**每种类型内部先按 mean log p 排序**，之后 failures[kind][0] 才真正是
+    # "该类型下模型当前最相信的那条"。不排的话它的顺序继承自 decoder 的累计口径，
+    # 每类代表这一路就又绕回了短轨迹偏置。
+    for kind in failure_order:
+        failures[kind].sort(key=score, reverse=True)
+
+    # 先按类型各取 1（保证多样性）
+    picked: List[MinedTrajectory] = [
+        failures[kind][0] for kind in failure_order if failures[kind]
+    ]
+
+    if len(picked) > cfg.max_failure:
+        # 类型数多于 max_failure：**不能**按 failure_order 截断（那等于恒定偏向
+        # NULL / loop 这些排在前面的类型），而是把各类型的最佳代表放一起比 mean log p，
+        # 取分数最高的 max_failure 条。真出现这种情况本来也保不住"一类至少一条"。
+        picked.sort(key=score, reverse=True)
+        picked = picked[: max(0, cfg.max_failure)]
+    elif len(picked) < cfg.max_failure:
+        # 还有名额：用剩余的高分 failure 补满（同一个 score）
         used = {id(item) for item in picked}
         rest = [
             item
-            for kind in ("null", "loop", "dead_end", "broken")
+            for kind in failure_order
             for item in failures[kind][1:]
             if id(item) not in used
         ]
-        rest.sort(key=lambda item: -_mean_log_prob(probs, item.candidate_indices))
+        rest.sort(key=score, reverse=True)
         picked.extend(rest[: max(0, cfg.max_failure) - len(picked)])
-    picked = picked[: max(0, cfg.max_failure)]
 
     return success, picked, stats
 

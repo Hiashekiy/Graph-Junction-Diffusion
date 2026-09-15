@@ -793,7 +793,7 @@ def test_failure_pick_prefers_one_of_each_type(monkeypatch):
 
 
 def test_failure_pick_fills_remaining_slots_by_score(monkeypatch):
-    """类型各一条之后还没满，就按累计 log 概率补高分失败轨迹。"""
+    """类型各一条之后还没满，就用**同一个** score（mean log p）补高分失败轨迹。"""
     failures = [
         _FakeCandidate([80, 200], "loop", indices=[0]),
         _FakeCandidate([80, 201], "loop", indices=[1]),
@@ -802,17 +802,108 @@ def test_failure_pick_fills_remaining_slots_by_score(monkeypatch):
     patch_decoder(monkeypatch, failures)
     sample = make_manual_sample()
     config = enabled_config(max_failure=2)
-    # index 2 的 log-prob 最高，但它不是"类型第一条"；类型第一条是 [8,0]，
-    # 第二个名额给分数最高的 [8,2]
     probs = [0.5] * sample.num_candidates
-    probs[2] = 0.9
+    probs[2] = 0.9          # index 2 分数最高
+    probs[1] = 0.7          # index 1 次高
     _, picked, _ = mine_success_and_failure(sample, probs, config)
     assert len(picked) == 2
-    assert [item.nodes for item in picked] == [[80, 200], [80, 202]]
+    # 类型代表 = 该类型 mean log p 最高的那条（index 2）；剩下的 1 个名额再按同一个
+    # 分数补 index 1。注意 index 2 在 decoder 给出的顺序里排在最后 —— 它当上代表
+    # 本身就说明类型内部重排过了。
+    assert [item.nodes for item in picked] == [[80, 202], [80, 201]]
+
+
+def test_failure_type_representative_uses_mean_log_prob(monkeypatch):
+    """每种 failure 的第一条必须按 S(P) = mean log p 选，不能继承 decoder 的顺序。
+
+    decoder（搜索阶段）按**累计** prefix log p 排 finished，而累计口径偏好短轨迹：
+
+        短 3 步 × p=0.75 -> 累计 -0.863，平均 -0.288
+        长 6 步 × p=0.85 -> 累计 -0.975，平均 -0.163
+
+    两个口径的排序**正好相反**。这里把短的那条先传给 miner（模拟 decoder 的输出
+    顺序），只有真正按 mean 重排过，max_failure=1 时留下的才会是长的那条。
+    """
+    short_loop = _FakeCandidate([90, 100], "loop", indices=[0, 1, 2])
+    long_loop = _FakeCandidate([90, 101], "loop", indices=[3, 4, 5, 6, 7, 8])
+    # decoder 的累计顺序：短的在前
+    patch_decoder(monkeypatch, [short_loop, long_loop])
+    sample = make_manual_sample()
+    assert sample.num_candidates >= 9, "手工样本的候选数不够构造这个反例"
+    # 反例成立的前提：累计口径下短的赢，平均口径下长的赢
+    assert 3 * math.log(0.75) > 6 * math.log(0.85)
+    assert math.log(0.75) < math.log(0.85)
+    probs = [0.5] * sample.num_candidates
+    for index in (0, 1, 2):
+        probs[index] = 0.75
+    for index in (3, 4, 5, 6, 7, 8):
+        probs[index] = 0.85
+
+    success, picked, _ = mine_success_and_failure(
+        sample, probs, enabled_config(max_failure=1)
+    )
+
+    assert success == []
+    assert len(picked) == 1
+    assert picked[0].status == "loop"
+    assert [item.nodes for item in picked] == [[90, 101]], (
+        "该类型的代表不是 mean log p 最高的那条 —— 说明 failure 候选仍在继承 "
+        "decoder 的累计 log p 顺序（短轨迹偏置又回来了）"
+    )
+
+
+def test_failure_type_representatives_are_truncated_by_score_not_type_order(monkeypatch):
+    """``max_failure`` 小于 failure 类型数时，按 mean log p 截断，而不是按类型顺序。
+
+    默认 ``max_failure=4`` 刚好等于类型数，所以这条分支平时走不到；一旦调小
+    （消融里很常见），按类型顺序截断会**恒定偏向** NULL / loop，等于偷偷给类型排了
+    优先级。这里构造四条分数各异的代表，只有按分数截断才会得到 loop + broken。
+    """
+    null_lowest = _FakeCandidate([90, 100], "broken", "NULL selected at 5", indices=[0])
+    loop_highest = _FakeCandidate([90, 101], "loop", indices=[1])
+    dead_middle = _FakeCandidate([90, 102], "broken", "dead end at 6", indices=[2])
+    broken_second = _FakeCandidate(
+        [90, 103], "broken", "step limit exceeded", indices=[3]
+    )
+    patch_decoder(
+        monkeypatch, [null_lowest, loop_highest, dead_middle, broken_second]
+    )
+    sample = make_manual_sample()
+    probs = [0.5] * sample.num_candidates
+    probs[0] = 0.10     # null      -> 最低
+    probs[1] = 0.90     # loop      -> 最高
+    probs[2] = 0.50     # dead_end  -> 中间
+    probs[3] = 0.80     # broken    -> 次高
+
+    _, picked, _ = mine_success_and_failure(
+        sample, probs, enabled_config(max_failure=2)
+    )
+
+    # 类型顺序是 (null, loop, dead_end, broken)：按顺序截断会得到 [null, loop]，
+    # 按 mean log p 截断才是 [loop, broken]
+    assert [item.status for item in picked] == ["loop", "broken"]
+
+
+def test_failure_type_representatives_keep_one_per_type_when_room_allows(monkeypatch):
+    """``max_failure >= 类型数`` 时仍然保持"一类至少一条"的多样性设计。"""
+    candidates = [
+        _FakeCandidate([90, 100], "broken", "NULL selected at 5", indices=[0]),
+        _FakeCandidate([90, 101], "loop", indices=[1]),
+        _FakeCandidate([90, 102], "broken", "dead end at 6", indices=[2]),
+        _FakeCandidate([90, 103], "broken", "step limit exceeded", indices=[3]),
+    ]
+    patch_decoder(monkeypatch, candidates)
+    sample = make_manual_sample()
+    probs = [0.5] * sample.num_candidates
+    probs[0] = 0.10     # null 分数最低，也必须进（多样性）
+    _, picked, _ = mine_success_and_failure(
+        sample, probs, enabled_config(max_failure=4)
+    )
+    assert {item.status for item in picked} == {"null", "loop", "dead_end", "broken"}
 
 
 def test_success_pool_takes_the_most_probable_first(monkeypatch):
-    """成功候选按累计 log 概率降序取前 ``max_success``。"""
+    """成功候选按 mean log 概率降序取前 ``max_success``。"""
     successes = [
         _FakeCandidate([90, 100], "goal", indices=[0]),
         _FakeCandidate([90, 101], "goal", indices=[1]),

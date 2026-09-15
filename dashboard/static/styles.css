@@ -78,6 +78,8 @@ dd { margin: 5px 0 0; font-size: 14px; }
 .playback button { min-height: 34px; padding: 0 13px; }
 .playback label { grid-template-columns: auto 70px; align-items: center; }
 .playback select { min-height: 34px; }
+.diffusion-scrubber select { min-height: 34px; }
+label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .switch input { position: absolute; opacity: 0; pointer-events: none; }
 .switch span { width: 30px; height: 18px; border-radius: 10px; background: #33394a; position: relative; }
@@ -86,7 +88,7 @@ dd { margin: 5px 0 0; font-size: 14px; }
 .switch input:checked + span::after { left: 15px; background: var(--accent); }
 .diffusion-toolbar { min-height: 58px; padding: 9px 16px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); background: rgba(11,14,21,.72); }
 .state-switch code { color: inherit; }
-.diffusion-scrubber { min-width: 360px; display: grid; grid-template-columns: 36px 58px minmax(140px, 1fr) 82px; align-items: center; gap: 8px; }
+.diffusion-scrubber { min-width: 470px; display: grid; grid-template-columns: 36px 58px auto minmax(120px, 1fr) 82px; align-items: center; gap: 8px; }
 .diffusion-scrubber button { min-height: 34px; }
 .diffusion-scrubber input[type="range"] { min-height: auto; padding: 0; accent-color: var(--accent); }
 .diffusion-scrubber strong { font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; text-align: right; }
@@ -154,7 +156,7 @@ dd { margin: 5px 0 0; font-size: 14px; }
   .control-bar { grid-template-columns: 1fr; }
   .graph-toolbar { align-items: flex-start; flex-direction: column; }
   .diffusion-toolbar { align-items: stretch; flex-direction: column; }
-  .diffusion-scrubber { min-width: 0; grid-template-columns: 36px 58px minmax(100px, 1fr) 72px; }
+  .diffusion-scrubber { min-width: 0; grid-template-columns: 36px 58px auto minmax(80px, 1fr) 72px; }
   #graph { min-height: 400px; }
 }
 

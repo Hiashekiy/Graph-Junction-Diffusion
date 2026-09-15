@@ -76,7 +76,7 @@
             <div class="playback" id="path-playback">
               <button id="replay" aria-label="重新播放" disabled>↺</button>
               <button id="play-pause" disabled>暂停</button>
-              <label>速度 <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option></select></label>
+              <label>速度 <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></label>
             </div>
             <label class="switch" id="gt-switch"><input id="show-gt" type="checkbox" checked><span></span>GT 最短路</label>
           </div>
@@ -88,6 +88,7 @@
             <div class="diffusion-scrubber">
               <button id="diffusion-replay" aria-label="从头播放扩散过程" disabled>↺</button>
               <button id="diffusion-play" disabled>播放</button>
+              <label class="inline">速度 <select id="diffusion-speed"><option value="0.5">0.5×</option><option value="1">1×</option><option value="1.5">1.5×</option><option value="2" selected>2×</option><option value="4">4×</option><option value="8">8×</option></select></label>
               <input id="diffusion-step" type="range" min="0" max="49" value="0" aria-label="扩散时间步">
               <strong id="diffusion-step-label">t = —</strong>
             </div>
