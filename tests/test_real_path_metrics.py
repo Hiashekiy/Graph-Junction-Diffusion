@@ -150,6 +150,120 @@ def test_pred_over_gt_cost_ratio_is_relative_to_the_driver_not_the_shortest_path
     assert aggregate["pred_over_gt_cost_ratio"] == pytest.approx(1.25)
 
 
+# ---------------------------------------------------------------------------
+# km-based DTW（方案第 12.5 节）
+# ---------------------------------------------------------------------------
+def _meridian_points(count: int, step_deg: float = 0.001):
+    """沿经线排开的点：相邻两点相距 step_deg 纬度 ≈ 0.1112 km。"""
+    return [(104.0, 30.0 + index * step_deg) for index in range(count)]
+
+
+def test_dtw_of_identical_paths_is_zero():
+    points = _meridian_points(4)
+    coordinates = {index: point for index, point in enumerate(points)}
+    path = [0, 1, 2, 3]
+    result = rpm.dtw_distance_km(path, path, coordinates)
+    assert result.ok
+    assert result.total_km == pytest.approx(0.0, abs=1e-12)
+    assert result.mean_km == pytest.approx(0.0, abs=1e-12)
+    assert result.warping_steps == 4
+
+
+def test_dtw_handles_different_sampling_density():
+    """预测比 GT 少一个采样点：DTW 允许"一个预测点对上多个 GT 点"。
+
+    手算：``pred = [0, 2.1, 3]``（单位 0.001° 纬度），``gt = [0, 1, 2, 3]``。
+
+    注意 DTW **仍然必须访问两条序列的每一个下标**（递推只允许 (1,0)/(0,1)/(1,1)
+    三种移动），它换来的是"对应关系可以错位"，不是"可以跳过点"。所以最优对齐是
+
+        (0,0) -> (0,1) -> (1,2) -> (2,3)
+
+    总代价 = d(p0,g0) + d(p0,g1) + d(p1,g2) + d(p2,g3)
+           = 0 + 0.0010° + 0.0001° + 0（共 4 个对齐点对）。
+    朴素的逐点硬比（p_i 对 g_i）是 0 + 0.0011° + 0.0001°，明显更贵。
+    """
+    gt_points = _meridian_points(4)  # 30.000 / 30.001 / 30.002 / 30.003
+    coordinates = {index: point for index, point in enumerate(gt_points)}
+    pred_points = [gt_points[0], (104.0, 30.0021), gt_points[3]]
+    pred_nodes = ["p0", "p1", "p2"]
+    for name, point in zip(pred_nodes, pred_points):
+        coordinates[name] = point
+
+    result = rpm.dtw_distance_km(pred_nodes, [0, 1, 2, 3], coordinates)
+    assert result.ok
+
+    expected_total = (
+        rpm.haversine_km(104.0, 30.0000, 104.0, 30.0010)
+        + rpm.haversine_km(104.0, 30.0021, 104.0, 30.0020)
+        + 0.0
+    )
+    assert result.total_km == pytest.approx(expected_total, rel=1e-9)
+    # warping_steps 是**对齐点对数**（走过的格子数）= 4，不是转移次数 3
+    assert result.warping_steps == 4
+    assert result.mean_km == pytest.approx(expected_total / 4, rel=1e-9)
+
+    # DTW 的错位对齐必须严格优于逐点硬比
+    naive = (
+        rpm.haversine_km(104.0, 30.0000, 104.0, 30.0000)
+        + rpm.haversine_km(104.0, 30.0021, 104.0, 30.0010)
+        + rpm.haversine_km(104.0, 30.0030, 104.0, 30.0020)
+    )
+    assert result.total_km < naive
+    # 归一化后一定小于总代价（这正是要归一化的原因）
+    assert result.mean_km < result.total_km
+
+
+def test_dtw_band_restricts_warping():
+    """Sakoe-Chiba 窗口收紧时，允许的对齐更少，代价只会变大（不会变小）。"""
+    gt_points = _meridian_points(6)
+    coordinates = {index: point for index, point in enumerate(gt_points)}
+    pred_nodes = ["a", "b"]
+    coordinates["a"] = gt_points[0]
+    coordinates["b"] = gt_points[5]
+
+    free = rpm.dtw_distance_km(pred_nodes, list(range(6)), coordinates)
+    narrow = rpm.dtw_distance_km(pred_nodes, list(range(6)), coordinates, band=1)
+    assert free.ok and narrow.ok
+    # 窗口 = max(band, |n-m|) = max(1, 4) = 4，仍然走得通；但代价不可能比自由对齐小
+    assert narrow.total_km >= free.total_km - 1e-12
+
+
+def test_dtw_returns_nan_when_coordinates_are_missing():
+    coordinates = {0: (104.0, 30.0), 1: (104.0, 30.001)}
+    result = rpm.dtw_distance_km([0, 1], [0, 1, 99], coordinates)
+    assert not result.ok
+    assert math.isnan(result.mean_km)
+
+
+def test_haversine_km_matches_known_distance():
+    # 0.01° 纬度 ≈ 1.1119 km
+    assert rpm.haversine_km(104.0, 30.0, 104.0, 30.01) == pytest.approx(
+        1.11195, abs=1e-3
+    )
+    # 同一纬度上 0.01° 经度要乘 cos(lat)
+    assert rpm.haversine_km(104.0, 30.0, 104.01, 30.0) == pytest.approx(
+        0.96297, abs=1e-3
+    )
+    assert rpm.haversine_km(104.0, 30.0, 104.0, 30.0) == pytest.approx(0.0)
+
+
+def test_pair_record_and_aggregate_carry_dtw():
+    coordinates = {index: point for index, point in enumerate(_meridian_points(4))}
+    path = [0, 1, 2, 3]
+    dtw = rpm.dtw_distance_km(path, path, coordinates)
+    record = rpm.pair_record(path, path, goal_hit=True, dtw=dtw)
+    assert record.dtw_km == pytest.approx(0.0, abs=1e-12)
+
+    missed = rpm.pair_record(path, path, goal_hit=False, dtw=dtw)
+    aggregate = rpm.aggregate_pair_records([record, missed])
+    assert aggregate["dtw_km"] == pytest.approx(0.0, abs=1e-12)
+    assert aggregate["dtw_km_success"] == pytest.approx(0.0, abs=1e-12)
+
+    no_dtw = rpm.pair_record(path, path, goal_hit=True)
+    assert math.isnan(no_dtw.dtw_km)
+
+
 def test_aggregate_pair_records_on_empty_input():
     assert rpm.aggregate_pair_records([]) == {"real_num_queries": 0}
 

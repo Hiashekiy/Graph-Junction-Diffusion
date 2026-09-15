@@ -1889,22 +1889,23 @@ max 2.24。所以 `Optimal Path Rate` 在真实数据上不再是"模型对不�
 ### 24.4 corridor 的 rho：方案里的 98% 在这张网上拿不到
 
 方案第 6.3 节要求"train GT containment >= 98% 的最小 rho"。实测（train split
-4320 条候选，weighted 距离口径，见 `data/didi_chengdu_gjd/scan_corridor.json`）：
+**5760** 条候选 = `max_dataset_samples=8000` 按 72/8/20 划分后的 train，weighted
+距离口径，见 `data/didi_chengdu_gjd/scan_corridor.json`）：
 
 | rho | train GT containment | mean corridor nodes | mean decisions |
 |---:|---:|---:|---:|
-| 1.1 | 0.479 | 151 | 114 |
-| 1.2 | 0.686 | 263 | 210 |
-| 1.3 | 0.804 | 362 | 296 |
-| 1.4 | 0.868 | 456 | 375 |
-| **1.5** | **0.912** | **545** | **452** |
-| 1.8 | 0.966 | 790 | 663 |
-| 2.0 | 0.979 | 940 | 792 |
-| 2.5 | 0.994 | 1276 | 1081（44% 的整张城图）|
+| 1.1 | 0.486 | 153 | 114 |
+| 1.2 | 0.685 | 264 | 211 |
+| 1.3 | 0.808 | 365 | 296 |
+| 1.4 | 0.872 | 458 | 377 |
+| **1.5** | **0.914** | **546** | **452** |
+| 1.8 | 0.966 | 789 | 661 |
+| 2.0 | 0.977 | 938 | 789 |
+| 2.5 | 0.991 | 1268 | 1073（44% 的整张城图）|
 
 **98% 只有 rho >= 2.4 才够，那时 corridor 已经吞掉半座城市、每个样本 1000+ decision，
 "走廊"这个设计本身失效了。** 所以第一版取 **rho = 1.5**：corridor 只保留 ~19% 的
-城市节点、train containment 0.912，剩下 ~9% 按方案第 6.3 节记 `corridor_miss`
+城市节点、train containment 0.914，剩下 ~9% 按方案第 6.3 节记 `corridor_miss`
 并从数据集里剔除，`stats.json` 里单独报 `corridor_retention`。
 
 想更贴近方案的 98% 就把 `data.corridor.rho` 改成 1.8（retention 0.97，但 decision
@@ -2039,7 +2040,8 @@ python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml \
 | `src/evaluation/real_path_metrics.py` | 新增 | LCS / nLCS / paired Edge PRF / PathSimilarityScore / KLEV / JSEV / cost ratio / 分桶 |
 | `tests/test_didi_dataset.py` | 新增 | 转换 / corridor 无泄漏 / observed GT 不被替换 / 划分无交集 / flow_steps=1 |
 | `tests/test_real_path_metrics.py` | 新增 | 每个指标的手算小样例 |
-| `tools/verify_didi_pipeline.py` | 新增 | 不依赖 pytest / torch 的自检脚本 |
+| `tools/verify_didi_pipeline.py` | 新增 | 不依赖 pytest / torch 的自检脚本（23 条断言） |
+| `tools/visualize_didi_samples.py` | 新增 | 把数据集样本画在**真实经纬度底图**上（见 24.11） |
 | `src/data/dataset_builder.py` | 改 | **新增** `relabel_graph_and_path_to_contiguous()` / `build_sample_from_observed_path()`；**旧函数语义一字未改** |
 | `src/data/decision_field.py` | 改 | 校验第 6 条放宽：允许"绕回 owner 的 loop branch"（见 24.9） |
 | `src/data/dataset.py` | 改 | docstring 说明 GT 语义；`summary()` 增 `gt_cost` / `gt_cost_ratio` / `gt_source` |
@@ -2072,8 +2074,35 @@ python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml \
   `null` —— 留 null 会让 `--build` 直接报错；代码里"不许猜列名、不许退化成
   `weight=1`"的硬校验一条都没少。
 * 放宽了 `validate_decision_field` 的 branch 唯一性断言（24.9 第 1 条）。
-* 方案第 12.5 节的 km-based DTW **没有实现**：`dicts.pkl` 只有 OSM node id，没有
-  junction 经纬度，所以不伪造 DTW。
+
+**一处必须更正的早期结论：坐标其实是有的**
+
+第一版我在 README / 方案偏离里写过"`dicts.pkl` 只有 OSM node id，没有 junction
+经纬度，所以不伪造 DTW"。**这是错的**，错因是 `ChengDu.pkl` / `graph.pkl`
+（`data/DiDiChengduXian/data/data/cd/`，两份内容完全相同）是 OSMnx 1.1.1 导出的
+`MultiDiGraph`，**边属性里带 `shapely.geometry.linestring.LineString`**；本机没装
+`shapely`，`pickle.load` 直接抛 `No module named 'shapely'`，于是"打不开"被误读成
+"没有坐标"。实际情况：
+
+| 事实 | 数值 |
+|---|---|
+| 图上 `crs` | `epsg:4326`（WGS84 经纬度） |
+| 节点属性 | `x` = 经度，`y` = 纬度，`street_count` |
+| 节点 id | 与 `dicts.pkl` 的 `(u, v)` **同一套 OSM node id** |
+| 对**我们用的那张图**的覆盖率 | **2780 / 2891 = 96.2%**（缺的 111 个用邻居坐标迭代填充） |
+| 覆盖范围 | 经度 104.0354~104.1313，纬度 30.6502~30.7399 ≈ **9.1 km × 9.9 km** |
+
+注意两份 `dicts.pkl` **并不相同**：我们用的是 `didi_datasets/datasets/didi_chengdu/`
+（6639 road / 2891 节点），而 `ChengDu.pkl` 配的是 `data/data/cd/dicts.pkl`
+（6566 road / 2848 节点），所以覆盖率不是 100%，必须处理缺失。
+
+`src/data/didi_dataset.py::load_node_coordinates()` 内建了一个最小 `shapely` 替身
+（只在 `ImportError` 时注入，只需要能被 pickle 的 `__setstate__` 接住，不解析几何），
+`attach_coordinates()` 负责写回 `x`/`y` 并补缺失。于是：
+
+* **可视化可以用真实地理底图** —— 见 `tools/visualize_didi_samples.py`
+  （默认就是 `--geo`，`--topology` 才退回拓扑布局）；
+* **方案第 12.5 节的 km-based DTW 现在具备实现条件**（尚未实现，见下）。
 
 **未完成（本机环境限制）**
 
@@ -2087,3 +2116,137 @@ python scripts/prepare_didi.py --config configs/graph_flow_didi_weighted.yaml \
   python -m pytest tests/test_didi_dataset.py tests/test_real_path_metrics.py -q
   python tools/verify_didi_pipeline.py --data data/didi_chengdu_gjd   # 不需要 torch，已通过
   ```
+
+### 24.11 样本可视化（真实地理底图）
+
+```bash
+# 默认：真实经纬度底图 + 裁到每条样本自己的范围（街道细节清楚）
+python tools/visualize_didi_samples.py --per-split 3 --out outputs/figures/didi_samples_geo.png
+
+# 不裁剪：看这些样本落在整座成都的什么位置（能看到环路结构）
+python tools/visualize_didi_samples.py --no-crop --per-split 3 --out outputs/figures/didi_city_overview.png
+
+# 只画 corridor 本身，放大看 decision node 与 GT 拐弯
+python tools/visualize_didi_samples.py --zoom --per-split 2 --out outputs/figures/didi_zoom.png
+
+# 退回拓扑 spring 布局（对比用：形状与真实地图完全不同）
+python tools/visualize_didi_samples.py --topology --out outputs/figures/didi_topology.png
+```
+
+每个 panel：浅灰 = 整张成都路网（真实经纬度）；浅蓝 = 该样本的 OD corridor；
+红粗 = GT 真实司机历史路径；绿虚线 = 同一 OD 的 Dijkstra 最短路；
+绿星/红星 = start / goal；橙点 = decision node。
+
+**坐标怎么来的**：`ChengDu.pkl` / `graph.pkl` 是 OSMnx 导出的 `MultiDiGraph`，
+节点自带 `x`(lon) / `y`(lat)。本机没装 `shapely`，而该 pickle 的边属性带
+`LineString` 几何，直接 `pickle.load` 会抛 `No module named 'shapely'` ——
+`load_node_coordinates()` 会在这种情况下注入一个最小替身再读，**只取节点 x/y，
+不解析几何**。装不装 shapely 都不影响结果。
+
+画图用等距圆柱投影（`x = lon·cos(lat0)`，`y = lat`），在这个 9km × 10km 的范围内
+形变可忽略；panel 之间锁了等比例，所以长度可以直接互相比较。
+
+**从图上能直接读出来的事**：
+
+1. **GT 不是最短路** —— 15 条抽样里只有 1 条 `GT == Dijkstra`。红线在大量路口和
+   绿虚线分叉，有的样本（如 train #199，ratio 1.60）绕得相当明显。
+2. **decision 数远大于 GT 长度** —— 例：train #250 的 GT 只有 15 跳、但 corridor 里
+   有 402 个 decision、1762 个 candidate；test #432 更是 682 decision。橙点铺满整片
+   corridor，红线只穿过其中十几个，即 **95%+ 的 decision 是 NULL**。
+   （候选层面的 NULL 占比只有 0.23，因为每个 decision 组里的 NULL 只占 1/(1+branch)。）
+3. **corridor 覆盖的是一片连续城区**，不是一条细走廊 —— 这是 rho=1.5 在这张密网上
+   的必然结果（见 24.4）。
+4. **真实司机路径有折返和绕行**，且这些样本仍然满足 `require_simple_gt`
+   （折返发生在不同 junction 之间，不是回到同一个路口）。
+
+### 24.12 第二轮评审修复（4 个逻辑问题 + 1 个文档错误）
+
+这一轮**没有改任何实验设计**（rho / flow_steps / loss / 数据规模都没动），只修了
+会让论文数字变错的地方。数据集已按修正后的代码重建。
+
+#### ① KLEV / JSEV 的编号空间错了 —— 最严重的一个
+
+每个真实样本的 corridor 都被独立 relabel 成 `0..N-1`。对**单样本**指标
+（nLCS / Edge F1 / CostRatio）没问题，但 evaluator 把**不同样本**的局部编号路径
+直接汇总去做 edge visit 分布，于是"样本 A 的边 (0,1)"和"样本 B 的边 (0,1)"
+被当成了同一条城市道路 —— 实际上它们是两条完全无关的路。
+
+修法：`build_sample_from_observed_path()` 现在把反查表写进
+`sample.meta['local_to_global']`（`local_to_global[new_id] = old_osm_id`），
+evaluator 用 `real_path_metrics.to_global_path()` 映射回**全局 OSM id** 之后才算
+KLEV / JSEV。`evaluate.py` 的 JSON 里 `real_path_metrics.distribution_node_space`
+会标明 `global_osm_id`。
+
+测试：`test_distribution_metrics_use_global_node_ids` —— 构造两个 relabel 后都是
+`[0,1,2]` 的样本，断言局部口径只有 2 条"边"（错）、全局口径有 4 条（对）。
+
+#### ② `count_decisions()` / `corridor_decision_count()` 把 Start 多算一次
+
+口径是集合运算 `{deg>=3} ∪ {s : deg(s)>1} \ {g}`，但实现写成了
+"先数 `deg>=3`，再 `if deg(start)>1: +1`" —— 当 `deg(start) >= 3` 时 start
+已经在第一个集合里，被算了两次。
+
+实测影响：**504/600 = 84% 的 corridor 样本被高估 1 个 decision**
+（平均 +0.84）。不影响 `sample.num_decisions`（它来自 branch segment，定义一直是对的），
+但 `scan_corridor.json` / `metadata.json` / `candidate.num_decisions` 全部偏大。
+现在两个函数都改成 set 写法，并加了和 `branch_segments.build_decision_nodes()`
+逐一对齐的测试。
+
+#### ③ `target_null_fraction` 算的是候选级，不是标签级
+
+原来算的是"候选表里 NULL 候选占多少"。但训练标签 `z_0` 的口径是
+"每个 decision 选了 NULL 还是某条 branch"，两者差一个量级：
+
+| 口径 | 数值（train 前 50 条实测） |
+|---|---|
+| candidate 级（旧，误标为 target） | 0.229 |
+| **标签级（新，真 target）** | **0.938** |
+
+真实 corridor 有 ~300 个 decision，GT 只经过其中几十个。所以
+**`target_null_fraction ≈ 0.936`**（train/val/test 分别是 0.9356 / 0.9345 / 0.9342），
+这才是判断 `null_weight / active_weight` 会不会造成 NULL collapse 时要看的数。
+
+现在 `summary()` 同时给 `candidate_null_fraction` 与 `target_null_fraction`
+（后者按 decision 加权：`Σ空标签 / Σdecision`），`stats.json` 里也分开记，不再混用。
+
+#### ④ shuffled OD "必须 1000" 现在由代码强制
+
+新增 `split.strict_shuffled_size: true`（DiDi 配置已打开）。凑不满就在 `--build`
+阶段直接 `raise RuntimeError`，而不是打个 warning 继续 —— 论文主表要固定
+`test_1000 = 1000` 且 `shuffled_od_1000 = 1000`，一次 991 一次 1000 会让两组实验
+口径不可比。当前生成结果：**1000/1000，2 轮 shuffle，attempts=1430**，
+拒绝原因全部记账（corridor 392 / 原 OD 24 / 重复 13 / s==g 1）。
+
+#### ⑤ 注释里的过期数字
+
+`didi_dataset.py` 头部注释写的是 `2891 节点 / 4408 边`，实际是 **4403 边**
+（4408 是没丢自环时的数：6639 road segment − 10 自环 − 2226 平行折叠 = 4403）。
+已改正，避免写论文时自己把数字弄混。
+
+#### 附：km-based DTW 已实现（方案第 12.5 节）
+
+坐标齐了之后把 DTW 补上了：
+
+* `real_path_metrics.dtw_distance_km(pred, gt, coordinates, band=None)` ——
+  haversine 代价 + 标准 DP，返回 `DtwResult(total_km, mean_km, warping_steps)`。
+  **对外一律报 `mean_km`**（总代价/对齐点对数），因为原始 DTW 随路径长度线性增长，
+  不比归一化就不能在长短路径之间比较；`band` 是 Sakoe-Chiba 窗口，防退化对齐。
+* 接进 `pair_record` / aggregate：`dtw_km`、`dtw_km_success`、`dtw_km_p50`、
+  `dtw_num_finite`；`evaluate.py` 与 `Trainer.validate` 都会带上。
+* 坐标加载走 `load_node_coordinates_filled()`：原始 OSMnx 图只覆盖 2891 个节点里的
+  **2780 个（96.2%）**，剩下 111 个用邻居坐标迭代填充。不补的话，
+  **test 集里就会有样本的 DTW 静默变成 NaN** —— 这是实测踩到的。
+* 手算样例测试：`test_dtw_handles_different_sampling_density` 里能对上
+  `d(p0,g0)+d(p0,g1)+d(p1,g2)+d(p2,g3)`，并断言 DTW 严格优于逐点硬比。
+
+在 test 集上跑 GT-vs-Dijkstra 的 DTW 可以看出它与离散指标互补：
+
+| idx | GT 跳数 | Dijkstra 跳数 | nLCS | Edge F1 | DTW (km) |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 24 | 24 | 1.000 | 1.000 | 0.0000 |
+| 4 | 14 | 11 | 0.571 | 0.522 | 0.1061 |
+| 7 | 12 | 12 | 0.167 | 0.000 | 0.5347 |
+| 5 | 27 | 34 | 0.444 | 0.339 | 0.3992 |
+
+idx 7 最典型：两条路**跳数完全一样、没有一条边重合**（Edge F1 = 0），但几何上
+平均只差 0.53 km —— 这正是 DTW 要补的那块信息。

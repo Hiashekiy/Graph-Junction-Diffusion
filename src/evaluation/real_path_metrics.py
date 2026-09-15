@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import networkx as nx
+import numpy as np
 
 #: KLEV 平滑项（方案第 12.4 节）
 DEFAULT_EPS = 1e-12
@@ -131,6 +132,9 @@ class PathPairRecord:
     #: "模型比几何最短路绕多少"。真实数据上后者高不一定是坏事（人本来就不走最短路），
     #: 前者接近 1 才是真的学到了人的行为。
     pred_over_gt_cost_ratio: float = float("nan")
+    #: km-based DTW：与 GT 路径的平均几何偏离（km/对齐点）。缺坐标时为 NaN。
+    dtw_km: float = float("nan")
+    dtw_total_km: float = float("nan")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -144,6 +148,8 @@ class PathPairRecord:
             "gt_cost_ratio": float(self.gt_cost_ratio),
             "pred_cost_ratio": float(self.pred_cost_ratio),
             "pred_over_gt_cost_ratio": float(self.pred_over_gt_cost_ratio),
+            "dtw_km": float(self.dtw_km),
+            "dtw_total_km": float(self.dtw_total_km),
         }
 
 
@@ -153,6 +159,7 @@ def pair_record(
     goal_hit: bool,
     gt_cost_ratio: float = float("nan"),
     pred_cost_ratio: float = float("nan"),
+    dtw: Optional[DtwResult] = None,
 ) -> PathPairRecord:
     """比较一条预测路径与真实 GT 路径。
 
@@ -162,6 +169,8 @@ def pair_record(
 
     ``pred_over_gt_cost_ratio`` 由两个比值相除得到
     （``C(pred)/C*`` ÷ ``C(gt)/C*`` = ``C(pred)/C(gt)``），任一不可用则为 NaN。
+
+    ``dtw`` 由调用方用 ``dtw_distance_km()`` 算好传进来 —— 本模块不负责加载坐标。
     """
     value = normalized_lcs(pred_path, gt_path)
     precision, recall, f1 = paired_edge_prf(pred_path, gt_path)
@@ -184,6 +193,8 @@ def pair_record(
         gt_cost_ratio=float(gt_cost_ratio),
         pred_cost_ratio=float(pred_cost_ratio),
         pred_over_gt_cost_ratio=pred_over_gt,
+        dtw_km=float(dtw.mean_km) if dtw is not None else float("nan"),
+        dtw_total_km=float(dtw.total_km) if dtw is not None else float("nan"),
     )
 
 
@@ -193,6 +204,13 @@ def pair_record(
 def _mean(values: Sequence[float]) -> float:
     finite = [value for value in values if value is not None and math.isfinite(value)]
     return float(sum(finite) / len(finite)) if finite else float("nan")
+
+
+def _percentile(values: Sequence[float], q: float) -> float:
+    finite = [value for value in values if value is not None and math.isfinite(value)]
+    if not finite:
+        return float("nan")
+    return float(np.percentile(np.asarray(finite, dtype=float), q))
 
 
 def aggregate_pair_records(records: Sequence[PathPairRecord]) -> Dict[str, float]:
@@ -217,6 +235,13 @@ def aggregate_pair_records(records: Sequence[PathPairRecord]) -> Dict[str, float
         "pred_cost_ratio": _mean([r.pred_cost_ratio for r in records]),
         "pred_over_gt_cost_ratio": _mean(
             [r.pred_over_gt_cost_ratio for r in records]
+        ),
+        # DTW：全样本均值 + 只在成功到达的样本上（失败路径的 DTW 没有可比性）
+        "dtw_km": _mean([r.dtw_km for r in records]),
+        "dtw_km_success": _mean([r.dtw_km for r in hits]),
+        "dtw_km_p50": _percentile([r.dtw_km for r in records], 50),
+        "dtw_num_finite": float(
+            sum(1 for r in records if math.isfinite(r.dtw_km))
         ),
     }
 
@@ -254,6 +279,20 @@ def aggregate_pair_dicts(records: Sequence[Mapping[str, Any]]) -> Dict[str, floa
         "pred_over_gt_cost_ratio": _mean(
             [float(row.get("pred_over_gt_cost_ratio", float("nan"))) for row in records]
         ),
+        "dtw_km": _mean([float(row.get("dtw_km", float("nan"))) for row in records]),
+        "dtw_km_success": _mean(
+            [float(row.get("dtw_km", float("nan"))) for row in hits]
+        ),
+        "dtw_km_p50": _percentile(
+            [float(row.get("dtw_km", float("nan"))) for row in records], 50
+        ),
+        "dtw_num_finite": float(
+            sum(
+                1
+                for row in records
+                if math.isfinite(float(row.get("dtw_km", float("nan"))))
+            )
+        ),
     }
 
 
@@ -261,11 +300,166 @@ def aggregate_pair_dicts(records: Sequence[Mapping[str, Any]]) -> Dict[str, floa
 # 全局 edge visit distribution / KLEV / JSEV
 # ---------------------------------------------------------------------------
 def edge_visit_distribution(paths: Iterable[Sequence[Any]]) -> Counter:
-    """统计所有路径的**无向边 visit 次数**（重复经过会重复计数）。"""
+    """统计所有路径的**无向边 visit 次数**（重复经过会重复计数）。
+
+    ⚠️ **跨样本聚合时必须传全局编号空间的路径。**
+
+    真实数据里每个样本的 corridor 都被独立 relabel 成 ``0..N-1``，所以
+    "样本 A 的边 (0,1)" 和 "样本 B 的边 (0,1)" 是**两条完全不同的城市道路**。
+    直接把这些局部编号混在一起统计，KLEV/JSEV 就没有任何意义。
+    调用方必须先用 ``to_global_path()`` 映射回全局 OSM id。
+    """
     counter: Counter = Counter()
     for path in paths:
         counter.update(canonical_edges(path))
     return counter
+
+
+def to_global_path(
+    path: Sequence[Any], local_to_global: Optional[Sequence[Any]]
+) -> List[Any]:
+    """把样本内部的局部编号路径映射回全局 OSM id。
+
+    ``local_to_global`` 就是 ``GraphSample.meta['local_to_global']``
+    （由 ``build_sample_from_observed_path`` 写入）。为 ``None`` 时原样返回 ——
+    合成数据本来就是全局唯一的编号，不需要映射。
+
+    越界或映射不到的节点会被**跳过**（并且不会伪造 id），调用方应把结果长度与
+    原路径对比来判断是否发生了丢失。
+    """
+    if not local_to_global:
+        return list(path)
+    size = len(local_to_global)
+    out: List[Any] = []
+    for node in path:
+        if isinstance(node, (int, np.integer)) and 0 <= int(node) < size:
+            out.append(local_to_global[int(node)])
+        else:
+            out.append(node)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# DTW（Dynamic Time Warping）—— 方案第 12.5 节
+# ---------------------------------------------------------------------------
+#: 地球平均半径（km），haversine 用
+EARTH_RADIUS_KM = 6371.0088
+
+
+def haversine_km(
+    lon1: float, lat1: float, lon2: float, lat2: float
+) -> float:
+    """两点球面距离（km）。"""
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = phi2 - phi1
+    dlambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2.0) ** 2
+        + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    )
+    return 2.0 * EARTH_RADIUS_KM * math.asin(min(1.0, math.sqrt(a)))
+
+
+@dataclass
+class DtwResult:
+    """DTW 结果。
+
+    ``mean_km`` 是**归一化后**的量：总代价 / 对齐点对数（``warping_steps``，
+    即 DP 最优路径走过的格子数），含义是"平均每个对齐点偏离多少公里"。原始 DTW 总代价会随路径长度线性增长，直接比较长短路径是不公平的，
+    所以对外报告一律用 ``mean_km``，``total_km`` 只作诊断。
+    """
+
+    total_km: float = float("nan")
+    mean_km: float = float("nan")
+    #: 最优 warping 路径上的**对齐点对数**（DP 走过的格子数），不是转移次数
+    warping_steps: int = 0
+    #: 需要多少条双点距离才算完（诊断用；缺坐标时为 0）
+    num_points: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return math.isfinite(self.mean_km)
+
+
+def dtw_distance_km(
+    pred_path: Sequence[Any],
+    gt_path: Sequence[Any],
+    coordinates: Mapping[Any, Sequence[float]],
+    band: Optional[int] = None,
+) -> DtwResult:
+    """预测路径与真实 GT 路径之间的 **km-based DTW**（方案第 12.5 节）。
+
+    为什么在 nLCS / Edge F1 之外还要这个：那两者是**离散**的 —— 只看节点 id 是否
+    相同、边是否完全重合。两条物理上几乎重合的路，完全可以因为采样粒度不同而只
+    共享很少的节点。DTW 是**几何**的，直接回答"平均偏离多少米"。
+
+    Args:
+        pred_path / gt_path: 节点序列（**必须是同一编号空间**；跨样本比较时用全局 id）
+        coordinates:         ``node -> (lon, lat)``；缺任何一个节点就返回 NaN
+        band:                Sakoe-Chiba 窗口，限制 ``|i - j| <= max(band, |n-m|)``。
+                             ``None`` 表示不加约束。加窗口可以防止"一个点被抻到整条
+                             序列上"这种退化对齐。
+
+    实现是标准 DP：
+
+        D[i][j] = cost(i, j) + min(D[i-1][j], D[i][j-1], D[i-1][j-1])
+
+    ``cost`` 用 haversine 距离。同时并行维护 ``S[i][j]``（对齐步数），这样归一化
+    不需要再回溯一遍路径。
+    """
+    if not pred_path or not gt_path:
+        return DtwResult()
+    try:
+        pred_points = [coordinates[node] for node in pred_path]
+        gt_points = [coordinates[node] for node in gt_path]
+    except (KeyError, TypeError):
+        return DtwResult()
+
+    n, m = len(pred_points), len(gt_points)
+    window = n + m if band is None else max(int(band), abs(n - m))
+    infinity = float("inf")
+
+    cost = [
+        [
+            haversine_km(p[0], p[1], g[0], g[1])
+            for g in gt_points
+        ]
+        for p in pred_points
+    ]
+    accumulated = [[infinity] * m for _ in range(n)]
+    steps = [[0] * m for _ in range(n)]
+
+    for i in range(n):
+        for j in range(m):
+            if abs(i - j) > window:
+                continue
+            if i == 0 and j == 0:
+                accumulated[i][j] = cost[i][j]
+                steps[i][j] = 1
+                continue
+            best = infinity
+            best_steps = 0
+            for di, dj in ((1, 0), (0, 1), (1, 1)):
+                pi, pj = i - di, j - dj
+                if pi < 0 or pj < 0 or accumulated[pi][pj] == infinity:
+                    continue
+                if accumulated[pi][pj] < best:
+                    best = accumulated[pi][pj]
+                    best_steps = steps[pi][pj]
+            if best == infinity:
+                continue
+            accumulated[i][j] = best + cost[i][j]
+            steps[i][j] = best_steps + 1
+
+    total = accumulated[n - 1][m - 1]
+    if not math.isfinite(total) or steps[n - 1][m - 1] == 0:
+        return DtwResult(num_points=n * m)
+    return DtwResult(
+        total_km=float(total),
+        mean_km=float(total) / float(steps[n - 1][m - 1]),
+        warping_steps=int(steps[n - 1][m - 1]),
+        num_points=n * m,
+    )
 
 
 def _smoothed_counts(
@@ -453,6 +647,10 @@ __all__ = [
     "PathPairRecord",
     "aggregate_pair_dicts",
     "aggregate_pair_records",
+    "DtwResult",
+    "dtw_distance_km",
+    "haversine_km",
+    "to_global_path",
     "bucket_report",
     "canonical_edge",
     "canonical_edges",

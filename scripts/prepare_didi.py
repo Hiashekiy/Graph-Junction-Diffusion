@@ -46,7 +46,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data import didi_dataset as didi  # noqa: E402
-from src.data.dataset import GraphQueryDataset, validate_sample  # noqa: E402
+from src.data.dataset import (  # noqa: E402
+    GraphQueryDataset,
+    target_null_statistics,
+    validate_sample,
+)
 from src.data.dataset_builder import (  # noqa: E402
     build_sample,
     build_sample_from_observed_path,
@@ -870,6 +874,7 @@ def build_shuffled_od(
     seed: int,
     funnel: didi.FunnelStats,
     max_rounds: int = 40,
+    strict: bool = False,
 ) -> Tuple[List[Any], Dict[str, Any]]:
     """方案第 7.5 节的 shuffled OD 集：这个集合**没有真实 GT path**。
 
@@ -965,10 +970,19 @@ def build_shuffled_od(
         funnel.add(f"shuffled_od_{key}", value)
     if len(samples) < int(size):
         # 只报告，不静默：调用方会把这段原样写进 metadata.json
-        print(
-            f"  [warn] shuffled OD only reached {len(samples)}/{size} after "
+        message = (
+            f"shuffled OD only reached {len(samples)}/{size} after "
             f"{stats['rounds']} rounds; reasons={dict(stats)}"
         )
+        if strict:
+            # 正式数据生成时"必须 1000"必须是**代码强制**，不能只是注释里的愿望：
+            # 今天 991、明天 1000 会让两组实验的 shuffled-OD 口径不可比。
+            raise RuntimeError(
+                message
+                + "\n(split.strict_shuffled_size=true；要接受不足 1000 条就把它关掉，"
+                "或调大 max_rounds / split.shuffled_od_size)"
+            )
+        print(f"  [warn] {message}")
     return samples, dict(stats)
 
 
@@ -1074,6 +1088,7 @@ def run_build(config: Config, paths: Dict[str, Path], args: argparse.Namespace) 
     shuffled, shuffled_stats = build_shuffled_od(
         subset_pairs, graph, distance, rho, max_corridor_nodes,
         shuffled_size, seed=seed + 2, funnel=funnel,
+        strict=bool(config.get("split.strict_shuffled_size", False)),
     )
     shuffled_dataset = GraphQueryDataset(shuffled, name="didi_chengdu_shuffled_od_1000")
     out = data_dir / "shuffled_od_1000.pkl"
@@ -1202,9 +1217,22 @@ def build_stats_report(
         summary["corridor_nodes_stats"] = _percentiles(
             [sample.num_nodes for sample in dataset]
         )
-        summary["target_null_fraction"] = float(
-            np.mean([np.mean(sample.field.candidates.candidate_is_null) for sample in dataset])
+        # candidate 级（候选表里 NULL 候选占比）—— 保留，别和下面那个混用
+        summary["candidate_null_fraction"] = float(
+            np.mean(
+                [
+                    np.mean(sample.field.candidates.candidate_is_null)
+                    for sample in dataset
+                ]
+            )
         )
+        # 标签级（decision 的 z_0 里有多少是 NULL），按 decision 加权。
+        # 这才是判断 null_weight / active_weight 会不会 NULL collapse 时要看的数。
+        null_stats = target_null_statistics(list(dataset))
+        summary["target_null_fraction"] = float(null_stats["target_null_fraction"])
+        summary["target_null_statistics"] = {
+            key: value for key, value in null_stats.items() if key != "per_sample"
+        }
         summary["gt_source"] = sorted(
             {str(sample.meta.get("gt_source", "unknown")) for sample in dataset}
         )

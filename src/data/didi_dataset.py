@@ -22,9 +22,9 @@ Graph-Junction-Diffusion 需要的三元组：
 * ``edge_features.csv`` 的列名是
   ``road_id, oneway, lanes, highway, length, bridge, tunnel, highway_id,
   length_id, road_speed, traj_speed``，道路长度就是 ``length``（米）。
-* 成都路网折叠成无向 junction graph 后是 **2891 个节点 / 4408 条边**，单连通分量。
-  6639 条 road segment 里只有 4408 个唯一无向 ``(u, v)``，也就是有 2188 对平行
-  路段需要按方案第 3.3 节折叠（取最短的那条）。
+* 成都路网折叠成无向 junction graph 后是 **2891 个节点 / 4403 条边**，单连通分量。
+  6639 条 road segment 里 10 条是自环（丢弃）、2226 条是平行路段（按方案第 3.3 节
+  折叠成最短的那条），最后得到 4403 个唯一无向 ``(u, v)``。
 * 轨迹里的 ``path`` 是**道路 id 序列**，且相邻 road 在 ``idx2edge`` 的**存储方向**
   上是连续的（``u_{i+1} == v_i``）：实测 30000 条轨迹 100% 满足，没有一条需要反向。
   约 1.6% 的相邻对是"平行路段掉头"（``{u,v}`` 相同、方向相反），会形成重复
@@ -40,6 +40,8 @@ import ast
 import csv
 import math
 import pickle
+import sys
+import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -525,14 +527,22 @@ class CorridorResult:
 
 
 def count_decisions(graph: nx.Graph, start: Any, goal: Any) -> int:
-    """corridor 上的 decision 数（与 ``branch_segments.build_decision_nodes`` 同口径）。"""
-    total = sum(1 for node in graph.nodes() if graph.degree(node) >= 3)
+    """corridor 上的 decision 数（与 ``branch_segments.build_decision_nodes`` 同口径）。
+
+    口径是**集合**运算：
+
+        D(G, s, g) = {v : deg(v) >= 3} ∪ {s : deg(s) > 1} \\ {g}
+
+    注意 ``∪``：当 ``deg(start) >= 3`` 时 start **已经**在第一个集合里了，
+    再 ``+1`` 就把 Start 重复算了一次（这个 bug 真实存在过，会让
+    ``scan_corridor.json`` / ``metadata`` / ``candidate.num_decisions`` 全部偏大 1）。
+    这里直接用 set 写，语义上就不可能重复。
+    """
+    decisions = {node for node in graph.nodes() if graph.degree(node) >= 3}
     if graph.degree(start) > 1:
-        total += 1
-    if goal in graph and graph.degree(goal) >= 3:
-        # goal 永远不是 decision
-        total -= 1
-    return total
+        decisions.add(start)
+    decisions.discard(goal)
+    return len(decisions)
 
 
 def corridor_decision_count(
@@ -543,6 +553,9 @@ def corridor_decision_count(
     ``extract_segments`` 用的是**子图内**的度（邻居被裁掉的节点会掉到度 1/2），
     所以这里必须按 ``keep`` 过滤邻居来数，不能用原图的度。rho 扫描要为每个候选
     算多个 rho，建子图的常数开销会把扫描拖慢一个量级。
+
+    口径与 :func:`count_decisions` / ``build_decision_nodes`` 完全一致（集合语义，
+    Start 只算一次），否则扫描出来的 ``mean_decisions`` 会比真实值大 1。
     """
     keep_set = keep if isinstance(keep, (set, frozenset)) else set(keep)
     total = 0
@@ -559,7 +572,8 @@ def corridor_decision_count(
             goal_degree = degree
         if degree >= 3:
             total += 1
-    if start_degree > 1:
+    # 集合写法：deg(start) >= 3 时它已经在 total 里了，不能再加
+    if start_degree > 1 and start_degree < 3:
         total += 1
     if goal_degree >= 3:
         total -= 1
@@ -647,7 +661,7 @@ def path_contained(graph: nx.Graph, path: Sequence[int]) -> bool:
 class ShortestDistanceCache:
     """``d(s, .)`` 的按源缓存（Dijkstra 结果复用）。
 
-    成都路网只有 2891 节点 / 4408 边，但对 10 万条候选轨迹逐一跑两次 Dijkstra
+    成都路网只有 2891 节点 / 4403 边，但对 10 万条候选轨迹逐一跑两次 Dijkstra
     仍然是分钟级开销；而候选的 source / goal 去重后远少于候选数。这里按 source
     缓存单源最短路，把 rho 扫描从 O(candidates * Dijkstra) 降到 O(distinct_sources
     * Dijkstra)。
@@ -834,6 +848,195 @@ def discover_trajectory_files(root: str | Path, pattern: str) -> List[Path]:
     if not files:
         raise DidiDataError(f"no file matching {pattern!r} under {root}")
     return files
+
+
+# ---------------------------------------------------------------------------
+# 6b. 节点经纬度（真实地理底图 / km-based DTW 用）
+# ---------------------------------------------------------------------------
+_SHAPELY_STUB_MODULES = (
+    "shapely",
+    "shapely.geometry",
+    "shapely.geometry.linestring",
+    "shapely.geometry.point",
+    "shapely.geometry.polygon",
+)
+
+
+def _install_shapely_stub() -> None:
+    """在没装 shapely 的环境里注入一个"只接住 unpickle、不解析几何"的最小替身。
+
+    为什么需要：DiDi 附带的 ``ChengDu.pkl`` / ``graph.pkl`` 是 OSMnx 1.1.1 导出的
+    ``MultiDiGraph``，**边属性里带 ``shapely.geometry.linestring.LineString``**。
+    没有 shapely 时 ``pickle.load`` 直接报 ``No module named 'shapely'``，
+    于是"这份数据没有经纬度"这个结论会被错误地接受 —— 实际上**节点自带 x/y**
+    （``crs = epsg:4326``），只是被一个 optional dependency 挡住了。
+
+    我们只读节点的 ``x`` / ``y``，完全不碰 geometry，所以替身只需要能被 pickle
+    的 ``__setstate__`` 路径接住即可。真实 shapely 存在时永远不会走到这里。
+    """
+    import types
+
+    for name in _SHAPELY_STUB_MODULES:
+        if name in sys.modules:
+            continue
+        module = types.ModuleType(name)
+        if name == "shapely":
+            module.__version__ = "0.0.0-stub"
+        sys.modules[name] = module
+    for class_name, holder in (
+        ("LineString", "shapely.geometry.linestring"),
+        ("Point", "shapely.geometry.point"),
+        ("Polygon", "shapely.geometry.polygon"),
+    ):
+        if not hasattr(sys.modules[holder], class_name):
+            setattr(sys.modules[holder], class_name, type(class_name, (), {
+                "__init__": lambda self, *a, **k: setattr(self, "args", a),
+                "__setstate__": lambda self, state: setattr(self, "state", state),
+            }))
+    for attribute in ("linestring", "point", "polygon"):
+        if not hasattr(sys.modules["shapely.geometry"], attribute):
+            setattr(
+                sys.modules["shapely.geometry"], attribute,
+                sys.modules[f"shapely.geometry.{attribute}"],
+            )
+
+
+def load_node_coordinates(
+    path: str | Path,
+    node_x: str = "x",
+    node_y: str = "y",
+) -> Dict[Any, Tuple[float, float]]:
+    """读 OSMnx 图（``ChengDu.pkl`` / ``graph.pkl``），返回 ``node -> (lon, lat)``。
+
+    ``dicts.pkl`` 里的 ``(u, v)`` 就是 OSM node id，与这份图的节点 id 同一套编号，
+    所以可以直接把经纬度挂到我们的 junction 图上 —— 于是可以做**真实地理底图**
+    和方案第 12.5 节一直没能实现的 **km-based DTW**。
+
+    注意两份 ``dicts.pkl`` 并不相同（``didi_datasets/.../didi_chengdu`` 是 2891 节点，
+    ``data/data/cd`` 是 2848 节点），所以坐标对**我们用的那张图**的覆盖率不是 100%
+    （实测成都为 2780/2891 = 96.2%）。要 100% 覆盖请用
+    :func:`load_node_coordinates_filled`。
+    """
+    path = Path(path)
+    if not path.exists():
+        raise DidiDataError(f"OSMnx graph not found: {path}")
+    with warnings.catch_warnings():
+        # shapely 2.x 会对 1.x 时代存的几何对象发 UserWarning，这里只读节点属性，
+        # 不解析几何，噪声警告直接吞掉
+        warnings.simplefilter("ignore", UserWarning)
+        try:
+            with open(path, "rb") as handle:
+                graph = pickle.load(handle)
+        except ModuleNotFoundError as error:
+            if "shapely" not in str(error):
+                raise
+            _install_shapely_stub()
+            with open(path, "rb") as handle:
+                graph = pickle.load(handle)
+
+    coordinates: Dict[Any, Tuple[float, float]] = {}
+    for node, data in graph.nodes(data=True):
+        if node_x in data and node_y in data:
+            coordinates[node] = (float(data[node_x]), float(data[node_y]))
+    if not coordinates:
+        raise DidiDataError(
+            f"{path}: nodes carry no {node_x!r}/{node_y!r} attributes; "
+            "this is not an OSMnx node-coordinate graph"
+        )
+    return coordinates
+
+
+def load_node_coordinates_filled(
+    coords_path: str | Path,
+    graph_path: Optional[str | Path] = None,
+) -> Tuple[Dict[Any, Tuple[float, float]], Dict[str, Any]]:
+    """加载坐标并**补齐缺失节点**，返回 ``(node -> (lon, lat), stats)``。
+
+    为什么必须补：OSMnx 图只覆盖我们 2891 个节点里的 2780 个（96.2%），剩下 111 个
+    没有坐标。直接拿原始坐标去算 km-based DTW，凡是路径碰到这 111 个节点之一的样本
+    都会得到 NaN —— 实测 test 集里确实有这种样本，会静默丢掉一批 DTW 值。
+
+    ``graph_path`` 指向 ``graph_global.pkl`` 时，缺失节点用邻居坐标均值迭代填充，
+    覆盖率变成 100%（图越局部补得越准）。
+    """
+    coordinates = load_node_coordinates(coords_path)
+    stats: Dict[str, Any] = {
+        "source": str(coords_path),
+        "total_nodes": len(coordinates),
+        "with_coordinates": len(coordinates),
+        "filled": 0,
+        "missing": 0,
+        "coverage": 1.0,
+    }
+    if graph_path is None or not Path(graph_path).exists():
+        stats["note"] = "no graph_global.pkl given; missing nodes are not filled"
+        return coordinates, stats
+
+    with open(graph_path, "rb") as handle:
+        payload = pickle.load(handle)
+    graph = payload["graph"] if isinstance(payload, dict) else payload
+    graph, attach_stats = attach_coordinates(graph, coordinates, fill_missing=True)
+    filled = {
+        node: (float(graph.nodes[node]["x"]), float(graph.nodes[node]["y"]))
+        for node in graph.nodes()
+        if "x" in graph.nodes[node]
+    }
+    stats.update(
+        {
+            "total_nodes": attach_stats["nodes"],
+            "with_coordinates": attach_stats["with_coordinates"],
+            "filled": attach_stats["filled"],
+            "missing": attach_stats["missing"],
+            "coverage": attach_stats["coverage"],
+        }
+    )
+    return filled, stats
+
+
+def attach_coordinates(
+    graph: nx.Graph,
+    coordinates: Dict[Any, Tuple[float, float]],
+    fill_missing: bool = True,
+) -> Tuple[nx.Graph, Dict[str, int]]:
+    """把经纬度写到图的节点属性上；返回 (graph, 覆盖统计)。
+
+    ``fill_missing`` 打开时，没有坐标的节点用邻居坐标的均值迭代补几轮 —— 这样
+    画图时不会出现"孤零零一堆点没位置"，也不会把它们的边整段丢掉。
+    """
+    stats = {"nodes": graph.number_of_nodes(), "with_coordinates": 0, "filled": 0, "missing": 0}
+    for node in graph.nodes():
+        if node in coordinates:
+            longitude, latitude = coordinates[node]
+            graph.nodes[node]["x"] = longitude
+            graph.nodes[node]["y"] = latitude
+            stats["with_coordinates"] += 1
+
+    if fill_missing:
+        missing = [node for node in graph.nodes() if "x" not in graph.nodes[node]]
+        for _round in range(8):
+            if not missing:
+                break
+            still: List[Any] = []
+            for node in missing:
+                neighbours = [
+                    n for n in graph.neighbors(node) if "x" in graph.nodes[n]
+                ]
+                if neighbours:
+                    graph.nodes[node]["x"] = float(
+                        np.mean([graph.nodes[n]["x"] for n in neighbours])
+                    )
+                    graph.nodes[node]["y"] = float(
+                        np.mean([graph.nodes[n]["y"] for n in neighbours])
+                    )
+                    stats["filled"] += 1
+                else:
+                    still.append(node)
+            missing = still
+
+    stats["missing"] = sum(1 for node in graph.nodes() if "x" not in graph.nodes[node])
+    stats["coverage"] = stats["with_coordinates"] / max(stats["nodes"], 1)
+    graph.graph["crs"] = "epsg:4326"
+    return graph, stats
 
 
 # ---------------------------------------------------------------------------

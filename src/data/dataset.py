@@ -115,19 +115,38 @@ class GraphQueryDataset:
     def summary(self) -> Dict[str, Any]:
         if not self.samples:
             return {"num_samples": 0}
+        null_stats = target_null_statistics(self.samples)
         summary: Dict[str, Any] = {
             "num_samples": len(self.samples),
             "num_nodes": _stats([s.num_nodes for s in self.samples]),
             "num_decisions": _stats([s.num_decisions for s in self.samples]),
             "num_candidates": _stats([s.num_candidates for s in self.samples]),
             "gt_length": _stats([s.gt_length for s in self.samples]),
+            # candidate 级：候选表里 NULL 候选占多少（**不是**训练标签的 NULL 比例）
             "null_fraction": _stats(
                 [
                     float(np.mean(s.field.candidates.candidate_is_null))
                     for s in self.samples
                 ]
             ),
+            # 同上，换个不会再被误读的名字（详见 target_null_statistics 的注释）
+            "candidate_null_fraction": _stats(
+                [
+                    float(np.mean(s.field.candidates.candidate_is_null))
+                    for s in self.samples
+                ]
+            ),
+            "target_null_fraction": _stats(
+                [target_null_fraction(s) for s in self.samples]
+            ),
         }
+        summary.update(
+            {
+                f"dataset_{key}": value
+                for key, value in null_stats.items()
+                if key != "per_sample"
+            }
+        )
         # 真实数据（方案第 17-C 节）：gt_cost / gt_cost_ratio 只存在于 meta 里，
         # 不进 dataclass —— GraphSample 的结构对旧实验保持逐位兼容。
         for key in ("gt_cost", "gt_cost_ratio", "dijkstra_cost"):
@@ -143,6 +162,59 @@ class GraphQueryDataset:
         }
         summary["gt_source"] = sorted(sources)
         return summary
+
+
+def target_null_fraction(sample: GraphSample) -> float:
+    """**训练标签级**的 NULL 比例：所有 decision 的 ``z_0`` 里有多少选了 NULL。
+
+    与 ``candidate_is_null`` 的均值（candidate 级）是两件完全不同的事：
+
+        某个路口候选组 = [NULL, branchA, branchB, branchC]
+        candidate 级：1/4 = 25%
+        标签级：如果这个路口不在 GT 上 -> ``z_0 = NULL`` -> **100%**
+
+    真实 corridor 有 ~300 个 decision，而 GT 只经过其中几十个，所以这两个数会差
+    一个量级。判断 ``null_weight / active_weight`` 会不会造成 NULL collapse 时，
+    必须看**标签级**这个数 —— 看 candidate 级会严重低估。
+
+    （本函数的旧实现/``summary()['null_fraction']`` 一直算的是 candidate 级。）
+    """
+    candidates = sample.field.candidates
+    targets = candidates.target_candidate
+    if not targets:
+        return 0.0
+    nulls = sum(1 for index in targets if candidates.candidate_is_null[index])
+    return nulls / len(targets)
+
+
+def target_null_statistics(samples: Sequence[GraphSample]) -> Dict[str, Any]:
+    """数据集级 NULL 统计。
+
+    ``target_null_fraction`` 按 decision **加权**（``sum(空标签) / sum(decision)``），
+    而不是对每个样本的比例取平均 —— 否则 decision 少的样本会被过度加权。
+    """
+    if not samples:
+        return {"num_decisions": 0, "num_null_targets": 0, "target_null_fraction": 0.0}
+    total_decisions = 0
+    null_targets = 0
+    per_sample: List[float] = []
+    for sample in samples:
+        candidates = sample.field.candidates
+        for index in candidates.target_candidate:
+            total_decisions += 1
+            null_targets += int(bool(candidates.candidate_is_null[index]))
+        per_sample.append(target_null_fraction(sample))
+    return {
+        "num_decisions": int(total_decisions),
+        "num_null_targets": int(null_targets),
+        "target_null_fraction": (
+            null_targets / total_decisions if total_decisions else 0.0
+        ),
+        "mean_per_sample_target_null_fraction": (
+            float(np.mean(per_sample)) if per_sample else 0.0
+        ),
+        "per_sample": per_sample,
+    }
 
 
 def _stats(values: Sequence[float]) -> Dict[str, float]:

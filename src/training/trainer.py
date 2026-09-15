@@ -41,6 +41,38 @@ from src.training.checkpoint import save_checkpoint
 from src.training.losses import LossWeights, recurrent_reverse_loss
 
 
+def _try_load_coordinates(config) -> Optional[Dict[str, Any]]:
+    """尽力加载 ``data.coords_file``；失败/缺失返回 None（DTW 自动降级为 NaN）。"""
+    if config is None:
+        return None
+    raw = config.get("data.coords_file", None)
+    if not raw:
+        return None
+    from pathlib import Path as _Path
+
+    from src.data import didi_dataset as _didi
+
+    path = _Path(str(raw))
+    if not path.is_absolute():
+        path = _Path(__file__).resolve().parents[2] / path
+    if not path.exists():
+        return None
+    # 补缺失节点（原始坐标只覆盖 ~96%），否则部分样本的 DTW 会静默变 NaN
+    graph_path = config.get("paths.data_dir", None)
+    graph_file = None
+    if graph_path:
+        candidate = _Path(str(graph_path)) / "graph_global.pkl"
+        if not candidate.is_absolute():
+            candidate = _Path(__file__).resolve().parents[2] / candidate
+        if candidate.exists():
+            graph_file = candidate
+    try:
+        coordinates, _stats = _didi.load_node_coordinates_filled(path, graph_file)
+        return coordinates
+    except Exception:  # noqa: BLE001 - 可选依赖，失败不是错误
+        return None
+
+
 class Trainer:
     def __init__(
         self,
@@ -107,6 +139,11 @@ class Trainer:
             ),
         )
         self.weights.validate()
+        # km-based DTW 需要节点经纬度（可选文件）。训练期间也把它带上，这样
+        # history.json 里的 val 指标与最终评测口径一致；加载失败就静默降级
+        # （DTW 记 NaN），绝不让一个可选地理文件把训练搞挂。
+        self.coordinates = _try_load_coordinates(config)
+
         self.stochastic_sampling = (
             bool(eval_cfg.get("stochastic_sampling", True)) if eval_cfg else True
         )
@@ -251,6 +288,7 @@ class Trainer:
             max_steps=self.eval_max_steps or None,
             progress=False,
             weights=self.weights,
+            coordinates=self.coordinates,
         )
         metrics = dict(report.metrics)
         metrics["val_x0_acc"] = report.debug.get("accuracy", float("nan"))

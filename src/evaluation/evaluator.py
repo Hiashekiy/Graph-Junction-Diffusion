@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import networkx as nx
 import torch
@@ -103,6 +103,7 @@ def evaluate_dataset(
     beam_width: int = 64,
     null_policy: str = "stop",
     filter_dead_branches: bool = False,
+    coordinates: Optional[Mapping[Any, Sequence[float]]] = None,
 ) -> EvaluationReport:
     """在 dataset 上跑完整评测。
 
@@ -235,17 +236,30 @@ def evaluate_dataset(
             # records / metrics / JSON 结构一个字节都没变。
             gt_source = str(sample.meta.get("gt_source", "shortest"))
             if gt_source == OBSERVED_GT_SOURCE:
+                # ⚠️ 跨样本聚合（KLEV / JSEV）必须在**全局 OSM id 空间**里做。
+                # 每个样本的 corridor 都被独立 relabel 成 0..N-1，直接混用局部编号
+                # 会把"样本 A 的边 (0,1)"和"样本 B 的边 (0,1)"当成同一条城市道路。
+                local_to_global = sample.meta.get("local_to_global")
+                pred_global = rpm.to_global_path(list(result.path), local_to_global)
+                gt_global = rpm.to_global_path(list(sample.gt_path), local_to_global)
+
+                dtw = None
+                if coordinates:
+                    dtw = rpm.dtw_distance_km(pred_global, gt_global, coordinates)
+
                 paired = rpm.pair_record(
                     list(result.path),
                     list(sample.gt_path),
                     bool(record.goal_hit),
                     gt_cost_ratio=float(sample.meta.get("gt_cost_ratio", float("nan"))),
                     pred_cost_ratio=float(record.cost_ratio),
+                    dtw=dtw,
                 )
                 real_records.append(paired)
                 real_samples.append(sample)
-                pred_paths.append(list(result.path))
-                gt_paths.append(list(sample.gt_path))
+                # 分布指标用全局 id
+                pred_paths.append(pred_global)
+                gt_paths.append(gt_global)
             elif gt_source != "shortest":
                 # shuffled OD 之类：GT 是 Dijkstra 占位，绝不能进相似度指标
                 real_skipped += 1
@@ -343,6 +357,8 @@ def evaluate_dataset(
             "num_paired": len(real_records),
             "num_skipped_placeholder_gt": int(real_skipped),
             "gt_source": OBSERVED_GT_SOURCE,
+            "dtw_enabled": bool(coordinates),
+            "distribution_node_space": "global_osm_id",
             # 与 records 等长同序；没有观测 GT 的样本是 None，分桶时要跳过
             "records": _align_real_records(dataset, real_samples, real_records),
         }
@@ -351,6 +367,8 @@ def evaluate_dataset(
         metrics["edge_f1"] = paired_metrics["edge_f1"]
         metrics["gt_cost_ratio"] = paired_metrics["gt_cost_ratio"]
         metrics["pred_over_gt_cost_ratio"] = paired_metrics["pred_over_gt_cost_ratio"]
+        metrics["dtw_km"] = paired_metrics["dtw_km"]
+        metrics["dtw_km_success"] = paired_metrics["dtw_km_success"]
         metrics["klev"] = distribution["klev"]
         metrics["jsev"] = distribution["jsev"]
     elif real_skipped:

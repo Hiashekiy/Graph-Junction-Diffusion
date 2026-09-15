@@ -46,6 +46,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.data import didi_dataset as didi  # noqa: E402
 from src.data.dataset import GraphQueryDataset  # noqa: E402
 from src.evaluation import real_path_metrics as rpm  # noqa: E402
 from src.evaluation.baselines import baseline_summary, real_baseline_summary  # noqa: E402
@@ -54,6 +55,44 @@ from src.training.checkpoint import load_checkpoint  # noqa: E402
 from src.training.setup import build_diffusion, build_model, get_device  # noqa: E402
 from src.utils.config import flatten_overrides, load_config  # noqa: E402
 from src.utils.seed import make_generator, set_seed  # noqa: E402
+
+
+def load_coordinates(config, dataset_path=None, quiet: bool = False):
+    """按 config 的 ``data.coords_file`` 加载 ``node -> (lon, lat)``。
+
+    只有真实数据 + 有坐标时才能算 km-based DTW；缺失就返回 None（DTW 记为 NaN），
+    绝不让一个可选的地理文件把整次评测搞挂。
+    """
+    raw = config.get("data.coords_file", None)
+    if not raw:
+        return None
+    path = Path(str(raw))
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    if not path.exists():
+        if not quiet:
+            print(f"[warn] data.coords_file not found ({path}) -> DTW disabled")
+        return None
+    # 顺带把 graph_global.pkl 读进来补缺失节点：原始坐标只覆盖 96.2%，
+    # 不补的话碰到缺坐标节点的样本 DTW 会静默变成 NaN。
+    graph_path = None
+    if dataset_path is not None:
+        candidate = Path(dataset_path).parent / "graph_global.pkl"
+        if candidate.exists():
+            graph_path = candidate
+    try:
+        coordinates, stats = didi.load_node_coordinates_filled(path, graph_path)
+    except Exception as error:  # noqa: BLE001 - 坐标是可选依赖
+        if not quiet:
+            print(f"[warn] could not load coordinates ({error}) -> DTW disabled")
+        return None
+    if not quiet:
+        print(
+            f"coordinates  : {len(coordinates)} nodes from {path.name} "
+            f"({stats['with_coordinates']} real @ {stats['coverage']:.1%} "
+            f"+ {stats['filled']} filled from neighbours)"
+        )
+    return coordinates
 
 
 def parse_args() -> argparse.Namespace:
@@ -149,6 +188,7 @@ def main() -> int:
 
     diffusion = build_diffusion(config)
     dataset = GraphQueryDataset.load(args.data)
+    coordinates = load_coordinates(config, dataset_path=args.data, quiet=args.no_progress)
     print(f"evaluating {len(dataset)} queries on {device}")
 
     report = evaluate_dataset(
@@ -167,6 +207,7 @@ def main() -> int:
         beam_width=args.beam_width,
         null_policy=args.null_policy,
         filter_dead_branches=args.filter_dead_branches,
+        coordinates=coordinates,
     )
 
     print("main metrics :", report.summary())
@@ -208,8 +249,9 @@ def main() -> int:
                 f"EdgeF1={metrics.get('edge_f1', float('nan')):.4f} | "
                 f"PredCostRatio={metrics.get('pred_cost_ratio', float('nan')):.4f} | "
                 f"GTCostRatio={metrics.get('gt_cost_ratio', float('nan')):.4f} | "
-                f"Pred/GT={metrics.get('pred_over_gt_cost_ratio', float('nan')):.4f}"
-                "   (Pred/GT 是 C(P_pred)/C(P_GT)：模型比真实司机绕多少)"
+                f"Pred/GT={metrics.get('pred_over_gt_cost_ratio', float('nan')):.4f} | "
+                f"DTW={metrics.get('dtw_km', float('nan')):.4f}km"
+                "   (Pred/GT = C(P_pred)/C(P_GT)；DTW = 平均几何偏离 km)"
             )
             distribution = real_payload["distribution"]
             print(

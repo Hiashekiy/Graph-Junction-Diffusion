@@ -140,7 +140,7 @@ def build_sample_from_observed_path(
     if len(path) < 2:
         raise ValueError(f"observed gt_path needs at least 2 nodes, got {len(path)}")
 
-    graph, path, _mapping = relabel_graph_and_path_to_contiguous(graph, path)
+    graph, path, mapping = relabel_graph_and_path_to_contiguous(graph, path)
     start, goal = int(path[0]), int(path[-1])
     if start == goal:
         raise ValueError("observed gt_path starts and ends at the same node")
@@ -154,6 +154,20 @@ def build_sample_from_observed_path(
     sample_meta.setdefault("graph_id", -1 if graph_id is None else int(graph_id))
     # 自证：这份样本的 GT 不是 Dijkstra 算出来的，事后能从 meta 查出来
     sample_meta.setdefault("gt_source", "observed")
+    # local -> global 节点编号反查表（**必须存**）：
+    # 每个样本的 corridor 都被独立 relabel 成 0..N-1，所以"样本内的编号"在样本之间
+    # 没有可比性。凡是**跨样本聚合**的统计（KLEV / JSEV 的 edge visit 分布、以及
+    # km-based DTW 的坐标查表）都必须先映射回全局 OSM id，否则会把"A 样本的 0-1 边"
+    # 和"B 样本的 0-1 边"当成同一条路。单样本指标（nLCS / Edge F1 / CostRatio）
+    # 在局部编号空间里算就够了。
+    if not sample_meta.get("local_to_global"):
+        inverse: List[Optional[Any]] = [None] * len(mapping)
+        for old, new in mapping.items():
+            inverse[int(new)] = old
+        sample_meta["local_to_global"] = [
+            int(node) if isinstance(node, (int, np.integer)) else node
+            for node in inverse
+        ]
 
     return GraphSample(
         graph=graph,

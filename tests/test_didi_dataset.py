@@ -24,6 +24,7 @@ import sys
 from pathlib import Path
 
 import networkx as nx
+import numpy as np
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +40,14 @@ from src.data.branch_segments import (  # noqa: E402
     FlatCandidates,
     GraphSegments,
 )
-from src.data.dataset import GraphQueryDataset, validate_sample  # noqa: E402
+from src.data.branch_segments import build_decision_nodes as bs_build_decision_nodes  # noqa: E402
+from src.data.dataset import (  # noqa: E402
+    GraphQueryDataset,
+    target_null_fraction,
+    target_null_statistics,
+    validate_sample,
+)
+from src.evaluation import real_path_metrics as rpm  # noqa: E402
 from src.data.dataset_builder import (  # noqa: E402
     build_sample,
     build_sample_from_observed_path,
@@ -302,6 +310,141 @@ def test_observed_path_must_be_a_real_path():
     graph = _detour_graph()
     with pytest.raises(Exception):
         build_sample_from_observed_path(graph, [0, 4])  # 0-4 不是边
+
+
+# ---------------------------------------------------------------------------
+# local -> global 编号反查表（KLEV/JSEV 的全局 id 空间）
+# ---------------------------------------------------------------------------
+def _chain_with_junction(offset):
+    """offset+0 - offset+1 - offset+2，外加 offset+1 伸出去一条 offset+3。"""
+    graph = nx.Graph()
+    for u, v in (
+        (offset + 0, offset + 1),
+        (offset + 1, offset + 2),
+        (offset + 1, offset + 3),
+    ):
+        graph.add_edge(u, v, weight=1.0)
+    graph.graph["weighted"] = True
+    graph.graph["weight"] = "weight"
+    return graph
+
+
+def test_local_to_global_is_stored_on_observed_samples():
+    graph = _chain_with_junction(100)
+    sample = build_sample_from_observed_path(graph, [100, 101, 102])
+    assert sample.gt_path == [0, 1, 2]  # 局部编号
+    assert sample.meta["local_to_global"] == [100, 101, 102, 103]
+
+
+def test_distribution_metrics_use_global_node_ids():
+    """两个样本 relabel 后都是 [0,1,2]，但它们是**不同的城市道路**。
+
+    直接拿局部编号做 edge visit 分布，KLEV/JSEV 会把这两条轨迹当成同一条路
+    （只有 2 条边）；映射回全局 OSM id 后才是 4 条不同的边。
+    """
+    sample_a = build_sample_from_observed_path(_chain_with_junction(100), [100, 101, 102])
+    sample_b = build_sample_from_observed_path(_chain_with_junction(700), [700, 701, 702])
+    assert sample_a.gt_path == sample_b.gt_path == [0, 1, 2]
+
+    naive = rpm.edge_visit_distribution([sample_a.gt_path, sample_b.gt_path])
+    assert len(naive) == 2  # ← 错的口径：只有两条"边"
+
+    global_a = rpm.to_global_path(sample_a.gt_path, sample_a.meta["local_to_global"])
+    global_b = rpm.to_global_path(sample_b.gt_path, sample_b.meta["local_to_global"])
+    assert global_a == [100, 101, 102]
+    assert global_b == [700, 701, 702]
+
+    fixed = rpm.edge_visit_distribution([global_a, global_b])
+    assert len(fixed) == 4
+    assert set(fixed) == {(100, 101), (101, 102), (700, 701), (701, 702)}
+    # 映射后两条完全不同的轨迹，JSEV 必须 > 0（局部口径下会是 0）
+    assert rpm.jsev(rpm.edge_visit_distribution([global_a]),
+                    rpm.edge_visit_distribution([global_b])) > 0.0
+    assert rpm.jsev(rpm.edge_visit_distribution([sample_a.gt_path]),
+                    rpm.edge_visit_distribution([sample_b.gt_path])) == pytest.approx(0.0)
+
+
+def test_to_global_path_without_mapping_is_identity():
+    assert rpm.to_global_path([0, 1, 2], None) == [0, 1, 2]
+    assert rpm.to_global_path([5, 6], []) == [5, 6]
+
+
+# ---------------------------------------------------------------------------
+# decision 计数：Start 不能重复计
+# ---------------------------------------------------------------------------
+def test_count_decisions_does_not_double_count_start():
+    """deg(start) >= 3 时，start 已经属于 {v: deg(v) >= 3}，不能再 +1。"""
+    graph = nx.Graph()
+    graph.add_edges_from([(0, 1), (0, 2), (0, 3), (1, 4)])
+    # start=0 的度是 3 -> 它就是 junction，集合里已经有一个
+    assert didi.count_decisions(graph, 0, 4) == 1
+    assert len(bs_build_decision_nodes(graph, 0, 4)) == 1
+    assert didi.corridor_decision_count(graph, set(graph.nodes()), 0, 4) == 1
+
+    # start 度 == 2（不是 junction）时才需要额外加进去
+    graph2 = nx.Graph()
+    graph2.add_edges_from([(0, 1), (0, 2), (1, 3), (2, 4)])
+    assert didi.count_decisions(graph2, 0, 3) == 1
+    assert len(bs_build_decision_nodes(graph2, 0, 3)) == 1
+    assert didi.corridor_decision_count(graph2, set(graph2.nodes()), 0, 3) == 1
+
+    # goal 无论度多大都不是 decision
+    graph3 = nx.Graph()
+    graph3.add_edges_from([(0, 1), (1, 2), (1, 3), (1, 4)])
+    assert didi.count_decisions(graph3, 0, 1) == 0
+    assert len(bs_build_decision_nodes(graph3, 0, 1)) == 0
+
+
+def test_corridor_decision_count_matches_built_sample():
+    """扫描用的快速版必须和真正建样本得到的 decision 数一致。"""
+    graph = _triangle_graph()
+    corridor = didi.build_od_corridor(graph, 0, 4, rho=2.0)
+    sample = build_sample_from_observed_path(corridor.graph, [0, 3, 4])
+    keep, _cost = didi.corridor_node_set(graph, 0, 4, rho=2.0)
+    assert (
+        didi.corridor_decision_count(graph, keep, 0, 4) == sample.num_decisions
+    )
+
+
+# ---------------------------------------------------------------------------
+# target_null_fraction（标签级）≠ candidate_null_fraction（候选级）
+# ---------------------------------------------------------------------------
+def _two_decision_graph():
+    """0 是 start/junction 且在 GT 上；5 是另一个 junction，GT 不经过它。
+
+        GT = 0 -> 1 -> 4
+        5 伸向 2（回到 0）和两个死胡同 7/8
+    """
+    graph = nx.Graph()
+    for u, v in [(0, 1), (0, 2), (0, 3), (1, 4), (2, 5), (5, 7), (5, 8)]:
+        graph.add_edge(u, v, weight=1.0)
+    graph.graph["weighted"] = True
+    graph.graph["weight"] = "weight"
+    return graph
+
+
+def test_target_null_fraction_is_decision_level():
+    graph = _two_decision_graph()
+    sample = build_sample_from_observed_path(graph, [0, 1, 4])
+    assert sample.num_decisions == 2  # 0 与 5
+
+    candidates = sample.field.candidates
+    assert len(candidates.target_candidate) == 2
+    targets = [candidates.candidate_is_null[i] for i in candidates.target_candidate]
+    # decision 0 在 GT 上 -> 选 branch；decision 5 不在 -> NULL
+    assert targets.count(True) == 1
+
+    assert target_null_fraction(sample) == pytest.approx(0.5)
+
+    # candidate 级口径完全不同（NULL 候选只有 1 个，候选总数 3 + 4 = 7）
+    candidate_level = float(np.mean(candidates.candidate_is_null))
+    assert candidate_level == pytest.approx(1 / 7)
+    assert candidate_level != pytest.approx(0.5)
+
+    stats = target_null_statistics([sample, sample])
+    assert stats["num_decisions"] == 4
+    assert stats["num_null_targets"] == 2
+    assert stats["target_null_fraction"] == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------

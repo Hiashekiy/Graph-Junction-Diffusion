@@ -30,6 +30,14 @@ data:
   line_graph_file: line_graph_edge_idx.npy
   trajectory_glob: "201610*.csv"
 
+  # OSMnx 导出的路网（`crs = epsg:4326`，节点带 x=经度 / y=纬度，节点 id 与
+  # dicts.pkl 的 (u, v) 同一套）。**不是** data.root 下的文件，所以单独给全路径。
+  # 用途：真实地理底图可视化（tools/visualize_didi_samples.py）与 km-based DTW。
+  # 该文件是可选依赖：缺了只影响画图和 DTW，不影响训练。
+  # 注意它配的是 data/data/cd/dicts.pkl（2848 节点），对我们这张 2891 节点的图
+  # 覆盖率是 96.2%，其余用邻居坐标填充。
+  coords_file: data/DiDiChengduXian/data/data/cd/ChengDu.pkl
+
   # **必须显式确认，代码绝不猜**（方案第 3.2 节）。
   # 已用 `prepare_didi.py --scan-only` 核实：edge_features.csv 的列名是
   #   road_id, oneway, lanes, highway, length, bridge, tunnel,
@@ -121,6 +129,11 @@ split:
   # GDP 风格固定子集（方案第 7.4 / 7.5 节）
   test_subset_size: 1000
   shuffled_od_size: 1000
+  # shuffled OD **必须**凑满 shuffled_od_size，否则直接报错。
+  # 理由：论文主表要固定 test_1000 = 1000 且 shuffled_od_1000 = 1000，
+  # 一次 991、一次 1000 会让两组实验的 shuffled-OD 口径不可比。
+  # 接受不足 1000 条就把它设成 false（那时 metadata 里会记 reached_target=false）。
+  strict_shuffled_size: true
 
 model:
   d_model: 128

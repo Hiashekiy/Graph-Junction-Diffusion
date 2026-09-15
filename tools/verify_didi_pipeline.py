@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, List, Tuple
 
 import networkx as nx
+import numpy as np
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -36,7 +37,11 @@ from src.data.branch_segments import (  # noqa: E402
     FlatCandidates,
     GraphSegments,
 )
-from src.data.dataset import GraphQueryDataset, validate_sample  # noqa: E402
+from src.data.dataset import (  # noqa: E402
+    GraphQueryDataset,
+    target_null_statistics as null_statistics,
+    validate_sample,
+)
 from src.data.dataset_builder import (  # noqa: E402
     build_sample,
     build_sample_from_observed_path,
@@ -487,6 +492,101 @@ def check_path_similarity_and_cost_ratio():
     )
 
 
+@check("8e. KLEV/JSEV 必须在全局 OSM id 空间统计")
+def check_global_id_distribution():
+    def chain(offset):
+        graph = nx.Graph()
+        for u, v in ((offset, offset + 1), (offset + 1, offset + 2),
+                     (offset + 1, offset + 3)):
+            graph.add_edge(u, v, weight=1.0)
+        graph.graph["weighted"] = True
+        graph.graph["weight"] = "weight"
+        return graph
+
+    a = build_sample_from_observed_path(chain(100), [100, 101, 102])
+    b = build_sample_from_observed_path(chain(700), [700, 701, 702])
+    assert a.gt_path == b.gt_path == [0, 1, 2], (a.gt_path, b.gt_path)
+    assert a.meta["local_to_global"] == [100, 101, 102, 103]
+    assert b.meta["local_to_global"] == [700, 701, 702, 703]
+
+    naive = rpm.edge_visit_distribution([a.gt_path, b.gt_path])
+    assert len(naive) == 2, naive          # 错的口径：两条不同的路被当成同一条
+    ga = rpm.to_global_path(a.gt_path, a.meta["local_to_global"])
+    gb = rpm.to_global_path(b.gt_path, b.meta["local_to_global"])
+    fixed = rpm.edge_visit_distribution([ga, gb])
+    assert len(fixed) == 4, fixed
+    assert rpm.jsev(rpm.edge_visit_distribution([ga]),
+                    rpm.edge_visit_distribution([gb])) > 0.0
+    assert rpm.to_global_path([5, 6], None) == [5, 6]
+
+
+@check("8f. decision 计数不重复算 Start")
+def check_decision_count():
+    from src.data.branch_segments import build_decision_nodes as reference
+
+    graph = nx.Graph()
+    graph.add_edges_from([(0, 1), (0, 2), (0, 3), (1, 4)])   # deg(start)=3
+    assert didi.count_decisions(graph, 0, 4) == len(reference(graph, 0, 4)) == 1
+    assert didi.corridor_decision_count(graph, set(graph.nodes()), 0, 4) == 1
+
+    graph2 = nx.Graph()
+    graph2.add_edges_from([(0, 1), (0, 2), (1, 3), (2, 4)])  # deg(start)=2
+    assert didi.count_decisions(graph2, 0, 3) == len(reference(graph2, 0, 3)) == 1
+
+    graph3 = nx.Graph()
+    graph3.add_edges_from([(0, 1), (1, 2), (1, 3), (1, 4)])  # goal 是 junction
+    assert didi.count_decisions(graph3, 0, 1) == len(reference(graph3, 0, 1)) == 0
+
+
+@check("8g. target_null_fraction 是标签级（不是候选级）")
+def check_target_null_fraction():
+    from src.data.dataset import target_null_fraction, target_null_statistics
+
+    graph = nx.Graph()
+    for u, v in [(0, 1), (0, 2), (0, 3), (1, 4), (2, 5), (5, 7), (5, 8)]:
+        graph.add_edge(u, v, weight=1.0)
+    graph.graph["weighted"] = True
+    graph.graph["weight"] = "weight"
+    sample = build_sample_from_observed_path(graph, [0, 1, 4])
+    assert sample.num_decisions == 2
+    assert abs(target_null_fraction(sample) - 0.5) < 1e-12
+    candidate_level = float(np.mean(sample.field.candidates.candidate_is_null))
+    assert abs(candidate_level - 1 / 7) < 1e-12
+    assert abs(candidate_level - 0.5) > 0.1      # 两个口径必须明显不同
+    stats = target_null_statistics([sample, sample])
+    assert stats["num_decisions"] == 4 and stats["num_null_targets"] == 2
+    assert abs(stats["target_null_fraction"] - 0.5) < 1e-12
+
+
+@check("8h. km-based DTW 手算样例")
+def check_dtw():
+    def meridian(count, step=0.001):
+        return [(104.0, 30.0 + index * step) for index in range(count)]
+
+    points = meridian(4)
+    coords = {index: point for index, point in enumerate(points)}
+    same = rpm.dtw_distance_km([0, 1, 2, 3], [0, 1, 2, 3], coords)
+    assert same.ok and abs(same.total_km) < 1e-12 and same.warping_steps == 4
+
+    pred = ["p0", "p1", "p2"]
+    coords.update({"p0": points[0], "p1": (104.0, 30.0021), "p2": points[3]})
+    result = rpm.dtw_distance_km(pred, [0, 1, 2, 3], coords)
+    expected = (
+        rpm.haversine_km(104.0, 30.0000, 104.0, 30.0010)
+        + rpm.haversine_km(104.0, 30.0021, 104.0, 30.0020)
+    )
+    assert abs(result.total_km - expected) < 1e-9, (result.total_km, expected)
+    assert result.warping_steps == 4
+    assert abs(result.mean_km - expected / 4) < 1e-9
+    naive = (
+        rpm.haversine_km(104.0, 30.0021, 104.0, 30.0010)
+        + rpm.haversine_km(104.0, 30.0030, 104.0, 30.0020)
+    )
+    assert result.total_km < naive
+    assert not rpm.dtw_distance_km([0, 1], [0, 1, 99], coords).ok
+    assert abs(rpm.haversine_km(104.0, 30.0, 104.0, 30.01) - 1.11195) < 1e-3
+
+
 @check("9. 去重先于 split，且 train/val/test 无交集")
 def check_split_disjoint():
     def candidate(path, order_id):
@@ -637,12 +737,25 @@ def check_built_dataset(data_dir: Path) -> None:
             assert sample.gt_path[0] == sample.start
             assert sample.gt_path[-1] == sample.goal
             assert len(set(sample.gt_path)) == len(sample.gt_path)
+            # KLEV/JSEV 的全局 id 空间依赖这张反查表，缺了会静默算错
+            mapping = sample.meta.get("local_to_global")
+            assert isinstance(mapping, list), f"{name}: missing local_to_global"
+            assert len(mapping) == sample.num_nodes, (
+                f"{name}: local_to_global has {len(mapping)} entries but the "
+                f"corridor has {sample.num_nodes} nodes"
+            )
+            assert len(set(mapping)) == len(mapping), f"{name}: duplicate global ids"
+        null_stats = null_statistics(list(dataset))
+        candidate_level = sum(
+            float(np.mean(s.field.candidates.candidate_is_null)) for s in dataset
+        ) / len(dataset)
         print(
             f"      {name}: n={len(dataset)} decisions(mean)="
             f"{sum(s.num_decisions for s in dataset) / len(dataset):.0f} "
-            f"null_fraction="
-            f"{sum(float(__import__('numpy').mean(s.field.candidates.candidate_is_null)) for s in dataset) / len(dataset):.4f}"
+            f"candidate_null={candidate_level:.4f} "
+            f"target_null={null_stats['target_null_fraction']:.4f} (标签级)"
         )
+        assert 0.0 <= null_stats["target_null_fraction"] <= 1.0
 
     # split 之间不允许有重复轨迹
     keys = {
