@@ -209,8 +209,12 @@ loss:
   #     L = L_path + lambda_null_local * L_NULL-sat + lambda_T * L_traj
   #
   #     L_path       = -1/N_A * sum_{i in active} log p_i(b_i^GT)
-  #     L_NULL-sat   = -1/K   * sum_{j in S_N} max(0, log(rho_null) - log p_j(NULL))
+  #     L_NULL-sat   =  1/K   * sum_{j in S_N} max(0, log(rho_null) - log p_j(NULL))
   #     L_traj       = lambda_s*L_succ + lambda_g*L_sim + lambda_f*L_fail
+  #
+  # 注意 L_NULL-sat **没有前导负号**：饱和项本身恒 >= 0（clamp 到 [0, inf)），
+  # p_j(NULL) >= rho_null 时它恰好为 0。写成 -1/K * sum max(0, ...) 会把它变成
+  # 非正的"奖励"项，与代码 saturating_null_loss（只 clamp、不取负）正好相反。
   #
   # 为什么换掉旧 CE：真实 corridor 里 93.6% 的 decision 标签是 NULL，而旧 CE 对
   # **每个 decision 等权平均**，于是"全押 NULL"就是 CE 的平凡最优解 —— 实测 5 epoch
@@ -320,9 +324,35 @@ loss:
   goal_horizon_cap: 24
 
 evaluation:
-  stochastic_sampling: true
+  # ===== 验证 / 选 best.pt / 最终评测：**同一把尺子** ======================
+  #
+  # 以前这里只有下面三行，Trainer.validate() 走的是 evaluate_dataset() 的默认形参
+  # （decode=single、非 strict、beam=64），而脚本评测用的是 strict 多分支 ——
+  # 于是 best.pt 是按 single 的 PathSim 挑的，挑出来的却不是 strict 下最好的那轮。
+  # 实测过这种分叉：single PathSim 后期变差（0.35 -> 0.31）而 strict 还在涨
+  # （0.43 -> 0.46），旧口径会选中更早、更差的 checkpoint。
+  #
+  # 现在这些键由 Trainer.validate() 与 scripts/evaluate.py **共同**读取，
+  # 训练期验证 / 选 best / 最终测试三者不可能再漂。
+  #
+  # 口径 = "Strict 2/3"（方案第 24 节的最终推理配置）：
+  #   * strict：NULL / loop / dead-end 在 top-k **之前**就被 mask、失败路径直接淘汰，
+  #     最终候选集只有完整走到 Goal 的路径（三池语义，见 strict_beam_decoder）；
+  #   * top_k=2 / beam_width=3：比训练 miner 的 2/8 窄得多 —— 训练要看得见失败，
+  #     评测只要"能不能到终点"；
+  #   * stochastic_sampling=false：等价于 evaluate.py 的 --deterministic，
+  #     保证同一份 checkpoint 的 val 与最终测试是同一个数。
+  stochastic_sampling: false
   batch_size: 8
   max_steps: 0
+
+  decode: multi
+  strict_decode: true
+  top_k: 2
+  beam_width: 3
+  null_policy: stop
+  # strict 下恒为真（NULL 永远不合法），这里显式写出来只为让两边配置对得上
+  filter_dead_branches: false
 
 paths:
   data_dir: data/didi/graph/chengdu

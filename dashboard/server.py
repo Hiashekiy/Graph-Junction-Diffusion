@@ -44,16 +44,35 @@ class RunInfo:
     flow_steps: int = 0
     data_dir: str = ""
     train_dataset: str = ""
+    #: ``data.source``：``"didi_chengdu"`` 表示真实成都路网 + 真实车辆历史路径当 GT。
+    #: 它决定了面板能不能画街道底图，也决定模型徽章上显示"滴滴"。
+    source: str = ""
+    #: **当前** ``configs/<run>.yaml`` 里记录的坐标文件（OSMnx 图，节点带经纬度）。
+    #: 空串 = 该 run 没有地理信息（合成图），面板退回弹簧布局。
+    coords_file: str = ""
+    #: 解析到的 live config（相对仓库根的路径），给面板显示来源用。
+    live_config: str = ""
+
+    @property
+    def is_geo(self) -> bool:
+        return bool(self.coords_file)
 
     @property
     def kind(self) -> str:
+        if self.source == "didi_chengdu":
+            return "didi"
         if not self.weighted:
             return "unweighted"
         return "weighted" if self.use_edge_cost else "ablated"
 
     @property
     def kind_label(self) -> str:
-        return {"weighted": "带权", "ablated": "带权·无cost", "unweighted": "无权"}[self.kind]
+        return {
+            "didi": "滴滴·带权",
+            "weighted": "带权",
+            "ablated": "带权·无cost",
+            "unweighted": "无权",
+        }[self.kind]
 
 
 @dataclass(frozen=True)
@@ -62,12 +81,103 @@ class DatasetInfo:
     label: str
     path: Path
     size_mb: float
-    group: str = ""          # 所属子目录（unweighted / weighted / chengdu …）
+    group: str = ""          # 相对 data/ 的所属子目录（unweighted / didi/graph/chengdu …）
     relative: str = ""       # 相对仓库根的可读路径，给面板当提示用
 
 
 def _relative_id(path: Path, base: Path) -> str:
     return path.resolve().relative_to(base.resolve()).as_posix()
+
+
+#: ``data/`` 下**不是**数据集的 pkl。数据集必须是某个 split 的落盘文件；
+#: ``graph_global.pkl`` 是整城路网、``_*.pkl`` 是 prepare 阶段的中间缓存，
+#: 两者用 ``GraphQueryDataset.load`` 打开都会直接抛异常。
+_NON_DATASET_NAMES = frozenset({"graph_global.pkl"})
+
+#: 原始数据目录名：``data/didi/raw/chengdu`` 里是 dicts.pkl / ChengDu.pkl 之类的
+#: **输入**而不是数据集，整个子树都要跳过。
+_RAW_DIR_NAMES = frozenset({"raw"})
+
+
+def _read_live_config(root: Path, name: str) -> Dict[str, Any]:
+    """读 ``configs/<name>.yaml`` 并抽出面板关心的字段；读不到返回空 dict。"""
+    path = root / "configs" / f"{name}.yaml"
+    if not path.is_file():
+        return {}
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - 仓库必装 PyYAML
+        return {}
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    data_cfg = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
+    paths_cfg = payload.get("paths") if isinstance(payload.get("paths"), Mapping) else {}
+    source = data_cfg.get("source")
+    coords = data_cfg.get("coords_file")
+    return {
+        "live_config": f"configs/{name}.yaml",
+        "run_name": str(paths_cfg.get("run_name", "") or ""),
+        "data_dir": str(paths_cfg.get("data_dir", "") or ""),
+        # source 在合成数据上是个 dict（generator 的 source 子配置），只有字符串才是
+        # 真正的"数据来源"标记
+        "source": source if isinstance(source, str) else "",
+        "coords_file": str(coords) if coords else "",
+    }
+
+
+def _live_run_settings(root: Path, names: Iterable[str]) -> Dict[str, Any]:
+    """按候选名字找 live config；都不中就在 ``configs/`` 里按 ``paths.run_name`` 反查。
+
+    为什么不能只用 run 目录里的 ``run_config.json``：那是**训练当时**的快照，仓库
+    重构后可能指向早就删掉的路径。实测 ``outputs/runs/didi_chengdu/run_config.json``
+    里还写着
+
+        data.root        = data/DiDiChengduXian/didi_datasets/datasets/didi_chengdu
+        data.coords_file = data/DiDiChengduXian/data/data/cd/ChengDu.pkl
+        paths.data_dir   = data/didi_chengdu_gjd
+        paths.run_name   = didi_chengdu_flow1_weighted_new
+
+    这四个名字/路径在 2026-09-16 的清理里全失效了（真实位置是 ``data/didi/raw/
+    chengdu/ChengDu.pkl`` 与 ``data/didi/graph/chengdu``）。所以职责拆开：
+
+    * **模型结构 / 扩散参数** → 必须用 ``run_config.json``（权重兼容，见 ``_bundle``）
+    * **数据在哪、坐标在哪** → 一律用 live config
+
+    名字候选顺序是"**目录名优先**，再退到快照里的 run_name" —— 合并/改名过的 run
+    目录（``didi_chengdu``）留着的是旧快照，只有目录名才是当前配置名。最后再扫一遍
+    ``configs/*.yaml`` 里 ``paths.run_name`` 的声明，覆盖"目录被改名"的反向情况。
+    """
+    tried: List[str] = []
+    for name in names:
+        name = str(name or "").strip()
+        if not name or name in tried:
+            continue
+        tried.append(name)
+        found = _read_live_config(root, name)
+        if found:
+            return found
+    config_dir = root / "configs"
+    if config_dir.is_dir():
+        for path in sorted(config_dir.glob("*.yaml")):
+            found = _read_live_config(root, path.stem)
+            if found and found.get("run_name") in tried:
+                return found
+    return {}
+
+
+def _existing_relative(root: Path, value: str) -> str:
+    """把配置里的相对路径规范化；文件不存在就返回空串（面板据此关闭地理模式）。"""
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    path = Path(value.replace("\\", "/"))
+    if not path.is_absolute():
+        path = root / path
+    return _relative_id(path, root) if path.is_file() else ""
 
 
 def discover_runs(root: Path = PROJECT_ROOT) -> Dict[str, RunInfo]:
@@ -89,6 +199,17 @@ def discover_runs(root: Path = PROJECT_ROOT) -> Dict[str, RunInfo]:
             config = {}
         data_cfg = config.get("data") if isinstance(config.get("data"), Mapping) else {}
         model_cfg = config.get("model") if isinstance(config.get("model"), Mapping) else {}
+        paths_cfg = config.get("paths") if isinstance(config.get("paths"), Mapping) else {}
+        snapshot_data_dir = str(paths_cfg.get("data_dir", "") or "")
+        snapshot_source = data_cfg.get("source")
+        snapshot_source = snapshot_source if isinstance(snapshot_source, str) else ""
+
+        # 目录名优先：合并/改名过的 run 目录里那份快照可能还写着旧 run_name
+        # （didi_chengdu 的快照写的是 didi_chengdu_flow1_weighted_new），照着它去找
+        # configs/*.yaml 会一个都找不到，然后静默退回一份过期快照。
+        live = _live_run_settings(
+            root, (run_dir.name, str(paths_cfg.get("run_name") or ""))
+        )
         found[run_id] = RunInfo(
             run_id,
             run_id.replace("/", " / "),
@@ -97,32 +218,55 @@ def discover_runs(root: Path = PROJECT_ROOT) -> Dict[str, RunInfo]:
             weighted=bool(data_cfg.get("weighted", False)),
             use_edge_cost=bool(model_cfg.get("use_edge_cost", False)),
             flow_steps=int(model_cfg.get("flow_steps", 0) or 0),
-            data_dir=str(config.get("paths", {}).get("data_dir", "")) if isinstance(config.get("paths"), Mapping) else "",
+            data_dir=str(live.get("data_dir") or snapshot_data_dir),
             train_dataset=str(data_cfg.get("train_dataset", "")),
+            source=str(live.get("source") or snapshot_source),
+            coords_file=_existing_relative(root, str(live.get("coords_file", ""))),
+            live_config=str(live.get("live_config", "")),
         )
     return found
 
 
 def discover_datasets(root: Path = PROJECT_ROOT) -> Dict[str, DatasetInfo]:
-    """Discover every dataset below ``data/``.
+    """Discover every **dataset** below ``data/``.
 
-    Datasets live in per-family sub-directories (``unweighted`` / ``weighted`` /
-    ``didi/graph/chengdu``), so the scan is recursive and the listing comes back
-    grouped -- note ``group`` is the **immediate** parent directory name (so the
-    DiDi graph dataset reports ``chengdu``, not the full relative path).  The id stays the bare file name: existing ``eval*.json`` /
-    ``mp_*.json`` artefacts record their dataset by file name, and the id is what
-    the browser sends back on every request.
+    Datasets live in per-family sub-directories, so the scan is recursive and the
+    listing comes back grouped.  ``group`` is the path **relative to ``data/``**
+    (``unweighted`` / ``weighted`` / ``didi/graph/chengdu``), which is what the
+    picker shows as an ``optgroup`` label -- it has to be the relative path and
+    not the immediate parent, otherwise the DiDi splits show up under a bare
+    ``chengdu`` with no hint that they are the real-road ones.
+
+    The id stays the bare file name: historical ``eval*.json`` / ``mp_*.json``
+    artifacts record their dataset by file name, and the id is what the browser
+    sends back on every request.  Two same-named files in different groups fall
+    back to the relative id so one can never shadow the other.
+
+    Excluded on purpose:
+
+    * anything under a ``raw/`` directory -- ``data/didi/raw/chengdu`` holds
+      ``dicts.pkl`` / ``ChengDu.pkl``, which are model **inputs**, not datasets;
+    * ``_``-prefixed files (``_didi_candidates.pkl`` is the prepare-stage cache);
+    * ``graph_global.pkl`` (the whole-city junction graph behind every corridor).
+
+    All three would blow up in ``GraphQueryDataset.load`` if the picker offered
+    them, and the failure only shows up as "推理未完成" after the click.
     """
     data_root = root / "data"
     found: Dict[str, DatasetInfo] = {}
     if not data_root.exists():
         return found
     for path in sorted(data_root.rglob("*.pkl")):
+        parts = path.relative_to(data_root).parts
+        if any(part in _RAW_DIR_NAMES for part in parts[:-1]):
+            continue
+        if path.name.startswith("_") or path.name in _NON_DATASET_NAMES:
+            continue
         dataset_id = path.name
         if dataset_id in found:  # never let one group shadow another
             dataset_id = _relative_id(path, data_root)
         label = path.stem.replace("_", " ")
-        group = path.parent.name if path.parent != data_root else ""
+        group = Path(*parts[:-1]).as_posix() if len(parts) > 1 else ""
         try:
             relative = path.resolve().relative_to(root.resolve()).as_posix()
         except ValueError:  # 数据集在仓库外（测试用的 tmp_path）
@@ -138,53 +282,6 @@ def discover_datasets(root: Path = PROJECT_ROOT) -> Dict[str, DatasetInfo]:
     return found
 
 
-def _dataset_id_from_path(value: str) -> str:
-    return Path(str(value).replace("\\", "/")).name
-
-
-def _dataset_from_eval_name(name: str) -> Optional[str]:
-    """**2026-09-16 起停用**，恒返回 ``None``。
-
-    它原本按文件名把历史产物映回数据集：
-
-        ``*oldv1*``  -> ``oldv1_test.pkl``
-        ``*long*``   -> ``controlled_long.pkl``
-        ``*test*``   -> ``controlled_test.pkl``
-
-    这三个数据集（连同 ``data/mixed`` 的旧划分）已经在 2026-09-16 被删除并**重新划分**
-    （见 README §0.1 A/B）：现在的 ``data/unweighted/unweighted_test.pkl`` 是**另一套
-    graph split**，用它去标注旧产物等于给一份结果贴上不匹配的数据集、让面板画出错误的
-    路径。所以这里**故意返回 None**（面板显示为未关联数据集），而不是硬凑一个现存 id。
-
-    加权数据集**没有被重划分**，所以"带权 run 的 test 产物"仍然能可靠地指向
-    ``weighted_test.pkl`` —— 那条兜底保留在 :func:`_dataset_from_payload` 里。
-    """
-    del name  # 保留签名，调用方无需改
-    return None
-
-
-def _dataset_from_payload(
-    payload: Mapping[str, Any], path: Path, run: Optional["RunInfo"] = None
-) -> Optional[str]:
-    """评测产物的数据集归属。
-
-    优先级：产物自己记录的 ``data``（新格式）> 加权 run 的兜底 > 无法判定（None）。
-
-    加权数据集是后来才有的，早期产物里没有 ``data`` 字段，而文件名统一叫
-    ``eval_test.json``；对 ``data.weighted=true`` 的 run，这类产物直接判给
-    ``weighted_test.pkl``（带权数据集未重划分，这份对应关系仍然成立）。
-    无权重的历史产物一律返回 ``None`` —— 那套 split 已经不存在了。
-    """
-    recorded = payload.get("data")
-    if recorded:
-        candidate = _dataset_id_from_path(str(recorded))
-        if candidate.endswith(".pkl"):
-            return candidate
-    if run is not None and run.weighted and "test" in Path(path.name).stem.lower():
-        return "weighted_test.pkl"
-    return _dataset_from_eval_name(path.name)
-
-
 def _finite(value: Any) -> Any:
     if isinstance(value, float) and not math.isfinite(value):
         return None
@@ -195,172 +292,22 @@ def _finite(value: Any) -> Any:
     return value
 
 
-def _metric_row(
-    run_id: str,
-    dataset_id: str,
-    decoding: str,
-    source: Path,
-    metrics: Mapping[str, Any],
-    extra: Optional[Mapping[str, Any]] = None,
-) -> Dict[str, Any]:
-    keys = (
-        "num_queries",
-        "goal_hit_rate",
-        "optimal_path_rate",
-        "success_cost_ratio",
-        "loop_rate",
-        "broken_rate",
-        "mean_elapsed",
-        "soft_goal_reachability",
-        "coverage_rate",
-        "optimal_coverage_rate",
-        # Weighted 扩展：加权图上按真实 cost 判定的最优覆盖率
-        "weighted_optimal_coverage_rate",
-        # 多分支增强：路径表规模与"必死 branch 预筛选"的统计
-        "mean_goal_paths",
-        "mean_finished_paths",
-        "mean_filtered_dead_branches",
-        "mean_pruned",
-    )
-    row: Dict[str, Any] = {
-        "model": run_id,
-        "dataset": dataset_id,
-        "decoding": decoding,
-        "source": source.name,
-    }
-    row.update({key: metrics.get(key) for key in keys})
-    if extra:
-        row.update(extra)
-    return _finite(row)
-
-
-def discover_metrics(
-    runs: Mapping[str, RunInfo], root: Path = PROJECT_ROOT
-) -> List[Dict[str, Any]]:
-    """Read compact metric summaries without returning per-query records."""
-    rows: List[Dict[str, Any]] = []
-    for run_id, run in runs.items():
-        for path in sorted(run.path.glob("eval*.json")):
-            # Flow-step files are ablations, not distinct trained models.  Keeping
-            # them out avoids silently mixing inference configurations.
-            if "_flow" in path.stem:
-                continue
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            metrics = payload.get("metrics")
-            if not isinstance(metrics, Mapping):
-                continue
-            dataset_id = _dataset_from_payload(payload, path, run)
-            # 2026-09-16：数据集被删除/重划分后，历史产物可能**无法关联**到任何现存数据集。
-            # 这里**不丢弃**该行（丢弃会让面板静默少掉一批历史结果），而是保留并把
-            # dataset_id 置空 —— 面板显示为"未关联数据集"，路径查看器对该行不可用。
-            # 这是正确的：那份 graph split 已不存在，指向任何现存测试集都会画错路径。
-            decoding = "multi" if "multi" in path.stem else "single"
-            extra = {
-                key: payload[key]
-                for key in (
-                    "coverage_rate",
-                    "optimal_coverage_rate",
-                    "weighted_optimal_coverage_rate",
-                )
-                if key in payload
-            }
-            extra["weighted"] = bool(run.weighted) or bool(
-                dataset_id and dataset_id.startswith("weighted")
-            )
-            # 新格式（``--decode multi``）：payload["multi"] 里一次带三条口径，各占一行。
-            multi = payload.get("multi")
-            if isinstance(multi, Mapping):
-                info = multi.get("info") if isinstance(multi.get("info"), Mapping) else {}
-                shared = dict(extra)
-                for key in (
-                    "coverage_rate",
-                    "optimal_coverage_rate",
-                    "mean_goal_paths",
-                    "mean_finished_paths",
-                    "mean_filtered_dead_branches",
-                ):
-                    if key in info:
-                        shared[key] = info[key]
-                for mode_key, suffix in (
-                    ("multi_best", ""),
-                    ("multi_best_goal", " · best_goal"),
-                    ("multi_best_goal_cost", " · best_goal_cost"),
-                ):
-                    mode_metrics = multi.get(mode_key)
-                    if isinstance(mode_metrics, Mapping):
-                        rows.append(
-                            _metric_row(run_id, dataset_id, decoding + suffix, path, mode_metrics, shared)
-                        )
-                continue
-            rows.append(_metric_row(run_id, dataset_id, decoding, path, metrics, extra))
-
-        for path in sorted(run.path.glob("mp_*.json")):
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            results = payload.get("results") or []
-            if not results or not isinstance(results[0], Mapping):
-                continue
-            dataset_id = _dataset_id_from_path(payload.get("data", ""))
-            result = results[0]
-            if not dataset_id or not isinstance(result.get("multi_best"), Mapping):
-                continue
-            base = f"multi k={payload.get('top_k', '?')} / {payload.get('null_policy', 'stop')}"
-            extra = {
-                "coverage_rate": result.get("coverage_rate"),
-                "optimal_coverage_rate": result.get("optimal_coverage_rate"),
-                "weighted_optimal_coverage_rate": result.get("weighted_optimal_coverage_rate"),
-                "mean_goal_paths": result.get("mean_goal_paths"),
-                "mean_finished_paths": result.get("mean_finished_paths"),
-                "mean_filtered_dead_branches": result.get("mean_filtered_dead_branches"),
-                "mean_pruned": result.get("mean_pruned"),
-                "weighted": bool(result.get("dataset_is_weighted", False)),
-            }
-            # 一次搜索给出三条口径（方案第 8 节）：每条各占一行，面板上可以直接对比。
-            for mode_key, suffix in (
-                ("multi_best", ""),
-                ("multi_best_goal", " · best_goal"),
-                ("multi_best_goal_cost", " · best_goal_cost"),
-            ):
-                metrics = result.get(mode_key)
-                if not isinstance(metrics, Mapping):
-                    continue
-                rows.append(
-                    _metric_row(run_id, dataset_id, base + suffix, path, metrics, extra)
-                )
-
-    # 同一个 (run, dataset, decoding) 有多份产物时：best.pt 的评测优先于 `*_last.json`，
-    # 其余情况保留排序靠后（更新）的那份。
-    unique: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
-    for row in rows:
-        key = (row["model"], row["dataset"], row["decoding"])
-        previous = unique.get(key)
-        if previous is not None:
-            previous_is_last = "_last" in str(previous.get("source", ""))
-            current_is_last = "_last" in str(row.get("source", ""))
-            if current_is_last and not previous_is_last:
-                continue
-        unique[key] = row
-    # dataset 可能是空（历史产物的 graph split 已被删除/重划分）：用 "" 兜底，
-    # 否则 None 与 str 比较会抛 TypeError
-    return sorted(
-        unique.values(),
-        key=lambda row: (row["dataset"] or "", row["model"], row["decoding"]),
-    )
-
-
 #: 面板要展示的报告 / 汇总产物。(id, 标题, 仓库内相对路径)
+#:
+#: 只列**当前仓库里真的存在**的产物。``docs/REPORT_multipath_and_weighted.md``
+#: 在 2026-09-16 的清理里被删掉了（方法上已被 README §24 的真实数据章节取代），
+#: 这里同步移除 —— 留着一个恒 ``exists: false`` 的条目只会让报告页多一个死链接。
 REPORT_ARTIFACTS: Tuple[Tuple[str, str, str], ...] = (
-    ("report", "多分支解码 / 加权模型 评测报告", "docs/REPORT_multipath_and_weighted.md"),
+    ("architecture", "V2 网络结构设计报告", "docs/ARCHITECTURE_V2.md"),
+    ("guide", "V2 代码实施指南", "docs/Graph-Junction-Diffusion_V2_代码实施指南.md"),
     ("all_models", "全模型统一评测汇总（8 配置 × 2 测试集）", "outputs/reports/all_models_multipath_summary.json"),
     ("weighted_experiment", "加权模型 vs cost 消融（单路径口径）", "outputs/reports/weighted_experiment.json"),
     ("multipath_weighted", "加权模型 beam=64：过滤 on/off 对照", "outputs/reports/multipath_weighted_summary.json"),
     ("multipath_filteron", "只开过滤的 beam=64 结果", "outputs/reports/multipath_weighted_filteron_summary.json"),
     ("beam_compare", "beam=64 vs beam=3 对照（CPU）", "outputs/reports/multipath_weighted_beam_compare.json"),
+    ("benchmark", "推理耗时基准", "outputs/reports/benchmark_inference.json"),
+    ("paired_goal_hit", "配对显著性：Goal hit", "outputs/reports/weighted_paired_goal_hit.json"),
+    ("paired_optimal", "配对显著性：Optimal path", "outputs/reports/weighted_paired_optimal.json"),
     ("regression", "零破坏回归：旧 checkpoint 逐位复现", "outputs/runs/controlled_unweighted/regression_after_weighted_extension.json"),
 )
 
@@ -384,23 +331,249 @@ def discover_reports(root: Path = PROJECT_ROOT) -> List[Dict[str, Any]]:
     return reports
 
 
-def _graph_payload(sample: Any) -> Dict[str, Any]:
+#: SVG 画布尺寸与留白，必须和前端 ``graphCoordinates()`` 里的常量一致：
+#:
+#:     x = margin + x_norm * (PANEL_WIDTH  - 2 * margin)
+#:     y = margin + (1 - y_norm) * (PANEL_HEIGHT - 2 * margin)
+#:
+#: 地理模式下后端要按**同一个长宽比**做 letterbox，否则真实路网会被拉伸：经度方向
+#: 1 度只有纬度方向 cos(lat0) 倍长（成都约 0.81），如果 x/y 各自归一化到 [0,1]，
+#: 城市会被横向压扁约 19%，看上去就不像地图了。
+PANEL_WIDTH = 1000.0
+PANEL_HEIGHT = 620.0
+PANEL_MARGIN = 55.0
+PANEL_ASPECT = (PANEL_WIDTH - 2 * PANEL_MARGIN) / (PANEL_HEIGHT - 2 * PANEL_MARGIN)
+
+#: 等距圆柱投影下 1 度 ≈ 110.57 km（纬度方向；经度方向已乘 cos(lat0) 校正过）。
+KM_PER_DEGREE = 110.57
+
+#: 裁剪框在"刚好装下 corridor"之后再整体放大多少（四周各留这么多比例的街道背景）。
+#: 顺序很关键：**先补面板长宽比、再整体缩放**，不能先加 margin 再补比例 —— 后者在
+#: 宽屏（面板 1.75:1）上会把近乎方形的 corridor 压成中间一小块（实测只剩 40% 宽）；
+#: 整体缩放不改变形状，corridor 能占到约 47% × 77%。
+CROP_MARGIN = 0.15
+
+#: 一次最多回传多少条街道边。整城 4403 条全发也就 ~110KB，但 25% 外扩的裁剪框在
+#: 长 OD 上可能覆盖大半座城市，所以留一个上限兜底。
+MAX_STREET_EDGES = 6000
+
+
+@dataclass(frozen=True)
+class GeoLayout:
+    """一张真实城市图的地理布局（等距圆柱投影，单位 = "投影度"）。
+
+    ``positions`` 按**全局** OSM node id 索引；样本内部的编号是 corridor 独立
+    relabel 过的（0..N-1），必须经 ``sample.meta['local_to_global']`` 换回来才能查表。
+    """
+
+    positions: Dict[Any, Tuple[float, float]]
+    street_edges: List[Tuple[Any, Any]]
+    lat0: float
+    coverage: float
+    source: str
+
+
+def _load_pickled_graph(path: Path) -> Any:
+    import pickle
+
+    with open(path, "rb") as handle:
+        payload = pickle.load(handle)
+    if isinstance(payload, Mapping) and "graph" in payload:
+        return payload["graph"]
+    return payload
+
+
+def load_geo_layout(
+    root: Path, run: RunInfo, cache: Dict[str, Optional[GeoLayout]]
+) -> Optional[GeoLayout]:
+    """按 run 拉一次真实经纬度底图；失败/不适用返回 ``None``（并缓存这个结论）。
+
+    只有滴滴（``data.source: didi_chengdu``）这类真实城市图才有坐标：合成图是随机
+    生成的，没有任何地理位置可言，面板退回弹簧布局。
+    """
+    if not (run.coords_file and run.data_dir):
+        return None
+    if run.id in cache:
+        return cache[run.id]
+    # 先写 None：坐标文件缺失/损坏时不要每次请求都重试一遍几百 MB 的反序列化
+    cache[run.id] = None
+    coords_path = root / run.coords_file
+    graph_path = root / run.data_dir / "graph_global.pkl"
+    if not coords_path.is_file() or not graph_path.is_file():
+        return None
+    try:
+        from src.data import didi_dataset as didi
+
+        # load_node_coordinates 内部会处理 OSMnx 存档里 shapely 1.x/2.x 的兼容问题，
+        # 之后再去反序列化 graph_global.pkl 才是安全的
+        coordinates = didi.load_node_coordinates(coords_path)
+        graph = _load_pickled_graph(graph_path)
+        graph, stats = didi.attach_coordinates(graph, coordinates, fill_missing=True)
+        latitudes = [float(graph.nodes[node]["y"]) for node in graph.nodes()]
+        if not latitudes:
+            return None
+        lat0 = sum(latitudes) / len(latitudes)
+        scale = math.cos(math.radians(lat0))
+        positions = {
+            node: (
+                float(graph.nodes[node]["x"]) * scale,
+                float(graph.nodes[node]["y"]),
+            )
+            for node in graph.nodes()
+        }
+        street_edges = [(int(u), int(v)) for u, v in graph.edges()]
+    except Exception:  # 真实数据缺失只该让面板退回弹簧布局，不该 500
+        traceback.print_exc()
+        return None
+    layout = GeoLayout(
+        positions=positions,
+        street_edges=street_edges,
+        lat0=lat0,
+        coverage=float(stats.get("coverage", 0.0)),
+        source=run.coords_file,
+    )
+    cache[run.id] = layout
+    return layout
+
+
+def _local_to_global_positions(
+    sample: Any, layout: GeoLayout
+) -> Optional[Dict[int, Tuple[float, float]]]:
+    """corridor 的**样本内编号** -> 投影坐标；有一个节点查不到就返回 ``None``。"""
+    graph = sample.graph
+    local_ids = [int(node) for node in graph.nodes()]
+    mapping = sample.meta.get("local_to_global")
+    if not mapping or len(mapping) < len(local_ids):
+        return None
+    positions: Dict[int, Tuple[float, float]] = {}
+    for local in local_ids:
+        global_id = mapping[local]
+        point = layout.positions.get(global_id)
+        if point is None:
+            try:
+                point = layout.positions.get(int(global_id))
+            except (TypeError, ValueError):
+                point = None
+        if point is None:
+            return None
+        positions[local] = (float(point[0]), float(point[1]))
+    return positions
+
+
+def _letterbox(
+    box: Tuple[float, float, float, float], aspect: float
+) -> Tuple[float, float, float, float]:
+    """把裁剪框按 ``aspect`` 补成同比例，保证归一化后形状不被拉伸。"""
+    x0, x1, y0, y1 = box
+    width = max(x1 - x0, 1e-9)
+    height = max(y1 - y0, 1e-9)
+    if width / height > aspect:
+        needed = width / aspect
+        center = (y0 + y1) / 2.0
+        y0, y1 = center - needed / 2.0, center + needed / 2.0
+    else:
+        needed = height * aspect
+        center = (x0 + x1) / 2.0
+        x0, x1 = center - needed / 2.0, center + needed / 2.0
+    return x0, x1, y0, y1
+
+
+def geo_payload(
+    sample: Any,
+    layout: GeoLayout,
+    max_street_edges: int = MAX_STREET_EDGES,
+) -> Optional[Dict[str, Any]]:
+    """真实经纬度底图 + corridor 的归一化坐标。
+
+    返回 ``None`` 表示这个样本用不了地理模式（坐标查不到），调用方退回弹簧布局。
+
+    做法和 ``tools/visualize_didi_paths.py`` 一致：整城路网当浅灰底图，corridor 叠在
+    上面；裁剪到 corridor 外扩 ``CROP_MARGIN``，再 letterbox 到面板长宽比。街道只回传
+    **已经算好的两端坐标**（不传 id）—— 底图是纯装饰层，混进两套编号空间只会出错。
+    """
+    positions = _local_to_global_positions(sample, layout)
+    if not positions:
+        return None
+    corridor_points = list(positions.values())
+    x0 = min(p[0] for p in corridor_points)
+    x1 = max(p[0] for p in corridor_points)
+    y0 = min(p[1] for p in corridor_points)
+    y1 = max(p[1] for p in corridor_points)
+    # 1) 先按面板长宽比补成同比例（形状不变，只是把短边撑开）
+    bx0, bx1, by0, by1 = _letterbox((x0, x1, y0, y1), PANEL_ASPECT)
+    # 2) 再绕中心整体放大，四周留出街道背景。缩放不改形状，所以第 1 步的结论仍然成立。
+    grow = 1.0 + 2.0 * CROP_MARGIN
+    cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+    bx0, bx1 = cx - (cx - bx0) * grow, cx + (bx1 - cx) * grow
+    by0, by1 = cy - (cy - by0) * grow, cy + (by1 - cy) * grow
+    span_x = bx1 - bx0
+    span_y = by1 - by0
+
+    def normalize(point: Tuple[float, float]) -> Tuple[float, float]:
+        return ((point[0] - bx0) / span_x, (point[1] - by0) / span_y)
+
+    # 街道：只保留两端都落在裁剪框里的边，并给一点容差，免得边界上出现断头路
+    tol_x = span_x * 0.05
+    tol_y = span_y * 0.05
+    street: List[List[float]] = []
+    truncated = False
+    for source, target in layout.street_edges:
+        a = layout.positions.get(source)
+        b = layout.positions.get(target)
+        if a is None or b is None:
+            continue
+        if not (
+            bx0 - tol_x <= a[0] <= bx1 + tol_x
+            and by0 - tol_y <= a[1] <= by1 + tol_y
+            and bx0 - tol_x <= b[0] <= bx1 + tol_x
+            and by0 - tol_y <= b[1] <= by1 + tol_y
+        ):
+            continue
+        if len(street) >= max_street_edges:
+            truncated = True
+            break
+        na, nb = normalize(a), normalize(b)
+        street.append([na[0], na[1], nb[0], nb[1]])
+
+    normalized = {int(node): normalize(point) for node, point in positions.items()}
+    return {
+        "geo": True,
+        "node_positions": normalized,
+        "street_edges": street,
+        "street_truncated": truncated,
+        "source": layout.source,
+        "lat0": layout.lat0,
+        "coverage": layout.coverage,
+        # 前端据此画比例尺：归一化 x 方向的整幅宽度相当于多少 km
+        "km_per_x_unit": span_x * KM_PER_DEGREE,
+        "crop_km": [span_x * KM_PER_DEGREE, span_y * KM_PER_DEGREE],
+    }
+
+
+def _graph_payload(
+    sample: Any, geo: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     import networkx as nx
 
     graph = sample.graph
-    if graph.number_of_nodes() == 1:
-        positions = {next(iter(graph.nodes)): (0.5, 0.5)}
+    geo_meta: Dict[str, Any] = {"geo": False}
+    if geo is not None:
+        positions = geo["node_positions"]
+        geo_meta = {key: value for key, value in geo.items() if key != "node_positions"}
     else:
-        raw = nx.spring_layout(graph, seed=17, iterations=120)
-        xs = [float(point[0]) for point in raw.values()]
-        ys = [float(point[1]) for point in raw.values()]
-        x0, x1 = min(xs), max(xs)
-        y0, y1 = min(ys), max(ys)
-        dx, dy = max(x1 - x0, 1e-9), max(y1 - y0, 1e-9)
-        positions = {
-            node: ((float(point[0]) - x0) / dx, (float(point[1]) - y0) / dy)
-            for node, point in raw.items()
-        }
+        if graph.number_of_nodes() == 1:
+            positions = {next(iter(graph.nodes)): (0.5, 0.5)}
+        else:
+            raw = nx.spring_layout(graph, seed=17, iterations=120)
+            xs = [float(point[0]) for point in raw.values()]
+            ys = [float(point[1]) for point in raw.values()]
+            x0, x1 = min(xs), max(xs)
+            y0, y1 = min(ys), max(ys)
+            dx, dy = max(x1 - x0, 1e-9), max(y1 - y0, 1e-9)
+            positions = {
+                node: ((float(point[0]) - x0) / dx, (float(point[1]) - y0) / dy)
+                for node, point in raw.items()
+            }
     decisions = {int(node) for node in sample.segments.decision_nodes}
     nodes = []
     for node in sorted(graph.nodes):
@@ -414,7 +587,7 @@ def _graph_payload(sample: Any) -> Dict[str, Any]:
         x, y = positions[node]
         nodes.append({"id": int(node), "x": x, "y": y, "kind": kind})
     edges = [{"source": int(u), "target": int(v)} for u, v in graph.edges]
-    return {"nodes": nodes, "edges": edges}
+    return {"nodes": nodes, "edges": edges, **geo_meta}
 
 
 def _has_edge_weights(graph: Any) -> bool:
@@ -639,6 +812,8 @@ class DashboardService:
         self._dataset_cache: Dict[str, Any] = {}
         self._model_key: Optional[str] = None
         self._model_bundle: Optional[Tuple[Any, Any, Any, Any]] = None
+        #: run -> GeoLayout（None 表示这个 run 用不了地理底图，结论也缓存）
+        self._geo_cache: Dict[str, Optional[GeoLayout]] = {}
         self._lock = threading.RLock()
 
     def catalog(self) -> Dict[str, Any]:
@@ -653,6 +828,12 @@ class DashboardService:
                     "use_edge_cost": item.use_edge_cost,
                     "flow_steps": item.flow_steps,
                     "data_dir": item.data_dir,
+                    # source / 地理底图：面板据此显示"滴滴"徽章、开街道图、并把数据集
+                    # 下拉自动切到这个模型真正训过的那一份
+                    "source": item.source,
+                    "geo": item.is_geo,
+                    "coords_file": item.coords_file,
+                    "live_config": item.live_config,
                 }
                 for item in self.runs.values()
             ],
@@ -666,7 +847,6 @@ class DashboardService:
                 }
                 for item in self.datasets.values()
             ],
-            "metrics": discover_metrics(self.runs, self.root),
             "reports": self.reports,
         }
 
@@ -685,6 +865,14 @@ class DashboardService:
         else:
             payload["markdown"] = text
         return payload
+
+    def geo_layout(self, run_id: str) -> Optional[GeoLayout]:
+        """该 run 的真实地理底图；合成模型返回 ``None``。"""
+        run = self.runs.get(run_id)
+        if run is None:
+            return None
+        with self._lock:
+            return load_geo_layout(self.root, run, self._geo_cache)
 
     def _dataset(self, dataset_id: str) -> Any:
         info = self.datasets.get(dataset_id)
@@ -828,8 +1016,26 @@ class DashboardService:
                         "difficulty": sample.meta.get("difficulty", "n/a"),
                         "mode": sample.meta.get("mode", "n/a"),
                         "gt_path": [int(node) for node in sample.gt_path],
+                        # 真实数据（滴滴）没有 difficulty / mode —— 那是合成图生成器
+                        # 的标签。带上真实语义的字段，否则面板左侧只能显示
+                        # "n/a / n/a"，看不出这条样本到底是什么。
+                        "source": str(sample.meta.get("source", "") or ""),
+                        "date": sample.meta.get("date"),
+                        "order_id": sample.meta.get("order_id"),
+                        "gt_cost": sample.meta.get("gt_cost"),
+                        "dijkstra_cost": sample.meta.get("dijkstra_cost"),
+                        # GT 不是最短路：这个比值就是"司机绕了多远"（实测中位 1.12）
+                        "gt_cost_ratio": sample.meta.get("gt_cost_ratio"),
+                        "rho": sample.meta.get("rho"),
+                        "u_turns": sample.meta.get("u_turns"),
+                        "split": sample.meta.get("split"),
                     },
-                    "graph": _graph_payload(sample),
+                    "graph": _graph_payload(
+                        sample,
+                        geo_payload(sample, layout)
+                        if (layout := self.geo_layout(run_id)) is not None
+                        else None,
+                    ),
                     "routes": routes,
                     "summary": summary,
                 }

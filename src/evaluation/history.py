@@ -74,6 +74,8 @@ CURVE_KEYS = (
     "train_traj_raw_loop",
     "train_traj_raw_dead_end",
     "train_traj_raw_broken",
+    # 被剔除的空 trace 数（模型零 decision）：见 trainer.TRAJECTORY_METRICS
+    "train_traj_raw_no_decision",
 )
 
 

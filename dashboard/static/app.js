@@ -4,22 +4,7 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const NS = "http://www.w3.org/2000/svg";
 const ROUTE_COLORS = ["#b7ff4a", "#73d7ff", "#ff8c68", "#c59cff", "#ffd166", "#5ee6b8", "#ff6b9a", "#a6b4ff"];
-const METRICS = {
-  goal_hit_rate: "Goal hit rate",
-  optimal_path_rate: "Optimal path rate",
-  success_cost_ratio: "Success cost ratio",
-  loop_rate: "Loop rate",
-  broken_rate: "Broken rate",
-  coverage_rate: "Coverage rate",
-  optimal_coverage_rate: "Optimal coverage",
-  // Weighted 扩展 / 多分支增强新增的口径
-  weighted_optimal_coverage_rate: "加权最优覆盖率（表里至少一条最小 cost 路）",
-  mean_goal_paths: "平均 Goal 路径数",
-  mean_finished_paths: "平均终止路径数",
-  mean_filtered_dead_branches: "平均被预筛选的必死 branch"
-};
-
-const KIND_LABEL = { weighted: "带权", ablated: "带权·无cost", unweighted: "无权" };
+const KIND_LABEL = { didi: "滴滴·带权", weighted: "带权", ablated: "带权·无cost", unweighted: "无权" };
 
 const state = {
   catalog: null,
@@ -50,12 +35,22 @@ function svgEl(name, attrs = {}) {
   return el;
 }
 
+function toast(message, kind) {
+  const box = $("#toast");
+  box.textContent = message;
+  box.classList.toggle("notice", kind === "notice");
+  box.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { box.hidden = true; }, 7000);
+}
+
 function showError(message) {
-  const toast = $("#toast");
-  toast.textContent = message;
-  toast.hidden = false;
-  clearTimeout(showError.timer);
-  showError.timer = setTimeout(() => { toast.hidden = true; }, 7000);
+  toast(message, "error");
+}
+
+/** 中性提示（例如"已把数据集切到这个模型训练用的那一份"），不该长得像报错。 */
+function showNotice(message) {
+  toast(message, "notice");
 }
 
 async function api(url, options) {
@@ -77,8 +72,36 @@ function fillSelect(select, items, valueKey = "id", labelKey = "label") {
 }
 
 /**
- * 数据集下拉：按 `data/` 下的来源子目录分组（controlled / long / oldv1 / mixed /
- * smoke），每项的 title 给出仓库内的相对路径，选中后一眼知道文件在哪。
+ * 模型下拉：标签里直接写清类别（无权 / 带权 / 滴滴·带权 / 带权·无cost）与数据目录。
+ *
+ * 三个 run 的网络结构完全一样，只有 ``data.weighted`` / ``use_edge_cost`` / 数据来源
+ * 不同 —— 光看 run 名字根本分不出把哪个 checkpoint 加载进来了，选错模型会得到一份
+ * "看起来正常但口径不对"的路径。
+ */
+function fillModelSelect(select, models) {
+  select.innerHTML = "";
+  models.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model.id;
+    const kind = KIND_LABEL[model.kind] || model.kind;
+    option.textContent = `${model.id} · ${kind}`;
+    const bits = [kind];
+    if (model.data_dir) bits.push(`data_dir=${model.data_dir}`);
+    if (model.flow_steps) bits.push(`flow_steps=${model.flow_steps}`);
+    if (model.live_config) bits.push(model.live_config);
+    if (model.source) bits.push(`source=${model.source}`);
+    option.title = bits.join(" · ");
+    select.append(option);
+  });
+}
+
+/**
+ * 数据集下拉：按 `data/` 下的来源子目录分组（``unweighted`` / ``weighted`` /
+ * ``didi/graph/chengdu``），每项的 title 给出仓库内相对路径与体积。
+ *
+ * 分组标签必须写相对路径而不是"直接父目录名"：滴滴的 split 落在
+ * ``data/didi/graph/chengdu/``，只显示 ``chengdu`` 看不出它和合成图有什么本质区别，
+ * 而这两类数据的 GT 语义完全不同（真实车辆历史路径 vs 最短路径）。
  */
 function fillDatasetSelect(select, items) {
   select.innerHTML = "";
@@ -92,7 +115,10 @@ function fillDatasetSelect(select, items) {
     const option = document.createElement("option");
     option.value = item.id;
     option.textContent = item.label;
-    if (item.relative) option.title = item.relative;
+    const bits = [];
+    if (item.relative) bits.push(item.relative);
+    if (item.size_mb != null) bits.push(`${item.size_mb} MB`);
+    if (bits.length) option.title = bits.join("  ·  ");
     return option;
   };
   groups.forEach((entries, group) => {
@@ -111,38 +137,62 @@ function preferred(items, needle) {
   return items.find((item) => item.id.includes(needle))?.id || items[0]?.id || "";
 }
 
+function modelById(id) {
+  return state.catalog.models.find((model) => model.id === id) || null;
+}
+
+/**
+ * 该模型**真正训过**的那份数据里最合适的 split。
+ *
+ * 匹配靠 ``data_dir``（来自**当前** configs/<run>.yaml，不是训练时的快照 —— 见
+ * dashboard/server.py 的 ``_live_run_settings``）：先看 ``test_1000``（GDP 风格固定
+ * 子集，取一条样本就能和主表对上），再退 ``test``。
+ *
+ * 为什么需要它：模型下拉和数据集下拉是独立的，选 ``didi_chengdu`` 却留着
+ * ``unweighted_test.pkl`` 会拿一份合成图去喂真实路网模型 —— 图和特征维度都对不上，
+ * 只会得到一句"推理未完成"。
+ */
+function datasetForModel(model) {
+  if (!model || !model.data_dir) return "";
+  const dir = model.data_dir.replaceAll("\\", "/").replace(/\/+$/, "");
+  const inDir = state.catalog.datasets.filter((item) =>
+    (item.relative || "").replaceAll("\\", "/").startsWith(dir + "/"));
+  if (!inDir.length) return "";
+  const byPreference = (needle) => inDir.find((item) => item.id.includes(needle))?.id || "";
+  return byPreference("test_1000") || byPreference("_test.pkl") || byPreference("test") || inDir[0].id;
+}
+
+/** 切换模型时把数据集跟过去（只在明显不匹配时动手，并且让用户看得见）。 */
+function syncDatasetToModel(announce = true) {
+  const model = modelById($("#path-model").value);
+  const wanted = datasetForModel(model);
+  if (!wanted || wanted === $("#path-dataset").value) return;
+  const current = state.catalog.datasets.find((item) => item.id === $("#path-dataset").value);
+  const dir = (model?.data_dir || "").replaceAll("\\", "/");
+  if (dir && (current?.relative || "").replaceAll("\\", "/").startsWith(dir + "/")) return;
+  $("#path-dataset").value = wanted;
+  if (announce) showNotice(`已把数据集切到 ${wanted}（${model.id} 训练用的就是这一份）`);
+  updateDatasetInfo();
+}
+
 async function initialize() {
   try {
     state.catalog = await api("/api/catalog");
     $("#connection").classList.add("online");
     $("#connection span").textContent = `${state.catalog.models.length} 个模型 · ${state.catalog.datasets.length} 个数据集`;
-    fillSelect($("#path-model"), state.catalog.models);
+    fillModelSelect($("#path-model"), state.catalog.models);
     fillDatasetSelect($("#path-dataset"), state.catalog.datasets);
-    $("#path-model").value = preferred(state.catalog.models, "v2_rev2_mixed");
-    $("#path-dataset").value = preferred(state.catalog.datasets, "controlled_test.pkl");
-
-    const metricDatasets = [...new Set(state.catalog.metrics.map((row) => row.dataset))];
-    metricDatasets.forEach((id) => $("#metric-dataset").append(new Option(id.replace(".pkl", "").replaceAll("_", " "), id)));
-    Object.entries(METRICS).forEach(([id, label]) => $("#metric-name").append(new Option(label, id)));
-    renderModelFilters();
+    // 默认落在无权合成模型上：它最小、CPU 上也能秒出，先让人看到面板是活的。
+    // 想看滴滴就切到 didi_chengdu，数据集会自动跟过去。
+    $("#path-model").value = preferred(state.catalog.models, "controlled_unweighted");
+    $("#path-dataset").value =
+      datasetForModel(modelById($("#path-model").value)) ||
+      preferred(state.catalog.datasets, "unweighted_test.pkl");
     await updateDatasetInfo();
-    renderMetrics();
   } catch (error) {
     $("#connection span").textContent = "连接失败";
     showError(error.message);
   }
-}
-
-function renderModelFilters() {
-  const root = $("#model-filters");
-  root.innerHTML = "";
-  state.catalog.models.forEach((model, index) => {
-    const label = document.createElement("label");
-    label.className = "model-filter";
-    const kind = model.kind || "unweighted";
-    label.innerHTML = `<input type="checkbox" value="${escapeHtml(model.id)}" ${index < 6 ? "checked" : ""}><span>${escapeHtml(model.label)}</span><em class="kind-badge ${kind}">${KIND_LABEL[kind] || kind}</em>`;
-    root.append(label);
-  });
 }
 
 function escapeHtml(value) {
@@ -266,11 +316,21 @@ function renderDecodeContrast(data) {
 function renderPathInfo() {
   const data = state.pathData;
   const sample = data.sample;
-  $("#sample-title").textContent = `#${data.index} · ${sample.start} → ${sample.goal}`;
+  const isReal = sample.source === "didi_chengdu";
+  $("#sample-title").textContent = isReal
+    ? `#${data.index} · 滴滴 ${sample.date || ""}`
+    : `#${data.index} · ${sample.start} → ${sample.goal}`;
+  // 真实数据没有 difficulty / mode（那是合成图生成器的标签），换成司机绕行比 ——
+  // "这条 GT 比最短路多走了多少"，它才是真实数据里真正影响难度的量。
+  const detour = sample.gt_cost_ratio;
   const values = [
-    `${sample.difficulty} / ${sample.mode}`,
+    isReal
+      ? `真实车辆路径${detour ? ` · 绕行 ×${Number(detour).toFixed(2)}` : ""}`
+      : `${sample.difficulty} / ${sample.mode}`,
     `${sample.num_nodes} / ${sample.num_decisions}`,
-    `${sample.gt_length} 跳`,
+    isReal && sample.gt_cost != null
+      ? `${sample.gt_length} 跳 / ${(Number(sample.gt_cost) / 1000).toFixed(2)} km`
+      : `${sample.gt_length} 跳`,
     data.summary.coverage ? "至少一条到达" : "未到达"
   ];
   $$("#sample-stats dd").forEach((dd, i) => { dd.textContent = values[i]; });
@@ -289,18 +349,126 @@ function renderPathInfo() {
     legend.append(item);
   });
   const reached = data.routes.filter((route) => route.status === "goal").length;
-  $("#path-status").textContent = `${data.routes.length} 条可视路线 · ${reached} 条到达终点 · checkpoint epoch ${data.checkpoint_epoch ?? "—"}`;
+  const bits = [
+    `${data.routes.length} 条可视路线`,
+    `${reached} 条到达终点`,
+    `checkpoint epoch ${data.checkpoint_epoch ?? "—"}`
+  ];
+  if (isReal) bits.push(`corridor rho=${sample.rho ?? "—"}`);
+  if (sample.order_id) bits.push(`order ${String(sample.order_id).slice(0, 8)}`);
+  $("#path-status").textContent = bits.join(" · ");
 }
 
+/**
+ * 画布几何。**必须和后端 dashboard/server.py 的 PANEL_WIDTH / PANEL_HEIGHT /
+ * PANEL_MARGIN 完全一致**：地理模式下后端就是按这个长宽比做 letterbox 的，两边一旦
+ * 漂移，真实路网就会被拉伸（成都经度方向已经被 cos(30.7°) 缩短了 19%，再拉一次就
+ * 完全不像地图了）。
+ */
+const GRAPH_MARGIN = 55;
+const GRAPH_WIDTH = 1000;
+const GRAPH_HEIGHT = 620;
+const INNER_WIDTH = GRAPH_WIDTH - GRAPH_MARGIN * 2;
+const INNER_HEIGHT = GRAPH_HEIGHT - GRAPH_MARGIN * 2;
+
+function panelX(x) { return GRAPH_MARGIN + x * INNER_WIDTH; }
+function panelY(y) { return GRAPH_MARGIN + (1 - y) * INNER_HEIGHT; }
+
 function graphCoordinates(data) {
-  const margin = 55;
-  const width = 1000 - margin * 2;
-  const height = 620 - margin * 2;
   return new Map(data.graph.nodes.map((node) => [node.id, {
-    x: margin + node.x * width,
-    y: margin + (1 - node.y) * height,
+    x: panelX(node.x),
+    y: panelY(node.y),
     kind: node.kind
   }]));
+}
+
+function graphIsGeo() {
+  return state.pathData?.graph?.geo === true;
+}
+
+/**
+ * 节点半径。地理模式下 corridor 有 100~350 个节点、其中绝大多数是 decision：
+ * 把每个都画成 r=8 的圆会直接糊成一团，底下的真实路网反而看不见了。所以普通节点
+ * 不画、decision 画小圈，只有 S/G 保持醒目。合成图维持原来的 5 / 8。
+ */
+function nodeRadius(kind, active = false) {
+  if (!graphIsGeo()) return kind === "ordinary" ? 5 : 8;
+  if (kind === "start" || kind === "goal") return 6;
+  if (kind === "decision") return active ? 3.2 : 2.4;
+  return active ? 2.4 : 0;
+}
+
+/** 地理模式下 200 个 decision 标签会盖满整张图；只留 S/G。 */
+function shouldLabelNode(kind) {
+  if (graphIsGeo()) return kind === "start" || kind === "goal";
+  return kind !== "ordinary";
+}
+
+function nodeLabelText(kind, id) {
+  return kind === "start" ? `S · ${id}` : kind === "goal" ? `G · ${id}` : String(id);
+}
+
+/** 真实路网底图：不走 graphCoordinates —— 街道两端坐标由后端算好，不带节点 id。 */
+function renderStreetBasemap(layer, graph) {
+  (graph.street_edges || []).forEach((edge) => {
+    layer.append(svgEl("line", {
+      x1: panelX(edge[0]).toFixed(2), y1: panelY(edge[1]).toFixed(2),
+      x2: panelX(edge[2]).toFixed(2), y2: panelY(edge[3]).toFixed(2),
+      class: "street-edge"
+    }));
+  });
+}
+
+/**
+ * 比例尺。后端给的是"归一化 x 方向的整幅宽度 = 多少 km"（等距圆柱投影，已经按
+ * cos(lat0) 校正，x/y 同尺度），换算成用户单位后挑一个好读的整数距离。
+ *
+ * 没有它的话，"真实经纬度底图"就只是一堆灰线 —— 看不出这段路是 300 米还是 3 公里。
+ */
+function renderScaleBar(svg, geo) {
+  const kmPerUnit = geo.km_per_x_unit / INNER_WIDTH;
+  if (!(kmPerUnit > 0)) return;
+  const NICE_KM = [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100];
+  const target = 150;                       // 想要的比例尺长度（用户单位）
+  let km = NICE_KM[NICE_KM.length - 1];
+  for (const candidate of NICE_KM) {
+    if (candidate / kmPerUnit <= target * 1.35) { km = candidate; break; }
+  }
+  const length = km / kmPerUnit;
+  if (!(length > 8 && length < INNER_WIDTH)) return;
+  const x = GRAPH_MARGIN + 8;
+  const y = GRAPH_HEIGHT - GRAPH_MARGIN + 18;
+  const group = svgEl("g", {class: "scale-bar", "aria-hidden": "true"});
+  group.append(svgEl("line", {x1: x, y1: y, x2: x + length, y2: y}));
+  group.append(svgEl("line", {x1: x, y1: y - 5, x2: x, y2: y + 5}));
+  group.append(svgEl("line", {x1: x + length, y1: y - 5, x2: x + length, y2: y + 5}));
+  const label = svgEl("text", {x: x + length / 2, y: y - 9, "text-anchor": "middle"});
+  label.textContent = km >= 1 ? `${km} km` : `${Math.round(km * 1000)} m`;
+  group.append(label);
+  svg.append(group);
+}
+
+/** 图下方的底图来源说明（哪份 OSMnx 文件、覆盖率、画面多少公里）。 */
+function renderGraphCaption(data) {
+  const caption = $("#graph-caption");
+  const graph = data.graph;
+  const geoHint = $("#geo-hint");
+  if (!graph.geo) {
+    caption.hidden = true;
+    if (geoHint) geoHint.hidden = true;
+    return;
+  }
+  const crop = graph.crop_km || [];
+  const bits = [
+    "真实经纬度底图（OSMnx）",
+    escapeHtml(graph.source || ""),
+    `覆盖 ${(100 * (graph.coverage || 0)).toFixed(1)}%`,
+    crop.length === 2 ? `画面 ${crop[0].toFixed(1)} × ${crop[1].toFixed(1)} km` : "",
+    `${(graph.street_edges || []).length} 条街道${graph.street_truncated ? "（已截断）" : ""}`
+  ].filter(Boolean);
+  caption.innerHTML = bits.join("  ·  ");
+  caption.hidden = false;
+  if (geoHint) geoHint.hidden = false;
 }
 
 function edgeKey(source, target) {
@@ -471,12 +639,17 @@ function renderGraph() {
   const data = state.pathData;
   const svg = $("#graph");
   svg.innerHTML = "";
+  const geo = data.graph.geo === true;
   const coordinates = graphCoordinates(data);
 
   const base = svgEl("g", {"aria-hidden": "true"});
+  if (geo) renderStreetBasemap(base, data.graph);
   data.graph.edges.forEach((edge) => {
     const a = coordinates.get(edge.source), b = coordinates.get(edge.target);
-    base.append(svgEl("line", {x1: a.x, y1: a.y, x2: b.x, y2: b.y, class: "base-edge"}));
+    base.append(svgEl("line", {
+      x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+      class: geo ? "base-edge corridor" : "base-edge"
+    }));
   });
   svg.append(base);
 
@@ -485,21 +658,22 @@ function renderGraph() {
   gt.hidden = !$("#show-gt").checked;
   svg.append(gt);
 
-  const nodeCircle = (node) => {
+  const nodeCircle = (node, active = false) => {
     const point = coordinates.get(node.id);
-    const radius = node.kind === "ordinary" ? 5 : 8;
-    return svgEl("circle", {cx: point.x, cy: point.y, r: radius, class: `node ${node.kind}`});
+    return svgEl("circle", {
+      cx: point.x, cy: point.y, r: nodeRadius(node.kind, active), class: `node ${node.kind}`
+    });
   };
   const nodeLabel = (node) => {
     const point = coordinates.get(node.id);
     const label = svgEl("text", {x: point.x, y: point.y - 13, class: "node-label"});
-    label.textContent = node.kind === "start" ? `S · ${node.id}` : node.kind === "goal" ? `G · ${node.id}` : node.id;
+    label.textContent = nodeLabelText(node.kind, node.id);
     return label;
   };
   const backgroundNodes = svgEl("g", {"aria-hidden": "true"});
   data.graph.nodes.forEach((node) => {
-    backgroundNodes.append(nodeCircle(node));
-    if (node.kind !== "ordinary") backgroundNodes.append(nodeLabel(node));
+    if (nodeRadius(node.kind) > 0) backgroundNodes.append(nodeCircle(node));
+    if (shouldLabelNode(node.kind)) backgroundNodes.append(nodeLabel(node));
   });
   svg.append(backgroundNodes);
 
@@ -564,13 +738,14 @@ function renderGraph() {
 
   data.graph.nodes.forEach((node) => {
     if (activeNodeIds.has(node.id)) {
-      activeNodeLayer.append(nodeCircle(node));
-      if (node.kind !== "ordinary") labelLayer.append(nodeLabel(node));
+      activeNodeLayer.append(nodeCircle(node, true));
+      if (shouldLabelNode(node.kind)) labelLayer.append(nodeLabel(node));
     }
   });
   svg.append(activeNodeLayer);
   svg.append(labelLayer);
   svg.append(headLayer);
+  if (geo) renderScaleBar(svg, data.graph);
 
   state.routeGraphics.forEach((graphic) => {
     const first = graphic.segments[0];
@@ -578,6 +753,7 @@ function renderGraph() {
     graphic.head.setAttribute("cx", point.x);
     graphic.head.setAttribute("cy", point.y);
   });
+  renderGraphCaption(data);
   $("#replay").disabled = false;
   $("#play-pause").disabled = false;
 }
@@ -631,9 +807,13 @@ function renderDiffusionGraph() {
   svg._diffusionCoordinates = coordinates;
 
   const base = svgEl("g", {"aria-hidden": "true"});
+  if (graphIsGeo()) renderStreetBasemap(base, data.graph);
   data.graph.edges.forEach((edge) => {
     const a = coordinates.get(edge.source), b = coordinates.get(edge.target);
-    base.append(svgEl("line", {x1: a.x, y1: a.y, x2: b.x, y2: b.y, class: "base-edge"}));
+    base.append(svgEl("line", {
+      x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+      class: graphIsGeo() ? "base-edge corridor" : "base-edge"
+    }));
   });
   svg.append(base);
 
@@ -651,13 +831,15 @@ function renderDiffusionGraph() {
   const decisionShapes = new Map();
   data.graph.nodes.forEach((node) => {
     const point = coordinates.get(node.id);
-    const radius = node.kind === "ordinary" ? 5 : 8;
+    const radius = nodeRadius(node.kind);
+    // 地理模式下普通节点的半径是 0：它们只是 corridor 的中间点，画出来只会挡住路网
+    if (radius <= 0) return;
     const circle = svgEl("circle", {cx: point.x, cy: point.y, r: radius, class: `node ${node.kind}`});
     nodes.append(circle);
     if (node.kind === "decision") decisionShapes.set(node.id, circle);
-    if (node.kind !== "ordinary") {
+    if (shouldLabelNode(node.kind)) {
       const label = svgEl("text", {x: point.x, y: point.y - 13, class: "node-label"});
-      label.textContent = node.kind === "start" ? `S · ${node.id}` : node.kind === "goal" ? `G · ${node.id}` : node.id;
+      label.textContent = nodeLabelText(node.kind, node.id);
       nodes.append(label);
     }
   });
@@ -665,6 +847,7 @@ function renderDiffusionGraph() {
   // The per-frame decision state (lit / dimmed) is painted onto these circles.
   state.diffusionNodeShapes = decisionShapes;
 
+  renderGraphCaption(data);
   const frames = data.diffusion.frames;
   $("#diffusion-step").max = Math.max(0, frames.length - 1);
   $("#diffusion-replay").disabled = !frames.length;
@@ -888,117 +1071,6 @@ function toggleAnimation() {
   $("#play-pause").textContent = "继续";
 }
 
-function selectedModels() {
-  return new Set($$("#model-filters input:checked").map((input) => input.value));
-}
-
-function visibleMetrics() {
-  const models = selectedModels();
-  const dataset = $("#metric-dataset").value;
-  const decode = $("#metric-decode").value;
-  return state.catalog.metrics.filter((row) =>
-    models.has(row.model) &&
-    (dataset === "all" || row.dataset === dataset) &&
-    (decode === "all" || (decode === "single" ? row.decoding === "single" : row.decoding.startsWith("multi")))
-  );
-}
-
-function fmt(value, digits = 3) {
-  return value == null ? "—" : Number(value).toFixed(digits);
-}
-
-function renderMetrics() {
-  if (!state.catalog) return;
-  const rows = visibleMetrics();
-  $("#metric-combinations").textContent = rows.length;
-  $("#metric-model-count").textContent = new Set(rows.map((row) => row.model)).size;
-  $("#metric-dataset-count").textContent = new Set(rows.map((row) => row.dataset)).size;
-  const metric = $("#metric-name").value || "goal_hit_rate";
-  $("#chart-title").textContent = METRICS[metric];
-  renderMetricChart(rows, metric);
-  const body = $("#metrics-body");
-  const kindOf = (modelId) => (state.catalog.models.find((m) => m.id === modelId) || {}).kind || "unweighted";
-  body.innerHTML = rows.map((row) => `<tr>
-    <td>${escapeHtml(row.model)}</td>
-    <td><em class="kind-badge ${kindOf(row.model)}">${KIND_LABEL[kindOf(row.model)] || "—"}</em></td>
-    <td>${escapeHtml(row.dataset.replace(".pkl", ""))}</td><td class="muted">${escapeHtml(row.decoding)}</td>
-    <td class="numeric">${fmt(row.goal_hit_rate)}</td><td class="numeric">${fmt(row.optimal_path_rate)}</td>
-    <td class="numeric">${fmt(row.success_cost_ratio)}</td><td class="numeric">${fmt(row.loop_rate)}</td>
-    <td class="numeric">${fmt(row.broken_rate)}</td><td class="numeric">${fmt(row.coverage_rate)}</td>
-    <td class="numeric">${fmt(row.weighted_optimal_coverage_rate)}</td>
-    <td class="numeric">${row.mean_goal_paths == null ? "—" : Number(row.mean_goal_paths).toFixed(2)}</td>
-  </tr>`).join("") || `<tr><td colspan="12" class="muted">当前筛选条件没有已有评测结果</td></tr>`;
-}
-
-function modelColor(model) {
-  const models = state.catalog.models.map((item) => item.id);
-  return ROUTE_COLORS[Math.max(0, models.indexOf(model)) % ROUTE_COLORS.length];
-}
-
-function renderMetricChart(rows, metric) {
-  const root = $("#metric-chart");
-  root.innerHTML = "";
-  const usable = rows.filter((row) => row[metric] != null);
-  if (!usable.length) {
-    root.innerHTML = `<p class="muted">该指标暂无可展示的评测记录。</p>`;
-    return;
-  }
-  const datasets = [...new Set(usable.map((row) => row.dataset))];
-  const width = Math.max(760, root.clientWidth || 1000);
-  const panelHeight = 185;
-  const height = panelHeight * datasets.length + 20;
-  const svg = svgEl("svg", {viewBox: `0 0 ${width} ${height}`, height});
-  const left = 58, right = 20, top = 34, bottom = 48;
-  const isRatio = metric === "success_cost_ratio";
-  const maxValue = isRatio ? Math.max(1.05, ...usable.map((row) => row[metric])) : 1;
-
-  datasets.forEach((dataset, panelIndex) => {
-    const panelRows = usable.filter((row) => row.dataset === dataset);
-    const yBase = panelIndex * panelHeight;
-    const plotTop = yBase + top, plotBottom = yBase + panelHeight - bottom;
-    const plotWidth = width - left - right;
-    [0, .25, .5, .75, 1].forEach((fraction) => {
-      const y = plotBottom - fraction * (plotBottom - plotTop);
-      svg.append(svgEl("line", {x1: left, x2: width - right, y1: y, y2: y, class: "chart-grid"}));
-      const tick = svgEl("text", {x: left - 9, y: y + 4, "text-anchor": "end", class: "chart-axis"});
-      tick.textContent = (fraction * maxValue).toFixed(isRatio ? 2 : 1);
-      svg.append(tick);
-    });
-    const title = svgEl("text", {x: left, y: yBase + 19, class: "chart-label"});
-    title.textContent = dataset.replace(".pkl", "").replaceAll("_", " ");
-    svg.append(title);
-    const gap = 10;
-    const barWidth = Math.max(16, Math.min(58, (plotWidth - gap * (panelRows.length - 1)) / panelRows.length));
-    const groupWidth = panelRows.length * barWidth + (panelRows.length - 1) * gap;
-    const startX = left + Math.max(0, (plotWidth - groupWidth) / 2);
-    panelRows.forEach((row, index) => {
-      const value = row[metric];
-      const h = (value / maxValue) * (plotBottom - plotTop);
-      const x = startX + index * (barWidth + gap);
-      const rect = svgEl("rect", {x, y: plotBottom - h, width: barWidth, height: h, rx: 3, fill: modelColor(row.model), class: "bar"});
-      const tooltip = svgEl("title");
-      tooltip.textContent = `${row.model} · ${row.decoding}\n${METRICS[metric]}: ${fmt(value, 4)}`;
-      rect.append(tooltip);
-      svg.append(rect);
-      const valueLabel = svgEl("text", {x: x + barWidth / 2, y: Math.max(plotTop + 10, plotBottom - h - 7), class: "bar-value"});
-      valueLabel.textContent = fmt(value);
-      svg.append(valueLabel);
-      const label = svgEl("text", {x: x + barWidth / 2, y: plotBottom + 15, class: "chart-axis", "text-anchor": "middle"});
-      const shortName = row.model.split("/").at(-1).replace("v2_", "");
-      label.textContent = shortName.length > 13 ? `${shortName.slice(0, 12)}…` : shortName;
-      svg.append(label);
-      const decodeLabel = svgEl("text", {x: x + barWidth / 2, y: plotBottom + 30, class: "chart-axis", "text-anchor": "middle"});
-      decodeLabel.textContent = row.decoding === "single" ? "单路径" : row.decoding === "multi" ? "多分支" : row.decoding.replace("multi", "").trim();
-      svg.append(decodeLabel);
-    });
-  });
-  root.append(svg);
-}
-
-/* ------------------------------------------------------------------
- * 实验报告面板：读取 /api/reports/<id>，Markdown 用一个小渲染器画出来，
- * JSON 汇总按原样格式化展示（数据本身在 outputs/*.json，面板只做只读呈现）。
- * ------------------------------------------------------------------ */
 function inlineMd(text) {
   return escapeHtml(text)
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
@@ -1090,11 +1162,11 @@ function bindEvents() {
   $$(".tab").forEach((tab) => tab.addEventListener("click", () => {
     $$(".tab").forEach((item) => { item.classList.toggle("active", item === tab); item.setAttribute("aria-selected", item === tab); });
     $$(".tab-panel").forEach((panel) => { panel.hidden = panel.id !== tab.getAttribute("aria-controls"); });
-    if (tab.id === "metrics-tab") requestAnimationFrame(renderMetrics);
     if (tab.id === "reports-tab") requestAnimationFrame(renderReports);
   }));
   $("#decode-mode").addEventListener("change", () => { $("#multi-controls").hidden = $("#decode-mode").value !== "multi"; });
   $("#path-dataset").addEventListener("change", updateDatasetInfo);
+  $("#path-model").addEventListener("change", () => syncDatasetToModel());
   $("#generate").addEventListener("click", generatePath);
   $("#random-sample").addEventListener("click", pickRandomSample);
   $("#replay").addEventListener("click", () => startAnimation(true));
@@ -1112,9 +1184,6 @@ function bindEvents() {
     $("#diffusion-play").textContent = "继续";
     renderDiffusionFrame(Number(event.target.value));
   });
-  ["#metric-dataset", "#metric-name", "#metric-decode"].forEach((selector) => $(selector).addEventListener("change", renderMetrics));
-  $("#model-filters").addEventListener("change", renderMetrics);
-  window.addEventListener("resize", () => { if (!$("#metrics-panel").hidden) renderMetrics(); });
 }
 
 bindEvents();

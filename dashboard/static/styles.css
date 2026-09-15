@@ -59,7 +59,7 @@ select option { color: var(--text); font-size: 13px; letter-spacing: 0; }
 .workspace { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 680px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: rgba(16,19,28,.82); }
 .run-info { padding: 24px 19px; border-right: 1px solid var(--line); }
 .eyebrow { color: var(--accent); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; }
-.run-info h2, .section-heading h2 { margin: 7px 0 22px; font-size: 19px; font-weight: 600; }
+.run-info h2 { margin: 7px 0 22px; font-size: 19px; font-weight: 600; }
 dl { margin: 0; }
 dl div { padding: 12px 0; border-bottom: 1px solid var(--line); }
 dt { color: var(--muted); font-size: 11px; }
@@ -93,6 +93,15 @@ dd { margin: 5px 0 0; font-size: 14px; }
 #graph { width: 100%; height: 100%; min-height: 560px; background-image: radial-gradient(#292f3d 0.75px, transparent .75px); background-size: 17px 17px; }
 .empty-state { fill: var(--muted); font-size: 14px; }
 .base-edge { stroke: #343a49; stroke-width: 1.4; }
+/* 真实路网底图（滴滴）。刻意用非缩放描边：底图是"背景"，面板放大时它应该保持
+   发丝粗细，而不是跟着涨成一片灰。这里没有 stroke-dasharray，所以不会踩到
+   Chromium "dash 按屏幕像素解释"那个坑（见下面 .route 的注释）。 */
+.street-edge { stroke: #2b3140; stroke-width: 0.7; vector-effect: non-scaling-stroke; }
+/* corridor = 模型真正看到的那张子图，比全城路网亮一档但仍然是背景 */
+.base-edge.corridor { stroke: #3d475c; stroke-width: 1.1; vector-effect: non-scaling-stroke; }
+.scale-bar line { stroke: #8d95a8; stroke-width: 1.4; vector-effect: non-scaling-stroke; }
+.scale-bar text { fill: #8d95a8; font-size: 11px; }
+.graph-caption { padding: 7px 16px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); background: var(--panel); }
 .gt-edge { fill: none; stroke: var(--accent-2); stroke-width: 2.5; stroke-dasharray: 7 7; opacity: .8; }
 /* Route strokes live in the same user space as the nodes and the geometry.
    `vector-effect: non-scaling-stroke` is deliberately NOT used here: it makes
@@ -127,35 +136,8 @@ dd { margin: 5px 0 0; font-size: 14px; }
 .timeline div { width: 0; height: 100%; background: var(--accent); }
 .status-line { min-height: 42px; padding: 12px 16px; color: var(--muted); font-size: 12px; border-top: 1px solid var(--line); }
 
-.metrics-controls { grid-template-columns: repeat(3, minmax(180px, 240px)); justify-content: start; }
-.model-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 18px; }
-.model-filter { display: flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); cursor: pointer; }
-.model-filter:has(input:checked) { color: var(--text); border-color: #565e72; background: var(--panel-2); }
-.model-filter input { width: 14px; min-height: auto; accent-color: var(--accent); }
-.metric-summary { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
-.metric-summary div { padding: 17px 20px; display: flex; justify-content: space-between; align-items: baseline; border-right: 1px solid var(--line); }
-.metric-summary div:last-child { border: 0; }
-.metric-summary span { color: var(--muted); font-size: 12px; }
-.metric-summary strong { font-size: 22px; font-weight: 500; }
-.chart-section, .table-section { padding-top: 30px; }
-.section-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
-.section-heading h2 { margin-bottom: 0; }
-.section-heading p { color: var(--muted); font-size: 11px; margin: 0; }
-.metric-chart { min-height: 260px; margin-top: 15px; border-top: 1px solid var(--line); }
-.metric-chart svg { width: 100%; display: block; }
-.chart-grid { stroke: #252a37; stroke-width: 1; }
-.chart-axis { fill: var(--muted); font-size: 11px; }
-.chart-label { fill: var(--text); font-size: 11px; }
-.bar { transition: opacity .15s; }
-.bar:hover { opacity: .72; }
-.bar-value { fill: var(--text); font-size: 10px; text-anchor: middle; }
-.table-wrap { margin-top: 15px; overflow-x: auto; border-top: 1px solid var(--line); }
-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-th { color: var(--muted); font-weight: 500; text-align: left; white-space: nowrap; }
-th, td { padding: 12px 10px; border-bottom: 1px solid var(--line); }
-td.numeric { font-variant-numeric: tabular-nums; }
-tbody tr:hover { background: rgba(255,255,255,.025); }
 .muted { color: var(--muted); }
+.toast.notice { border-color: #2f4a63; background: #16222c; color: #bfe3ff; }
 .toast { position: fixed; right: 22px; bottom: 22px; width: min(420px, calc(100vw - 44px)); padding: 13px 15px; border: 1px solid #693642; border-radius: 10px; background: #26161c; color: #ffc1ca; box-shadow: 0 16px 48px rgba(0,0,0,.45); font-size: 13px; z-index: 5; }
 
 @media (max-width: 900px) {
@@ -169,20 +151,14 @@ tbody tr:hover { background: rgba(255,255,255,.025); }
 }
 @media (max-width: 560px) {
   .connection span { display: none; }
-  .control-bar, .metrics-controls { grid-template-columns: 1fr; }
-  .metric-summary { grid-template-columns: 1fr; }
-  .metric-summary div { border-right: 0; border-bottom: 1px solid var(--line); }
-  .graph-toolbar, .section-heading { align-items: flex-start; flex-direction: column; }
+  .control-bar { grid-template-columns: 1fr; }
+  .graph-toolbar { align-items: flex-start; flex-direction: column; }
   .diffusion-toolbar { align-items: stretch; flex-direction: column; }
   .diffusion-scrubber { min-width: 0; grid-template-columns: 36px 58px minmax(100px, 1fr) 72px; }
   #graph { min-height: 400px; }
 }
 
 /* ---- Weighted 扩展 / 多分支解码：类别徽章 + 报告面板 ---- */
-.kind-badge { display: inline-block; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line); font-size: 11px; font-style: normal; color: var(--muted); white-space: nowrap; }
-.kind-badge.weighted { color: #0d1206; background: var(--accent); border-color: transparent; font-weight: 600; }
-.kind-badge.ablated { color: #1b1206; background: #ffd166; border-color: transparent; font-weight: 600; }
-.kind-badge.unweighted { color: var(--muted); }
 
 .reports-layout { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 22px; align-items: start; }
 .report-list h2 { margin: 6px 0 4px; font-size: 17px; }

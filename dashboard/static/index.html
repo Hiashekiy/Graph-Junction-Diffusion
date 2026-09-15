@@ -11,7 +11,7 @@
     <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
     <div>
       <h1>Graph Junction <em>Lab</em></h1>
-      <p>模型路径推演与实验指标工作台</p>
+      <p>模型路径推演工作台 · 合成图 + 滴滴成都真实路网</p>
     </div>
     <div class="connection" id="connection"><i></i><span>正在连接本地服务</span></div>
   </header>
@@ -19,7 +19,6 @@
   <main>
     <nav class="tabs" aria-label="面板标签页" role="tablist">
       <button class="tab active" id="path-tab" role="tab" aria-selected="true" aria-controls="path-panel">路径可视化</button>
-      <button class="tab" id="metrics-tab" role="tab" aria-selected="false" aria-controls="metrics-panel">测试指标可视化</button>
       <button class="tab" id="reports-tab" role="tab" aria-selected="false" aria-controls="reports-panel">实验报告</button>
     </nav>
 
@@ -65,6 +64,7 @@
           <p class="contrast" id="decoder-contrast" hidden></p>
           <div class="legend" id="path-legend"></div>
           <p class="hint" id="view-hint">所有路线共用的前缀合并成一条灰色主干（那里还没有分叉）；分叉后各路线用独立颜色，合流处保持紧凑的多色总线。</p>
+          <p class="hint" id="geo-hint" hidden>真实经纬度底图：浅灰细线是整张成都路网（OSMnx），画面按真实距离等比缩放、已按 cos(纬度) 校正，不会被拉伸。数据集下拉里的 <code>didi/graph/chengdu</code> 分组才是真实路网数据。</p>
         </aside>
 
         <div class="graph-shell">
@@ -96,39 +96,10 @@
             <text x="500" y="310" text-anchor="middle" class="empty-state">选择模型和数据集后生成路径</text>
           </svg>
           <div class="timeline"><div id="timeline-progress"></div></div>
+          <div id="graph-caption" class="graph-caption" hidden></div>
           <div id="path-status" class="status-line" aria-live="polite">尚未运行推理</div>
         </div>
       </div>
-    </section>
-
-    <section id="metrics-panel" class="tab-panel" role="tabpanel" aria-labelledby="metrics-tab" hidden>
-      <div class="control-bar metrics-controls">
-        <label>数据集<select id="metric-dataset"><option value="all">全部数据集</option></select></label>
-        <label>指标<select id="metric-name"></select></label>
-        <label>解码口径<select id="metric-decode"><option value="all">全部口径</option><option value="single">单路径</option><option value="multi">多分支</option></select></label>
-      </div>
-      <div class="model-filters" id="model-filters" aria-label="选择参与比较的模型"></div>
-      <div class="metric-summary">
-        <div><span>已有评测组合</span><strong id="metric-combinations">0</strong></div>
-        <div><span>参与模型</span><strong id="metric-model-count">0</strong></div>
-        <div><span>覆盖数据集</span><strong id="metric-dataset-count">0</strong></div>
-      </div>
-      <section class="chart-section">
-        <div class="section-heading">
-          <div><span class="eyebrow">横向对照</span><h2 id="chart-title">测试结果</h2></div>
-          <p>悬停柱形查看精确值；缺失组合不会补零。</p>
-        </div>
-        <div id="metric-chart" class="metric-chart"></div>
-      </section>
-      <section class="table-section">
-        <div class="section-heading"><div><span class="eyebrow">完整记录</span><h2>指标明细</h2></div></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>模型</th><th>类别</th><th>数据集</th><th>口径</th><th>Goal hit</th><th>Optimal</th><th>Cost ratio</th><th>Loop</th><th>Broken</th><th>Coverage</th><th>W-opt cov</th><th>Goal paths</th></tr></thead>
-            <tbody id="metrics-body"></tbody>
-          </table>
-        </div>
-      </section>
     </section>
 
     <section id="reports-panel" class="tab-panel" role="tabpanel" aria-labelledby="reports-tab" hidden>

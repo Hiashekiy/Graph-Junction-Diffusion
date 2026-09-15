@@ -115,30 +115,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--deterministic", action="store_true", help="posterior argmax 采样")
     parser.add_argument(
         "--decode",
-        default="single",
+        default=None,
         choices=["single", "multi"],
         help="single：按采样 z_0 单路径解码（历史口径）；"
         "multi：存活路径表解码（每个 decision 保留 top-k 条 branch，主指标取累计概率"
         "最高的那条，并额外输出 multi_best_goal / multi_best_goal_cost 两条口径与"
         "coverage_rate / optimal_coverage_rate）",
     )
-    parser.add_argument("--top-k", type=int, default=2, help="--decode multi 时每个路口的 branch 数")
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="--decode multi 时每个路口的 branch 数（默认取 evaluation.top_k）",
+    )
     parser.add_argument(
         "--filter-dead-branches",
         action="store_true",
+        default=None,
         help="--decode multi 时，top-k 之前剔除「终点既不是 Goal 也不是 decision "
         "node」的非 NULL branch（默认关 = 历史多分支结果逐位可复现）",
     )
-    parser.add_argument("--beam-width", type=int, default=64, help="--decode multi 时存活路径表上限")
+    parser.add_argument(
+        "--beam-width",
+        type=int,
+        default=None,
+        help="--decode multi 时存活路径表上限（默认取 evaluation.beam_width）",
+    )
     parser.add_argument(
         "--null-policy",
-        default="stop",
+        default=None,
         choices=["stop", "skip"],
         help="stop：NULL 参与排名、选中即该路径终止；skip：NULL 不停，只在非 NULL 候选里取 top-k",
     )
     parser.add_argument(
         "--strict-decode",
         action="store_true",
+        default=None,
         help="多分支解码改用**三池**语义（src.evaluation.strict_beam_decoder）："
              "NULL / loop / dead-end 一律在 top-k 之前 mask 掉、失败路径直接淘汰，"
              "最终候选集**只有完整走到 Goal 的路径**，"
@@ -158,6 +170,56 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+#: CLI 未显式给出时，这些解码口径从 config 的 ``evaluation.*`` 读取。
+#: 顺序：CLI > config > 历史默认值（= evaluate_dataset 的形参默认）。
+_DECODE_RULER_DEFAULTS = {
+    "decode": "single",
+    "top_k": 2,
+    "beam_width": 64,
+    "null_policy": "stop",
+    "filter_dead_branches": False,
+    "strict_decode": False,
+}
+
+
+def resolve_decode_ruler(args, config) -> None:
+    """把 ``evaluation.*`` 里的解码口径填进 ``args``（CLI 显式给了就不动）。
+
+    为什么必须让 config 当默认：``Trainer.validate()``（选 ``best.pt``）读的是
+    **同一组键**。如果这里还写死 ``single``/``64``，就会出现"验证按 strict 2/3
+    挑 checkpoint、最终评测却按 single 出报表" —— 三把尺子分叉，而 ``best.pt``
+    是照最严的那把挑的，报表却拿最松的那把的数字。
+
+    没写这些键的旧 config（``controlled_unweighted`` / ``controlled_weighted``）
+    落到的正是 :data:`_DECODE_RULER_DEFAULTS`，与改动前逐位一致。
+    """
+    # 1) config 自身不能自相矛盾：strict 只在 multi 下存在。这是**配置错误**，
+    #    宁可起不来也不要静默按 single 跑完一整套评测。
+    config_decode = str(config.get("evaluation.decode", "single")).lower()
+    if config_decode not in ("single", "multi"):
+        raise SystemExit(f"evaluation.decode={config_decode!r} 不是 single | multi")
+    if config_decode != "multi" and bool(config.get("evaluation.strict_decode", False)):
+        raise SystemExit(
+            "config 自相矛盾：evaluation.strict_decode=true 但 "
+            f"evaluation.decode={config_decode!r}；strict 只存在于多分支解码器里"
+        )
+
+    # 2) 逐项填默认（CLI 显式给了就不动）
+    cli_decode = args.decode
+    for key, fallback in _DECODE_RULER_DEFAULTS.items():
+        if getattr(args, key) is None:
+            setattr(args, key, config.get(f"evaluation.{key}", fallback))
+    args.decode = str(args.decode).lower()
+    if args.decode not in ("single", "multi"):
+        raise SystemExit(f"evaluation.decode={args.decode!r} 不是 single | multi")
+
+    # 3) CLI 显式要求 single 时**关掉** strict，而不是报错：single 下 strict 没有
+    #    意义，用户是在做诊断（想复现历史 single 数字）。危险的方向是反过来的
+    #    （以为在用 strict、其实跑了 single），那个已经在第 1 步挡住了。
+    if cli_decode is not None and args.decode != "multi":
+        args.strict_decode = False
+
+
 def main() -> int:
     args = parse_args()
     overrides = flatten_overrides(args.overrides)
@@ -168,6 +230,14 @@ def main() -> int:
         config = load_config(args.config, overrides + ["evaluation.stochastic_sampling=true"])
     if args.deterministic:
         config = load_config(args.config, overrides + ["evaluation.stochastic_sampling=false"])
+
+    resolve_decode_ruler(args, config)
+    print(
+        f"ruler        : decode={args.decode} strict={bool(args.strict_decode)} "
+        f"top_k={args.top_k} beam_width={args.beam_width} "
+        f"null_policy={args.null_policy} "
+        f"(未显式给的项取自 {args.config} 的 evaluation.*)"
+    )
 
     seed = int(config.get("seed", 0))
     set_seed(seed)

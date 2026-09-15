@@ -583,6 +583,10 @@ class RecurrentLossOutput:
     traj_raw_loop: float = float("nan")
     traj_raw_dead_end: float = float("nan")
     traj_raw_broken: float = float("nan")
+    #: 被剔除的"模型一个 decision 都没做"的空 trace 数（forced walk 直达 goal，或
+    #: 在第一个 decision 之前就断了）。两者都不可学：空 trace 的 ``S(P)=0`` 是所有
+    #: 候选里的最大值，进池只会抢走 softmax 质量。持续偏高说明 OD 太浅。
+    traj_raw_no_decision: float = float("nan")
 
 
 def goal_timestep_weight(diffusion: CategoricalDiffusion, t: int, mode: str) -> float:

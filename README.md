@@ -278,10 +278,11 @@ E:/CondaEnvData/envs/GGMPC/python.exe tools/predict_path.py --run outputs/runs/c
 E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py
 ```
 
-看板有三个页签：路径可视化 / 测试指标可视化 / **实验报告**。指标页含 `multi`、
-`multi · best_goal`、`multi · best_goal_cost` 与 `multi k=N / stop|skip` 等口径，并对每个模型标出
-**带权 / 带权·无cost / 无权**；报告页直接读 `docs/REPORT_multipath_and_weighted.md` 与
-`outputs/*summary*.json`。细节见第 22 节与 `dashboard/README.md`。
+看板有两个页签：**路径可视化** / **实验报告**。模型下拉标出
+**无权 / 带权 / 带权·无cost / 滴滴·带权**；数据集按 `data/` 子目录分组，切模型时会自动
+切到该模型训练用的那份数据；选中 `didi_chengdu` 时路径页换成**真实成都路网底图**
+（经纬度等比例、带比例尺）。原来的「测试指标可视化」页签已删除（那批口径不适合跨配置比较）。
+细节见第 22 节与 `dashboard/README.md`。
 
 **数据（生成 / 转换 / 合并 / 查泄漏）**
 
@@ -1727,7 +1728,11 @@ weighted optimal coverage 需要真正的最小 cost 路。另外加了 3 个 ev
 
 ### 21.8 全模型统一评测报告
 
-`docs/REPORT_multipath_and_weighted.md`：8 个模型配置（加权 / 消融 / 无权 / 跨任务）× 2 个测试集
+> ⚠️ 本节描述的 `docs/REPORT_multipath_and_weighted.md` 已在 2026-09-16 的清理中删除
+> （方法上被第 24 节的真实数据章节取代，且其中一条引用路径 `data/controlled/` 早已不存在）。
+> **机器可读的汇总仍然在**，下面这些产物都还在。
+
+原本那份报告：8 个模型配置（加权 / 消融 / 无权 / 跨任务）× 2 个测试集
 （加权 300 条、无权 300 条）× 单分支 + 多分支（`top_k=2, beam_width=3, filter=True`，stop/skip 各一遍），
 CPU 跑、逐位可复现；含完整指标定义、解码器定义、参考基线、结论与读数陷阱。
 机器可读汇总在 `outputs/reports/all_models_multipath_summary.json`，16 份原始评测在 `outputs/reports/multipath_report/`。
@@ -1742,54 +1747,112 @@ outputs/runs/controlled_weighted_cost_ablated/mp_weighted_{stop_off,skip_on}.jso
 
 ---
 
-## 22. 交互看板（`dashboard/`）：加权模型 + 指标报告
+## 22. 交互看板（`dashboard/`）：路径可视化 + 实验报告
 
 ```bash
 E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py            # http://127.0.0.1:8765/
 E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py --no-browser --device cpu
 ```
 
-三个页签：**路径可视化** / **测试指标可视化** / **实验报告**。
+两个页签：**路径可视化** / **实验报告**。
 
-### 22.1 加权模型与多分支口径怎么进面板的
+> **2026-09-16：原来的「测试指标可视化」页签已整个删除**（指标柱状图 + 指标明细表 +
+> 模型筛选 + 汇总栏，以及后端的 `discover_metrics()` / `_metric_row()`）。理由是那批
+> 口径在跨配置比较时会系统性误导：`coverage_rate` 在 `top_k>=2` 时是逃逸口产物
+> （`top_k=1` 864/1000 → `top_k=2` 963/1000），`optimal_coverage_rate` 与
+> `multi_best_goal_cost` 是 beam 预算的 best-of-N（beam=1 95/1000 → beam=64 447/1000），
+> KLEV 基本等于 `log(1/eps)`。要数值请看 §21 的表与 `outputs/reports/*.json`。
+
+### 22.1 模型与数据集怎么进面板
 
 | 位置 | 内容 |
 |---|---|
-| 模型筛选器 | 每个 run 按 `run_config.json` 的 `data.weighted` + `model.use_edge_cost` 打徽章：**带权** / **带权·无cost**（消融）/ **无权** |
-| 指标页 · 口径 | 一次评测会展开成多行：`single`、`multi`、`multi · best_goal`、`multi · best_goal_cost`、`multi k=2 / stop|skip` —— 直接对照方案第 8 节的三条口径 |
-| 指标页 · 新列 | **类别**（徽章）、**W-opt cov**（`weighted_optimal_coverage_rate`）、**Goal paths**（`mean_goal_paths`） |
-| 指标页 · 数据集 | `weighted_controlled_{train,val,test}.pkl` 与无权数据集并列，按 `data/` 子目录分组 |
-| 路径页 · 多分支 | 控制条新增 **必死 branch 预筛选** 开关（透传 `filter_dead_branches`），summary 里显示剔除数量 |
-| 路径页 · 带权图 | 每条路线同时显示 **跳数** 与 **真实 cost**（后端 `_route_payload` 新增 `path_cost` / `weighted`） |
+| 模型下拉 | 标签直接写类别：**无权** / **带权** / **带权·无cost**（消融）/ **滴滴·带权**；title 带 `data_dir` / `flow_steps` / live config / `source` |
+| 类别判定 | `data.source == "didi_chengdu"` → 滴滴；否则按 `data.weighted` + `model.use_edge_cost` 分三类 |
+| 数据集下拉 | 按**相对 `data/` 的目录**分组：`unweighted` / `weighted` / `didi/graph/chengdu`；title 带相对路径与体积 |
+| 数据集过滤 | 排除 `data/didi/raw/**`（`dicts.pkl` / `ChengDu.pkl` 是**输入**不是数据集）、`_` 前缀的 prepare 缓存、`graph_global.pkl`；这三类用 `GraphQueryDataset.load` 打开会直接抛异常 |
+| 模型↔数据集 | 切模型时若当前数据集不在该模型 `data_dir` 下，自动切到最合适的 split（优先 `test_1000`，再退 `test`），并弹一条**中性**提示条。手动改数据集不会被覆盖 |
+| 路径页 · 多分支 | 控制条有 **必死 branch 预筛选** 开关（透传 `filter_dead_branches`），summary 里显示剔除数量 |
+| 路径页 · 带权图 | 每条路线同时显示 **跳数** 与 **真实 cost**（`_route_payload` 的 `path_cost` / `weighted`） |
+| 路径页 · 真实数据 | 滴滴样本左侧显示"真实车辆路径 · 绕行 ×N"（`gt_cost_ratio`）、GT 跳数/公里数、`corridor rho` 与 order id —— 真实数据没有 `difficulty` / `mode`，那是合成图生成器的标签 |
 
-数据集归属不再靠文件名猜：`scripts/evaluate.py` 现在把 `data` 写进评测 JSON，看板优先用它；
-加权 run 里的老产物（没有 `data` 字段）按 `data.weighted=true` 兜底判到加权测试集。另外同一口径
-有多份产物时，**`best.pt` 的评测优先于 `*_last.json`**。
+### 22.2 滴滴真实路网 + 街道底图
 
-### 22.2 实验报告页签
+选中 `didi_chengdu` 时路径页进入**真实地理模式**：
+
+```text
+浅灰细线   整张成都路网（OSMnx，2891 节点 / 4403 边）
+蓝灰线     该样本的 OD corridor 子图（模型真正看到的那个）
+彩色线     模型解出来的路线（多分支时有车道偏移与公共前缀合并）
+左下角     比例尺（N km / N m）
+图下方     底图来源 · 坐标覆盖率 · 画面多少公里 · 街道条数
+```
+
+三条实现要点（都有单测钉住）：
+
+1. **不拉伸**。经度按 `cos(lat0)`（成都 ≈ 0.81）校正后与纬度同尺度，再按面板长宽比
+   letterbox。后端 `PANEL_WIDTH/HEIGHT/MARGIN` 与前端 `GRAPH_WIDTH/HEIGHT/MARGIN`
+   必须一致，`tests/test_dashboard.py::test_panel_geometry_matches_between_backend_and_frontend`
+   做静态比对 —— 两边一漂移城市就会被压扁。
+2. **裁剪顺序**：先按面板比例包住 corridor，**再**整体放大 15%。反过来先加 margin 再补
+   比例，会在 1.75:1 的宽屏上把近乎方形的 corridor 压成中间一小块（实测只剩 40% 宽）。
+3. **节点不全画**：一个 corridor 有 100~350 个节点、绝大多数是 decision，全画成 r=8 的
+   圆会糊成一团把路网盖住。现在普通节点不画、decision 画小圈、只标 S/G。
+
+街道层回传的是后端算好的**两端坐标**（`[x1,y1,x2,y2]`），不带节点 id：底图是纯装饰层，
+把全局 OSM id 混进面板只会和 corridor 的**样本内**编号空间撞车（两套都从 0 开始，含义完全不同）。
+街道线用 `vector-effect: non-scaling-stroke`（它没有 `stroke-dasharray`，不会踩 §22.4 那个坑），
+放大时保持发丝粗细。
+
+合成数据集没有地理位置，自动退回弹簧布局（`graph.geo = false`），行为与改动前一致。
+
+### 22.3 过期的 run 快照（踩过的坑）
+
+`outputs/runs/<run>/run_config.json` 是**训练当时**的快照，仓库重构后可能指向早就删掉的
+路径。实测 `didi_chengdu` 那份里写着 `data.root = data/DiDiChengduXian/...`、
+`data.coords_file = data/DiDiChengduXian/data/data/cd/ChengDu.pkl`、
+`paths.data_dir = data/didi_chengdu_gjd`、`paths.run_name = didi_chengdu_flow1_weighted_new`
+—— 四个名字/路径在 2026-09-16 的清理里全失效了（真实位置是
+`data/didi/raw/chengdu/ChengDu.pkl` 与 `data/didi/graph/chengdu`）。所以面板把职责拆开：
+
+* **模型结构 / 扩散参数** → 必须用 `run_config.json`（权重兼容，`_bundle()` 用的就是它）；
+* **数据在哪、坐标在哪** → 一律用**当前** `configs/<run>.yaml`（`_live_run_settings()`）。
+
+查找顺序是"**目录名优先**，再退到快照里的 `run_name`"，最后扫一遍 `configs/*.yaml` 里
+`paths.run_name` 的声明。合并/改名过的 run 目录留着的是旧快照，只有目录名才是当前配置名。
+坐标文件不存在时显式置空（`is_geo=False`），而不是把死路径传下去。
+
+### 22.4 播放与绘制口径（不要回退）
+
+播放进度**不**使用 `stroke-dasharray`，而是渲染后对每条边做等弧长采样
+（`getTotalLength` / `getPointAtLength`，元素必须已挂到文档里），再按进度重写 `d`。
+原因：只要描边带 `vector-effect: non-scaling-stroke`，Chromium 会把 `stroke-dasharray`
+当成**屏幕像素**解释，而 `getTotalLength()` 仍返回用户单位 —— 「长度等于总长的 dash」
+只能画出整条边的 `1/scale`（面板常见缩放 1.19 时约 84%），每条边进下一个节点前都会缺一截。
+现在 `.route` / `.route-casing` 不声明 `vector-effect`，描边与节点半径都用用户单位。
+
+**公共前缀不铺车道**：一条边被当前显示的全部路线经过时（`uniqueRoutes == totalRoutes`）
+合并成一条中性主干线（`TRUNK_COLOR = #93a3bd`），只有真正分叉之后才按路线偏移着色 ——
+否则 8 条路线会把公共前缀画成 8 条平行细线，看上去像"一开始就分叉了"。
+
+### 22.5 实验报告页签
 
 `GET /api/reports` 返回固定清单（不遍历目录），`GET /api/reports/<id>` 返回内容：
-Markdown 原样返回（前端用内置小渲染器画标题/表格/列表/代码块），JSON 解析后格式化展示。
+Markdown 原样返回（前端内置小渲染器画标题/表格/列表/代码块），JSON 解析后格式化展示。
+清单只列**当前仓库里真的存在**的产物；被删掉的
+`docs/REPORT_multipath_and_weighted.md` 已从清单移除（留一个恒 `exists:false` 的条目
+只会多一个死链接）。
 
-| id | 文件 |
-|---|---|
-| `report` | `docs/REPORT_multipath_and_weighted.md` |
-| `all_models` | `outputs/reports/all_models_multipath_summary.json` |
-| `weighted_experiment` | `outputs/reports/weighted_experiment.json` |
-| `multipath_weighted` / `multipath_filteron` | 过滤 on/off 的 beam=64 对照 |
-| `beam_compare` | beam=64 vs beam=3（CPU） |
-| `regression` | 零破坏回归：旧 checkpoint 逐位复现 |
-
-### 22.3 API 一览
+### 22.6 API 一览
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/catalog` | 模型（含 `kind` / `weighted` / `use_edge_cost` / `flow_steps`）、数据集、指标行、报告清单 |
+| GET | `/api/catalog` | 模型（`kind` / `weighted` / `use_edge_cost` / `flow_steps` / `source` / `geo` / `data_dir` / `live_config`）、数据集、报告清单 |
 | GET | `/api/datasets/<id>` | 数据集规模 |
 | GET | `/api/reports/<id>` | 报告内容（Markdown 文本 / JSON 对象） |
-| POST | `/api/path` | 一次真实反向扩散 + 单路径/多分支解码，返回图、路线（含 `path_cost`）与 summary |
+| POST | `/api/path` | 一次真实反向扩散 + 单路径/多分支解码；返回 `graph`（含 `geo` / `street_edges` / `crop_km` / `km_per_x_unit`）、`routes`（含 `path_cost`）、`sample`（带真实数据元信息）、`diffusion`、`contrast` |
 
-截图（Chromium 实跑，`outputs/figures/dashboard_*.png`）：指标页按加权测试集筛选、报告页渲染本文第 21 节报告。
+`/api/catalog` **不再有 `metrics` 字段**。
 
 ---
 
@@ -2620,12 +2683,25 @@ L_traj      = lambda_s * L_succ + lambda_g * L_sim + lambda_f * L_fail
 5. L_traj = mean_b L_traj,b                     # batch 等权，不是候选等权
 ```
 
-#### 五条硬约束（都有单测钉住）
+#### 六条硬约束（都有单测钉住）
 
-1. **`S(P)` 必须是 mean，不能是 sum。** 用 sum 的话 2 跳的失败轨迹得分 -2、
-   6 跳的 -6，softmax 会把质量全给**最短的尸体**，模型被鼓励去生成最短的失败轨迹。
-   历史 `best` readout 里就是这个 bug。测试：
-   `test_trajectory_score_is_mean_log_prob_not_sum`。
+1. **`S(P)` 必须是 mean，不能是 sum —— 而且筛选候选时也必须用它。** 用 sum 的话
+   2 跳的失败轨迹得分 -2、6 跳的 -6，softmax 会把质量全给**最短的尸体**，模型被
+   鼓励去生成最短的失败轨迹。历史 `best` readout 里就是这个 bug。
+
+   ⚠️ **这条约束有两处，早先只做对了一处。** `_trajectory_scores()` 一直是 mean，
+   但 `mine_success_and_failure()` 从"很多 success/failure 里挑前 4 条"时用的是
+   **累计** log p —— 于是"按累计口径挑进来、按平均口径打分"，被选中的恰好是平均分
+   更低的那批。反例（手工样本上可复现）：
+
+   ```
+   短  3 步 × p=0.75 -> 累计 -0.863，均值 -0.288   <- 累计口径选它
+   长  6 步 × p=0.85 -> 累计 -0.975，均值 -0.163   <- 平均口径选它（模型其实更信它）
+   ```
+
+   现在两处统一走 `_mean_log_prob()`。测试：
+   `test_trajectory_score_is_mean_log_prob_not_sum`、
+   `test_candidate_selection_is_not_biased_towards_short_trajectories`。
 2. **训练 miner 必须 `strict=False`。** strict decoder 会在 top-k 之前把
    NULL / loop / dead-end 全部 mask 掉，miner 根本看不到失败轨迹，`L_fail` 恒为 0、
    整个多轨迹项没意义。测试：`test_real_miner_keeps_strict_off`。
@@ -2640,10 +2716,27 @@ L_traj      = lambda_s * L_succ + lambda_g * L_sim + lambda_f * L_fail
    early timestep 噪声大、采出来的轨迹不代表最终 Decision Field；而且 miner 是
    离散 CPU 搜索，每个 timestep 都跑会让训练时间爆掉。
 
+6. **模型零 decision 的轨迹一律不进候选池。** decoder 只有两种情况会产出空
+   trace，两者都发生在**还没轮到模型选择**的时候：
+
+   * forced walk 直接从 `start` 走到 `goal`（`status="goal"`）；
+   * forced walk 在到达第一个 decision node 之前就断了
+     （`reason="dead end before any decision"` / `"ambiguous forced step"`）。
+
+   而 `_trajectory_scores()` 对空 trace 记 `S(P)=0`（空和）—— 那是所有候选里的
+   **最大值**（真实轨迹的 mean log p 恒 ≤ 0）。放进去等于让 softmax 把质量送给一条
+   根本没法优化的轨迹：既稀释真正该学的候选，又让 `L_fail` 去惩罚一个模型控制不了
+   的结果。现在在 miner 里直接剔除并计入 `train_traj_raw_no_decision`；被剔除的条数
+   持续偏高说明 corridor 的 OD 太浅，**那是数据问题，不是超参问题**。
+   测试：`test_forced_failure_without_any_decision_is_excluded`、
+   `test_empty_trace_does_not_steal_softmax_mass`。
+
 另外两条不变量值得单独记住：
 
 * **GT 恒在候选池里、且恒属于 success**，所以 `success` 集合永远非空、
-  `L_succ` 永远有限（`succ_mass >= pi[GT] > 0`）。
+  `L_succ` 永远有限（`succ_mass >= pi[GT] > 0`）。GT 也**不走**上面第 6 条的剔除
+  逻辑：它是监督目标，即使一个 active decision 都没有也照样入池（此时 `S(GT)=0`，
+  语义上正确 —— forced 路径的概率恒为 1 —— 该样本对 `L_traj` 贡献恰好 0）。
 * **`failure_cost` 的唯一来源是 config**。见下面第 2 条修复。
 
 #### 这一轮顺带修掉的 6 个 bug
@@ -2671,7 +2764,20 @@ L_traj      = lambda_s * L_succ + lambda_g * L_sim + lambda_f * L_fail
    `record=False` 所以一直没暴露。现在记 `NaN` 而不是 0（和"真的算出来是 0"区分开）。
    测试：`test_recurrent_loss_goal_reach_zero_with_record_does_not_crash`。
 
-#### 新增日志（21 个）
+#### 封版前审计追加修掉的 2 处
+
+第四版落地后的复核又发现两处，都不影响 loss 的数学形式，但都会让**日志或选模型
+口径骗人**，所以一并修掉（详见上面「六条硬约束」第 1、6 条与「验证 / 选 best.pt」
+一节）：
+
+7. **候选筛选还在用累计 log p。** `S(P)` 已经是 mean，但 `mine_success_and_failure()`
+   挑前 4 条 success / 补满 failure 时用的仍是 `_cum_log_prob()` —— 等于把
+   "短轨迹偏置"从打分挪到了筛选。现在两处统一 `_mean_log_prob()`。
+8. **空 trace（模型零 decision）以 `S(P)=0` 混进候选池。** 0 是所有候选里的最大值，
+   会抢走 softmax 质量、稀释真正该学的候选。现在在 miner 里剔除并计入
+   `train_traj_raw_no_decision`。
+
+#### 新增日志（22 个）
 
 ```text
 train_null_saturation_rate
@@ -2682,7 +2788,7 @@ train_traj_similarity_loss                 train_traj_num_failure
 train_traj_failure_loss                    train_traj_mean_success_nlcs
 train_traj_success_mass                    train_traj_raw_finished / raw_success
 train_traj_failure_mass                    train_traj_raw_null / raw_loop
-train_traj_fail_null_mass                  train_traj_raw_dead_end / raw_broken
+train_traj_fail_null_mass                  train_traj_raw_dead_end / raw_broken / raw_no_decision
 train_traj_fail_loop_mass
 train_traj_fail_dead_mass
 train_traj_fail_broken_mass
@@ -2696,11 +2802,62 @@ train_traj_fail_broken_mass
 * `num_candidates` 长期贴着 1（池子里只有 GT）= miner 什么都挖不到，
   `L_traj` 恒为 0，整个项等于没开。
 
-`src/evaluation/history.py` 的 `CURVE_KEYS` 已同步加上这 21 条；
+`src/evaluation/history.py` 的 `CURVE_KEYS` 已同步加上这 22 条；
 `tests/test_trajectory_loss.py::test_trainer_logs_every_declared_metric` 会静态核对
 `Trainer.EXTRA_TRAIN_METRICS` 与 `trajectory_loss.METRIC_KEYS` 一一对应 ——
 `Trainer` 用 `getattr(out, name, None)` 取值并**静默跳过**取不到的字段，
 一个拼错的键不会报错，只会让那条曲线永远缺席。
+
+#### 验证 / 选 best.pt 也必须换成 Strict 2/3（否则前三者口径分叉）
+
+新 loss 在优化"多轨迹集合"，最终推理准备用 **Strict 多分支 2/3**，但
+`Trainer.validate()` 早先走的是 `evaluate_dataset()` 的默认形参：
+
+```text
+decode="single"  strict_decode=False  beam_width=64
+```
+
+也就是说 **`best.pt` 仍然是用 single decoder 的 `path_similarity_score` 挑的**。
+这不是 loss 的问题（loss 一直在正常反传），而是"训练 / 选模型 / 最终测试"三把尺子
+不一致，后果是本项目真实踩过的那个坑：
+
+```text
+epoch 12:  single PathSim 0.35   strict PathSim 0.43
+epoch 20:  single PathSim 0.31   strict PathSim 0.46   <- strict 下更好
+旧口径会选中 epoch 12
+```
+
+修法不是在 `validate()` 里硬写参数，而是让**两边读同一组 config 键**
+（`evaluation.decode` / `strict_decode` / `top_k` / `beam_width` / `null_policy` /
+`filter_dead_branches`，键名与 `scripts/evaluate.py` 的命令行参数一一对应）。
+`configs/didi_chengdu.yaml` 现在写的是：
+
+```yaml
+evaluation:
+  stochastic_sampling: false   # = evaluate.py --deterministic
+  decode: multi
+  strict_decode: true
+  top_k: 2
+  beam_width: 3
+```
+
+于是 `selection_metric: path_similarity_score` 指的就是 **Strict 2/3 下的 PathSim**。
+
+三条要点：
+
+* **默认值逐位等于 `evaluate_dataset()` 的默认形参**，所以没写这些键的
+  `controlled_unweighted` / `controlled_weighted` 验证行为**一个字节都没变**
+  （实测：同 seed 下 10 个实质指标完全一致，只有 `wall_time` 不同）。
+  `tests/test_validation_decode.py::test_defaults_match_evaluate_dataset_signature`
+  用 `inspect.signature` 机械地钉住这件事。
+* **训练 miner 与评测 decoder 是两套参数，不要混**：训练要看得见失败
+  （historical 2/8、`strict=false`），评测只问"能不能到终点"（strict 2/3）。
+  另有单测守住两者不会被合并成一套。
+* `strict_decode=true` 但 `decode != "multi"` 会**直接报错** —— 配错时静默按 single
+  跑，训练全程以为自己用的是 strict，这属于最贵的一类错误。
+  `tests/test_validation_decode.py::test_didi_config_is_forwarded_to_evaluate_dataset`
+  断言的是"键真的传进了 `evaluate_dataset`"，而不只是"Trainer 存了字段" ——
+  当初这个 bug 的形态正是"参数存在但没接上"。
 
 #### 向后兼容
 
@@ -2727,6 +2884,13 @@ train_traj_fail_broken_mass
 A→C 回答"饱和式本身有没有用"，C→F 回答"多轨迹项逐块加有没有用"。
 
 #### 训练成本提醒
+
+> 另：验证现在跑的是 **Strict 多分支束搜索**（`beam_width=3`），不再是单路径解码。
+> 实测 3 条真实 DiDi val 样本（~337 decision/条）`validate()` 耗时 0.5s，即
+> 512 条 val 约 1.5 分钟一轮 —— 比 single 贵，但这是"选对 checkpoint"必须付的钱。
+> 嫌贵先降 `evaluation.batch_size` 的收益不大（瓶颈是 Python 束搜索），
+> 真正的旋钮是 `evaluation.beam_width`；**不要**改回 `decode: single`。
+
 
 miner 每个 batch 要为**每个样本**跑一次 beam=8 的 CPU 束搜索，只在最后一个 reverse
 step 跑一次。DiDi corridor 的 median 是 ~305 decision / ~1500 candidate，

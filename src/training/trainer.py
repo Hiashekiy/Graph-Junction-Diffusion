@@ -88,6 +88,9 @@ TRAJECTORY_METRICS = (
     "traj_raw_loop",
     "traj_raw_dead_end",
     "traj_raw_broken",
+    # 被剔除的空 trace（模型零 decision，不可学）。持续偏高 = corridor 的 OD 太浅，
+    # 多轨迹项本身没信息可学，此时该去查数据而不是调超参。
+    "traj_raw_no_decision",
 )
 
 #: 上面两组一起进 history.json / 控制台（getattr 取不到或 NaN 的自动跳过）
@@ -192,6 +195,49 @@ class Trainer:
             int(eval_cfg.get("batch_size", self.batch_size)) if eval_cfg else self.batch_size
         )
         self.eval_max_steps = int(eval_cfg.get("max_steps", 0)) if eval_cfg else 0
+
+        # ---- 验证 / 选 best.pt 用的解码口径 ----------------------------------
+        #
+        # 默认值**逐位等于 evaluate_dataset() 的默认形参**（single / 非 strict /
+        # beam 64），所以没写这些键的旧 config（controlled_unweighted /
+        # controlled_weighted）的验证行为一个字节都没变。
+        #
+        # 为什么必须可配：best.pt 是按验证集指标挑的。如果验证还在用 single、而最终
+        # 推理用 strict 多分支，碰到"single 后期变差、strict 后期反而继续提升"时就会
+        # 选中错误的 checkpoint —— 这个坑本项目真实踩过。让 scripts/evaluate.py 与这里
+        # 读**同一组 config 键**，口径就不可能再漂。
+        #
+        # 键名与 scripts/evaluate.py 的命令行参数一一对应：
+        #   decode <-> --decode, top_k <-> --top-k, beam_width <-> --beam-width,
+        #   null_policy <-> --null-policy,
+        #   filter_dead_branches <-> --filter-dead-branches,
+        #   strict_decode <-> --strict-decode
+        self.eval_decode = (
+            str(eval_cfg.get("decode", "single")).lower() if eval_cfg else "single"
+        )
+        if self.eval_decode not in ("single", "multi"):
+            raise ValueError(
+                f"evaluation.decode={self.eval_decode!r} is not supported "
+                "(choose one of 'single' | 'multi')"
+            )
+        self.eval_strict_decode = (
+            bool(eval_cfg.get("strict_decode", False)) if eval_cfg else False
+        )
+        self.eval_top_k = int(eval_cfg.get("top_k", 2)) if eval_cfg else 2
+        self.eval_beam_width = int(eval_cfg.get("beam_width", 64)) if eval_cfg else 64
+        self.eval_null_policy = (
+            str(eval_cfg.get("null_policy", "stop")) if eval_cfg else "stop"
+        )
+        self.eval_filter_dead_branches = (
+            bool(eval_cfg.get("filter_dead_branches", False)) if eval_cfg else False
+        )
+        if self.eval_strict_decode and self.eval_decode != "multi":
+            # strict 只存在于多分支解码器里。配错的话会静默地按 single 跑，
+            # 训练全程以为自己用的是 strict 2/3 —— 必须直接报错。
+            raise ValueError(
+                "evaluation.strict_decode=true 需要 evaluation.decode=multi"
+                f"（当前 decode={self.eval_decode!r}）"
+            )
 
         # P2-2：AMP 真正落地。只有 cuda + 显式开启才启用，并且把 scaler 状态
         # 一起交给 optimizer（已创建的 scaler 也能在 CPU 上安全存在）。
@@ -360,6 +406,8 @@ class Trainer:
     def validate(self, epoch: int) -> Dict[str, Any]:
         if self.val_dataset is None or len(self.val_dataset) == 0:
             return {}
+        # 口径完全由 config 的 `evaluation.*` 决定（见 __init__ 里的说明）：
+        # 验证、选 best.pt、最终 evaluate.py 三者必须用同一把尺子。
         report = evaluate_dataset(
             self.model,
             self.diffusion,
@@ -372,6 +420,12 @@ class Trainer:
             progress=False,
             weights=self.weights,
             coordinates=self.coordinates,
+            decode=self.eval_decode,
+            top_k=self.eval_top_k,
+            beam_width=self.eval_beam_width,
+            null_policy=self.eval_null_policy,
+            filter_dead_branches=self.eval_filter_dead_branches,
+            strict_decode=self.eval_strict_decode,
         )
         metrics = dict(report.metrics)
         if self.weights.is_sampled_null:

@@ -83,7 +83,7 @@ METRIC_KEYS = (
     "mean_success_nlcs",
     "fail_null_mass", "fail_loop_mass", "fail_dead_mass", "fail_broken_mass",
     "raw_finished", "raw_success", "raw_null", "raw_loop", "raw_dead_end",
-    "raw_broken",
+    "raw_broken", "raw_no_decision",
 )
 
 #: 失败类型 -> 默认代价（方案第 12 / 14 节）
@@ -248,14 +248,35 @@ def mine_success_and_failure(
     failures: Dict[str, List[MinedTrajectory]] = {
         "null": [], "loop": [], "dead_end": [], "broken": []
     }
+    unscoreable = 0
     for candidate in result.finished:
         nodes = [int(v) for v in candidate.nodes]
         if tuple(nodes) == gt_nodes:
             continue                      # GT 会单独加入，这里避免重复计分
+        indices = [int(v) for v in candidate.candidate_indices]
+        if not indices:
+            # **模型一个 decision 都没做过**的轨迹，不能进候选池。
+            #
+            # decoder 里只有两种情况会产出空 trace：
+            #   * forced walk 直接从 start 走到 goal（``status="goal"``）；
+            #   * forced walk 在到达任何 decision node 之前就断了
+            #     （``reason="dead end before any decision"`` / ``"ambiguous forced step"``）。
+            # 两者都是"还没轮到模型选择"的路径，模型对它没有任何控制权。
+            #
+            # 而 :func:`_trajectory_scores` 对空 trace 记 ``S(P)=0``（空和），
+            # 那基本是所有候选里的**最大值**（真实轨迹的 mean log p ≤ 0；只有在
+            # p 饱和到 1 - 1e-8 以上时才会比 0 高出约 1e-8，可忽略）：
+            # softmax 会把质量送给这条根本没法优化的轨迹，既稀释了真正该学的候选、
+            # 又让 L_fail 去惩罚一个模型控制不了的结果。所以这里直接剔除并计数，
+            # 而不是让它以 0 分混进去。
+            #
+            # GT 不走这条路径（它在 :func:`build_gt_trajectory` 里单独构造并强制入池）。
+            unscoreable += 1
+            continue
         kind = classify_failure(candidate)
         item = MinedTrajectory(
             nodes=nodes,
-            candidate_indices=[int(v) for v in candidate.candidate_indices],
+            candidate_indices=indices,
             status="goal" if kind is None else kind,
             nlcs=float(normalized_lcs(nodes, gt_path)),
         )
@@ -273,10 +294,13 @@ def mine_success_and_failure(
         "raw_loop": len(failures["loop"]),
         "raw_dead_end": len(failures["dead_end"]),
         "raw_broken": len(failures["broken"]),
+        # 被剔除的空 trace 数。它一直偏高说明 corridor 的 OD 太浅（起点附近就到终点
+        # 或结构死角），那时候多轨迹项本身就没有信息可学，不是超参问题。
+        "raw_no_decision": unscoreable,
     }
 
-    # 成功：按累计 log 概率降序（= 模型当前最相信的），取前 max_success
-    success.sort(key=lambda item: -_cum_log_prob(probs, item.candidate_indices))
+    # 成功：按**平均** log 概率降序（= 模型当前最相信的），取前 max_success
+    success.sort(key=lambda item: -_mean_log_prob(probs, item.candidate_indices))
     success = success[: max(0, cfg.max_success)]
 
     # 失败：**先按类型各取 1**（保证多样性），不足再用剩余高分 failure 补满
@@ -292,18 +316,31 @@ def mine_success_and_failure(
             for item in failures[kind][1:]
             if id(item) not in used
         ]
-        rest.sort(key=lambda item: -_cum_log_prob(probs, item.candidate_indices))
+        rest.sort(key=lambda item: -_mean_log_prob(probs, item.candidate_indices))
         picked.extend(rest[: max(0, cfg.max_failure) - len(picked)])
     picked = picked[: max(0, cfg.max_failure)]
 
     return success, picked, stats
 
 
-def _cum_log_prob(probs: Sequence[float], indices: Sequence[int]) -> float:
+def _mean_log_prob(probs: Sequence[float], indices: Sequence[int]) -> float:
+    """``(1/L) Σ_ℓ log p(c_ℓ)`` —— 与最终 :func:`_trajectory_scores` 同一个量纲。
+
+    候选**筛选**必须和最终**打分**用同一个分数。早先筛选用的是**累计** log p，
+    于是出现"按累计口径挑进来、按平均口径打分"的精神分裂：累计口径偏好短轨迹
+    （单步概率 0.75 × 3 步 = -0.863 会赢过 0.85 × 8 步 = -1.300，但模型其实更相信
+    后者），被选进池子的恰好是平均分更低的那批。这正是 ``S(P)`` 之所以要用 mean
+    想避免的偏置，不能在筛选这一步又把它放回来。
+
+    ``indices`` 为空返回 0（调用方已经在 :func:`mine_success_and_failure` 里把空
+    trace 全部剔除了，这里只是防御）。
+    """
+    if not indices:
+        return 0.0
     total = 0.0
     for index in indices:
         total += math.log(max(float(probs[index]), 0.0) + _EPS)
-    return total
+    return total / len(indices)
 
 
 def build_gt_trajectory(

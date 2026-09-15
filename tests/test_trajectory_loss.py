@@ -830,19 +830,153 @@ def test_success_pool_takes_the_most_probable_first(monkeypatch):
     assert metrics["mean_success_nlcs"] == pytest.approx(0.5)
 
 
-def test_success_candidates_are_ordered_by_cumulative_log_prob(monkeypatch):
-    """打分用的是**累计** log 概率（挑轨迹），不是 mean（那是 S(P) 的事）。"""
-    successes = [
-        _FakeCandidate([90, 100], "goal", indices=[0]),
-        _FakeCandidate([90, 101], "goal", indices=[1]),
-    ]
-    patch_decoder(monkeypatch, successes)
+def test_success_candidates_are_ordered_by_mean_log_prob(monkeypatch):
+    """挑候选与最终 S(P) 必须用**同一个**分数：长度归一化的 mean log p。
+
+    早先筛选用累计 log p，于是"按累计挑进来、按平均打分"，被选中的恰好是平均分
+    更低的那批（累计口径偏好短轨迹）。这里用一组"短但单步概率低 / 长但单步概率高"
+    的候选把这个偏置钉死。
+    """
+    zero = _FakeCandidate([90, 100], "goal", indices=[0])
+    one = _FakeCandidate([90, 101], "goal", indices=[1])
+    two = _FakeCandidate([90, 102], "goal", indices=[2])
+    patch_decoder(monkeypatch, [zero, one, two])
     sample = make_manual_sample()
     probs = [0.5] * sample.num_candidates
     probs[0] = 0.4
     probs[1] = 0.6
+    probs[2] = 0.9
     kept, _, _ = mine_success_and_failure(sample, probs, enabled_config(max_success=1))
-    assert [item.nodes for item in kept] == [[90, 101]]
+    assert [item.nodes for item in kept] == [[90, 102]]
+
+
+def test_candidate_selection_is_not_biased_towards_short_trajectories(monkeypatch):
+    """长度归一化：长而单步概率高的轨迹必须赢过短而单步概率低的。
+
+    具体数字（手工样本只有 9 个候选，所以用 3 步 vs 6 步）：
+        短  3 步 × p=0.75 -> 累计 -0.863，均值 -0.288   <- 累计口径选它
+        长  6 步 × p=0.85 -> 累计 -0.975，均值 -0.163   <- 平均口径选它
+    两个口径的**排序正好相反**，所以 max_success=1 时留下的那条就能分辨实现。
+    """
+    short = _FakeCandidate([90, 100], "goal", indices=[0, 1, 2])
+    long = _FakeCandidate([90, 101], "goal", indices=[3, 4, 5, 6, 7, 8])
+    patch_decoder(monkeypatch, [short, long])
+    sample = make_manual_sample()
+    assert sample.num_candidates >= 9, "手工样本的候选数不够构造这个反例"
+    # 反例成立的前提：累计口径下短的那条赢
+    assert 3 * math.log(0.75) > 6 * math.log(0.85)
+    assert math.log(0.75) < math.log(0.85)
+    probs = [0.5] * sample.num_candidates
+    for index in (0, 1, 2):
+        probs[index] = 0.75
+    for index in (3, 4, 5, 6, 7, 8):
+        probs[index] = 0.85
+
+    kept, _, _ = mine_success_and_failure(sample, probs, enabled_config(max_success=1))
+    assert [item.nodes for item in kept] == [[90, 101]], (
+        "累计口径会选短轨迹；长度归一化后应当选模型更相信的长轨迹"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 空 trace（模型零 decision）不能进候选池
+# ---------------------------------------------------------------------------
+def test_forced_failure_without_any_decision_is_excluded(monkeypatch):
+    """forced walk 在第一个 decision 之前就断了 -> 模型没有任何选择权。
+
+    这种轨迹的 ``S(P)`` 是空和（记 0），而 0 是所有候选里的**最大值**：放进去
+    softmax 会把质量送给一条根本没法优化的轨迹。必须剔除并计数。
+    """
+    forced = _FakeCandidate(
+        [80, 200], "broken", "dead end before any decision", indices=[]
+    )
+    real = _FakeCandidate([80, 201], "loop", indices=[0])
+    patch_decoder(monkeypatch, [forced, real])
+    sample = make_manual_sample()
+
+    success, failure, stats = mine_success_and_failure(
+        sample, [0.5] * sample.num_candidates, enabled_config()
+    )
+    assert success == []
+    assert [item.nodes for item in failure] == [[80, 201]]
+    assert stats["raw_no_decision"] == 1
+    # raw_finished 仍然记"截断前一共产出多少条"（含被剔除的那条）
+    assert stats["raw_finished"] == 2
+    assert stats["raw_loop"] == 1
+
+
+def test_forced_goal_without_any_decision_is_excluded(monkeypatch):
+    """forced walk 直接走到 goal：也是一条模型零 decision 的路径。"""
+    forced_goal = _FakeCandidate([90, 100], "goal", indices=[])
+    patch_decoder(monkeypatch, [forced_goal])
+    samples, batch = two_sample_batch()
+    _, metrics = trajectory_set_loss(
+        uniform_log_prob(batch), batch, enabled_config()
+    )
+    # 池子里只剩 GT：success 集合不会被这条"白捡的成功"灌水
+    assert metrics["num_candidates"] == pytest.approx(1.0)
+    assert metrics["num_success"] == pytest.approx(1.0)
+    assert metrics["success_mass"] == pytest.approx(1.0)
+    assert metrics["raw_no_decision"] == pytest.approx(1.0)
+
+
+def test_empty_trace_does_not_steal_softmax_mass(monkeypatch):
+    """剔除空 trace 之后，其余候选的分值与 loss 必须与"它压根没出现过"完全一致。
+
+    这就是这条 guard 的全部意义：空 trace 若以 S=0 入池，会稀释真正该学的候选。
+    """
+    real = _FakeCandidate([80, 200], "loop", indices=[0])
+    samples, batch = two_sample_batch()
+    config = enabled_config()
+
+    patch_decoder(monkeypatch, [real])
+    without, metrics_without = trajectory_set_loss(
+        log_prob_row(batch), batch, config
+    )
+    patch_decoder(
+        monkeypatch,
+        [_FakeCandidate([80, 201], "broken", "ambiguous forced step", indices=[]), real],
+    )
+    with_empty, metrics_with = trajectory_set_loss(
+        log_prob_row(batch), batch, config
+    )
+
+    assert value(with_empty) == pytest.approx(value(without))
+    assert metrics_with["failure_mass"] == pytest.approx(metrics_without["failure_mass"])
+    assert metrics_with["num_candidates"] == pytest.approx(
+        metrics_without["num_candidates"]
+    )
+    # 唯一的变化是"被剔除了几条"这件事本身被记下来了
+    assert metrics_with["raw_no_decision"] == pytest.approx(1.0)
+    assert metrics_without["raw_no_decision"] == pytest.approx(0.0)
+
+
+def test_gt_is_kept_even_when_it_has_no_decisions(monkeypatch):
+    """GT 永远进池 —— 它是监督目标，不走 miner 的剔除逻辑。
+
+    GT 一个 active decision 都没有时 ``S(GT)=0`` 在语义上是对的（forced 路径的
+    概率恒为 1），此时这个样本对 L_traj 贡献恰好 0，不会把 loss 带偏。
+    """
+    patch_decoder(monkeypatch, [])
+    samples, batch = two_sample_batch()
+    # 把 GT 的 target 全设成 NULL -> build_gt_trajectory 得到空 indices
+    batch.target_candidate.fill_(0)
+    batch.candidate_is_null.fill_(True)
+    loss, metrics = trajectory_set_loss(
+        uniform_log_prob(batch), batch, enabled_config()
+    )
+    assert value(loss) == pytest.approx(0.0, **ZERO)
+    assert metrics["num_candidates"] == pytest.approx(1.0)
+    assert metrics["num_success"] == pytest.approx(1.0)
+
+
+def test_raw_no_decision_is_a_declared_log_field():
+    """新指标键必须同时存在于 METRIC_KEYS 与 RecurrentLossOutput 里。"""
+    assert "raw_no_decision" in METRIC_KEYS
+    import dataclasses
+
+    fields = {field.name for field in dataclasses.fields(RecurrentLossOutput)}
+    assert "traj_raw_no_decision" in fields
 
 
 # ---------------------------------------------------------------------------
