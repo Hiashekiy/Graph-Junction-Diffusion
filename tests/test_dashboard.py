@@ -29,6 +29,44 @@ class _TinyGraph:
         return frozenset((source, target)) in self.edges
 
 
+def test_dataset_coords_file_follows_the_dataset_not_the_run(tmp_path: Path) -> None:
+    """地理底图的坐标文件按**数据集**解析，不按 run。
+
+    成都用 ChengDu.pkl、西安用 XiAn.pkl，两份 OSMnx 存档是两套节点编号空间：
+    按 run 取坐标会让另一个城市的样本一个点都查不到，整样本只能退回弹簧布局。
+    来源链是「数据集目录的 metadata.json -> 生成它的 config -> data.coords_file」。
+    """
+    from dashboard.server import dataset_coords_file
+
+    graph_dir = tmp_path / "data" / "didi" / "graph"
+    configs = tmp_path / "configs"
+    configs.mkdir(parents=True)
+    (configs / "didi_xian.yaml").write_text(
+        "data:\n  coords_file: data/didi/raw/xian/XiAn.pkl\n", encoding="utf-8"
+    )
+    for city, config in (("chengdu", "configs/missing.yaml"), ("xian", "configs/didi_xian.yaml")):
+        folder = graph_dir / city
+        folder.mkdir(parents=True)
+        (folder / "test_1000.pkl").write_bytes(b"data")
+        (folder / "metadata.json").write_text(
+            json.dumps({"config": config, "data_root": f"data/didi/raw/{city}"}),
+            encoding="utf-8",
+        )
+    # 没 metadata 的数据集（旧产物）：空串 -> 面板退回弹簧布局
+    bare = graph_dir / "bare"
+    bare.mkdir(parents=True)
+    (bare / "test_1000.pkl").write_bytes(b"data")
+
+    datasets = discover_datasets(tmp_path)
+    assert dataset_coords_file(tmp_path, datasets["didi/graph/xian/test_1000.pkl"]) == (
+        "data/didi/raw/xian/XiAn.pkl"
+    )
+    # 排序上 bare 排在 chengdu/xian 之前，所以它拿到了裸文件名做 id
+    assert dataset_coords_file(tmp_path, datasets["test_1000.pkl"]) == ""
+    # metadata 指向的 config 不存在 -> 空串，而且不抛异常
+    assert dataset_coords_file(tmp_path, datasets["didi/graph/chengdu/test_1000.pkl"]) == ""
+
+
 def test_dashboard_discovers_nested_runs_and_datasets(tmp_path: Path) -> None:
     run = tmp_path / "outputs" / "runs" / "family" / "run-a"
     run.mkdir(parents=True)

@@ -559,22 +559,60 @@ def _load_pickled_graph(path: Path) -> Any:
     return payload
 
 
-def load_geo_layout(
-    root: Path, run: RunInfo, cache: Dict[str, Optional[GeoLayout]]
-) -> Optional[GeoLayout]:
-    """按 run 拉一次真实经纬度底图；失败/不适用返回 ``None``（并缓存这个结论）。
+def dataset_coords_file(root: Path, dataset: "DatasetInfo") -> str:
+    """该**数据集**对应的 OSMnx 坐标文件（相对 root）；查不到返回空串。
 
-    只有滴滴（``data.source: didi_chengdu``）这类真实城市图才有坐标：合成图是随机
-    生成的，没有任何地理位置可言，面板退回弹簧布局。
+    为什么必须按数据集而不是按 run 取坐标：成都是 ChengDu.pkl、西安是 XiAn.pkl，
+    两份 OSMnx 存档是**两套节点编号空间**。拿成都的坐标去查西安样本一个都查不到，
+    _local_to_global_positions 会整样本返回 None，面板只能退回弹簧布局 ——
+    真实路网数据集就白瞎了（接西安数据时真实踩到）。
+
+    来源链：数据集目录里的 metadata.json 记着生成它的 config，那份 config 的
+    data.coords_file 才是这座城市的坐标文件。没有 metadata 的旧数据集返回空串，
+    行为与改动前一致。
     """
-    if not (run.coords_file and run.data_dir):
-        return None
-    if run.id in cache:
-        return cache[run.id]
+    meta_path = dataset.path.parent / "metadata.json"
+    if not meta_path.is_file():
+        return ""
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    config_name = str(metadata.get("config", "") or "")
+    if not config_name:
+        return ""
+    config_path = Path(config_name)
+    if not config_path.is_absolute():
+        config_path = root / config_path
+    if not config_path.is_file():
+        return ""
+    try:
+        from src.utils.config import load_config
+
+        coords = load_config(config_path).get("data.coords_file", "")
+    except Exception:  # 配置坏了只该让面板退回弹簧布局，不该 500
+        return ""
+    return str(coords) if coords else ""
+
+
+def load_geo_layout(
+    root: Path, dataset: "DatasetInfo", cache: Dict[str, Optional[GeoLayout]]
+) -> Optional[GeoLayout]:
+    """按**数据集**拉一次真实经纬度底图；失败/不适用返回 None（并缓存这个结论）。
+
+    只有滴滴这类真实城市图才有坐标：合成图是随机生成的，没有任何地理位置可言，
+    面板退回弹簧布局。底图用**数据集自己目录**里的 graph_global.pkl，不是 run 的
+    —— 否则跨城市选数据集会拿错路网（成都的图配西安的样本）。
+    """
+    if dataset.id in cache:
+        return cache[dataset.id]
     # 先写 None：坐标文件缺失/损坏时不要每次请求都重试一遍几百 MB 的反序列化
-    cache[run.id] = None
-    coords_path = root / run.coords_file
-    graph_path = root / run.data_dir / "graph_global.pkl"
+    cache[dataset.id] = None
+    coords_file = dataset_coords_file(root, dataset)
+    if not coords_file:
+        return None
+    coords_path = root / coords_file
+    graph_path = dataset.path.parent / "graph_global.pkl"
     if not coords_path.is_file() or not graph_path.is_file():
         return None
     try:
@@ -606,11 +644,10 @@ def load_geo_layout(
         street_edges=street_edges,
         lat0=lat0,
         coverage=float(stats.get("coverage", 0.0)),
-        source=run.coords_file,
+        source=coords_file,
     )
-    cache[run.id] = layout
+    cache[dataset.id] = layout
     return layout
-
 
 def _local_to_global_positions(
     sample: Any, layout: GeoLayout
@@ -1090,13 +1127,14 @@ class DashboardService:
             payload["markdown"] = text
         return payload
 
-    def geo_layout(self, run_id: str) -> Optional[GeoLayout]:
-        """该 run 的真实地理底图；合成模型返回 ``None``。"""
-        run = self.runs.get(run_id)
-        if run is None:
+    def geo_layout(self, dataset_id: str) -> Optional[GeoLayout]:
+        """该**数据集**的真实地理底图；合成图 / 无坐标的数据集返回 None。"""
+        dataset = self.datasets.get(dataset_id)
+        if dataset is None:
             return None
         with self._lock:
-            return load_geo_layout(self.root, run, self._geo_cache)
+            return load_geo_layout(self.root, dataset, self._geo_cache)
+
 
     def _dataset(self, dataset_id: str) -> Any:
         info = self.datasets.get(dataset_id)
@@ -1258,7 +1296,7 @@ class DashboardService:
                     "graph": _graph_payload(
                         sample,
                         geo_payload(sample, layout)
-                        if (layout := self.geo_layout(run_id)) is not None
+                        if (layout := self.geo_layout(dataset_id)) is not None
                         else None,
                     ),
                     "routes": routes,

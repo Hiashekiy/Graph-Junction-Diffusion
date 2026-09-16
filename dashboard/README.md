@@ -48,8 +48,14 @@ E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py --no-browser
 
 选中 `didi_chengdu` 时，路径页会切成**真实地理模式**：
 
-- 浅灰细线 = 整张成都路网（OSMnx，2891 节点 / 4403 边）；稍亮一档的蓝灰线 = 该样本的
-  OD corridor 子图（模型真正看到的那张图）；彩线 = 模型解出来的路线。
+- 浅灰细线 = 整张城市路网（OSMnx，成都 2891 节点 / 4403 边、西安 2563 / 3893）；
+  稍亮一档的蓝灰线 = 该样本的 OD corridor 子图（模型真正看到的那张图）；
+  彩线 = 模型解出来的路线。
+- **底图按数据集解析，不按 run**（2026-09-16）：坐标文件与 `graph_global.pkl` 都取自
+  **数据集自己**。成都 `ChengDu.pkl`、西安 `XiAn.pkl` 是两套**节点编号空间**，按 run 取
+  坐标会让另一个城市的样本一个点都查不到、整样本退回弹簧布局（接西安数据时真实踩到）。
+  来源链：数据集目录的 `metadata.json` → 生成它的 config → `data.coords_file`；
+  没有 metadata 的旧数据集返回空串、行为与改动前一致。
 - **形状不会被拉伸**：经度方向按 `cos(lat0)`（成都 ≈ 0.81）校正后与纬度同尺度，
   再按面板长宽比 letterbox。后端 `PANEL_WIDTH/HEIGHT/MARGIN` 与前端
   `GRAPH_WIDTH/HEIGHT/MARGIN` 必须一致，`tests/test_dashboard.py` 里有一条静态比对
