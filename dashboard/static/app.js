@@ -17,9 +17,6 @@ const state = {
   routeGraphics: [],
   //: 按"完成步数"分组的路线下标（strict 束搜索的时序），供"按搜索顺序"播放用。
   searchGroups: [],
-  //: 自适应视野：当前 viewBox / 屏幕像素与用户单位的比值（1 = 全图）。
-  viewBox: null,
-  viewScale: 1,
   //: 上一次画到的进度，改视野/玩家切换后用来原位重画，而不是从零重播。
   lastProgress: 0,
   view: "path",
@@ -486,89 +483,18 @@ function graphIsGeo() {
   return state.pathData?.graph?.geo === true;
 }
 
-//: 自适应视野最多放大到几倍 —— 再大就只剩一条线，看不出路网上下文。
-const MAX_FIT_ZOOM = 6;
-
 /**
- * 让文字保持**屏幕尺寸不变**：字号按 1/scale 缩回。
+ * 节点半径。
  *
- * 必须写 inline style：CSS 规则的优先级高于 SVG 表现属性，而 `.node-label` 的
- * font-size 正是 CSS 规则，直接 setAttribute 会被它盖掉。
- */
-function scaleText(element, base) {
-  if (!element) return;
-  const scale = state.viewScale > 0 ? state.viewScale : 1;
-  element.style.fontSize = `${(base / scale).toFixed(2)}px`;
-}
-
-/**
- * 自适应视野：把 viewBox 收到「显示出来的路线 + GT」的包围盒上。
- *
- * 为什么需要：真实 corridor 有 900~2900 个节点，而一条路线只走过其中几十个 ——
- * 全图铺满画布时路线只占几个像素、节点糊成一片白点，越密越没法看。
- * 收紧 viewBox 之后 SVG **按比例放大一切**：节点圆点、路线线宽、并行车道间距
- * 一起变大（这正是想要的效果）。只有两样要单独交代：
- *
- * * 文字：按 1/scale 缩回，保持屏幕字号（否则放大 5 倍后标签会盖满画面）；
- * * 真实路网底图：`.street-edge` 已经是 `vector-effect: non-scaling-stroke`，
- *   放大后仍是细线，不会把画面压死。
- *
- * `mode = full` 时恢复整幅画布，与改动前逐位一致。
- */
-function applyViewport(svg, points, texts) {
-  const mode = $("#zoom-mode") ? $("#zoom-mode").value : "full";
-  let box = {x: 0, y: 0, width: GRAPH_WIDTH, height: GRAPH_HEIGHT};
-  if (mode === "fit" && points.length > 1) {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    points.forEach((point) => {
-      minX = Math.min(minX, point.x);
-      maxX = Math.max(maxX, point.x);
-      minY = Math.min(minY, point.y);
-      maxY = Math.max(maxY, point.y);
-    });
-    // 留白：线宽和圆点都在包围盒外沿，贴边会看不全
-    const padX = Math.max(16, (maxX - minX) * 0.10);
-    const padY = Math.max(16, (maxY - minY) * 0.10);
-    let width = (maxX - minX) + padX * 2;
-    let height = (maxY - minY) + padY * 2;
-    // 必须保持画布长宽比，否则 preserveAspectRatio 会再叠一层留白
-    const aspect = GRAPH_WIDTH / GRAPH_HEIGHT;
-    if (width / height < aspect) width = height * aspect; else height = width / aspect;
-    const scale = Math.max(1, Math.min(GRAPH_WIDTH / width, MAX_FIT_ZOOM));
-    width = GRAPH_WIDTH / scale;
-    height = GRAPH_HEIGHT / scale;
-    box = {
-      x: (minX + maxX) / 2 - width / 2,
-      y: (minY + maxY) / 2 - height / 2,
-      width,
-      height
-    };
-  }
-  svg.setAttribute("viewBox",
-    `${box.x.toFixed(2)} ${box.y.toFixed(2)} ${box.width.toFixed(2)} ${box.height.toFixed(2)}`);
-  state.viewBox = box;
-  state.viewScale = GRAPH_WIDTH / box.width;
-  (texts || []).forEach((entry) => {
-    scaleText(entry.element, entry.base);
-    // 标签的**偏移**同样是用户单位：不按 1/scale 缩回的话，放大 6 倍后标签会飘到
-    // 节点上方 78px，和它标注的节点对不上号。
-    if (entry.y != null && entry.dy != null) {
-      entry.element.setAttribute("y", (entry.y - entry.dy / state.viewScale).toFixed(2));
-    }
-  });
-  return box;
-}
-
-/**
- * 节点半径。地理模式下 corridor 有 100~350 个节点、其中绝大多数是 decision：
- * 把每个都画成 r=8 的圆会直接糊成一团，底下的真实路网反而看不见了。所以普通节点
- * 不画、decision 画小圈，只有 S/G 保持醒目。合成图维持原来的 5 / 8。
+ * 真实 corridor 有 900~2900 个节点、绝大多数是 decision：画大了会直接糊成一片白点，
+ * 把路线和真实路网都盖住。所以：普通节点不画、decision 画小圈、只有 S/G 保持醒目；
+ * 合成图也同步缩小（3.5 / 5.5）。
  */
 function nodeRadius(kind, active = false) {
-  if (!graphIsGeo()) return kind === "ordinary" ? 5 : 8;
-  if (kind === "start" || kind === "goal") return 6;
-  if (kind === "decision") return active ? 3.2 : 2.4;
-  return active ? 2.4 : 0;
+  if (!graphIsGeo()) return kind === "ordinary" ? 3.5 : 5.5;
+  if (kind === "start" || kind === "goal") return 5;
+  if (kind === "decision") return active ? 2.2 : 1.6;
+  return active ? 1.6 : 0;
 }
 
 /** 地理模式下 200 个 decision 标签会盖满整张图；只留 S/G。 */
@@ -598,36 +524,26 @@ function renderStreetBasemap(layer, graph) {
  *
  * 没有它的话，"真实经纬度底图"就只是一堆灰线 —— 看不出这段路是 300 米还是 3 公里。
  */
-function renderScaleBar(svg, geo, box) {
+function renderScaleBar(svg, geo) {
   const kmPerUnit = geo.km_per_x_unit / INNER_WIDTH;
   if (!(kmPerUnit > 0)) return;
-  // 自适应视野下"可视区"不等于整幅画布，比例尺必须跟着可视区走，
-  // 否则一收紧 viewBox 它就跑到画面外了。
-  const view = box && box.width > 0
-    ? box
-    : {x: 0, y: 0, width: GRAPH_WIDTH, height: GRAPH_HEIGHT};
-  const scale = GRAPH_WIDTH / view.width;   // 屏幕像素 / 用户单位
-  const full = view.width >= GRAPH_WIDTH;
   const NICE_KM = [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100];
-  const target = 150 / scale;               // 想在**屏幕上**占约 150px
+  const target = 150;                       // 想要的比例尺长度（用户单位）
   let km = NICE_KM[NICE_KM.length - 1];
   for (const candidate of NICE_KM) {
     if (candidate / kmPerUnit <= target * 1.35) { km = candidate; break; }
   }
   const length = km / kmPerUnit;
-  if (!(length > 8 / scale && length < view.width * 0.6)) return;
-  const tick = 5 / scale;
-  // 全图模式下与改动前逐位一致；自适应模式下贴在可视区左下角
-  const x = view.x + (full ? GRAPH_MARGIN : 0) + 8 / scale;
-  const y = full ? GRAPH_HEIGHT - GRAPH_MARGIN + 18 : view.y + view.height - 18 / scale;
+  if (!(length > 8 && length < INNER_WIDTH)) return;
+  const x = GRAPH_MARGIN + 8;
+  const y = GRAPH_HEIGHT - GRAPH_MARGIN + 18;
   const group = svgEl("g", {class: "scale-bar", "aria-hidden": "true"});
   group.append(svgEl("line", {x1: x, y1: y, x2: x + length, y2: y}));
-  group.append(svgEl("line", {x1: x, y1: y - tick, x2: x, y2: y + tick}));
-  group.append(svgEl("line", {x1: x + length, y1: y - tick, x2: x + length, y2: y + tick}));
-  const label = svgEl("text", {x: x + length / 2, y: y - 9 / scale, "text-anchor": "middle"});
+  group.append(svgEl("line", {x1: x, y1: y - 5, x2: x, y2: y + 5}));
+  group.append(svgEl("line", {x1: x + length, y1: y - 5, x2: x + length, y2: y + 5}));
+  const label = svgEl("text", {x: x + length / 2, y: y - 9, "text-anchor": "middle"});
   label.textContent = km >= 1 ? `${km} km` : `${Math.round(km * 1000)} m`;
   group.append(label);
-  scaleText(label, 11);
   svg.append(group);
 }
 
@@ -824,8 +740,6 @@ function renderGraph() {
   const data = state.pathData;
   const svg = $("#graph");
   svg.innerHTML = "";
-  // 自适应视野下需要按 1/scale 缩回字号的文字元素（节点标签 / 比例尺）
-  const focusTexts = [];
   const geo = data.graph.geo === true;
   const coordinates = graphCoordinates(data);
 
@@ -855,8 +769,6 @@ function renderGraph() {
     const point = coordinates.get(node.id);
     const label = svgEl("text", {x: point.x, y: point.y - 13, class: "node-label"});
     label.textContent = nodeLabelText(node.kind, node.id);
-    // 自适应视野下字号与偏移都要按 1/scale 缩回，先把基准值记下来
-    focusTexts.push({element: label, base: 10, y: point.y, dy: 13});
     return label;
   };
   // 背景节点圆点：真实 corridor 有 900~2900 个节点，全画成小圆会糊成一片白点，
@@ -949,15 +861,7 @@ function renderGraph() {
   svg.append(activeNodeLayer);
   svg.append(labelLayer);
   svg.append(headLayer);
-  // 视野必须在画比例尺**之前**定下来：比例尺要贴在可视区左下角，而不是整幅画布
-  const focusPoints = [];
-  data.routes.forEach((route) => route.nodes.forEach((id) => {
-    const point = coordinates.get(id);
-    if (point) focusPoints.push(point);
-  }));
-  if ($("#show-gt").checked) gtPoints.forEach((point) => focusPoints.push(point));
-  const viewport = applyViewport(svg, focusPoints, focusTexts);
-  if (geo) renderScaleBar(svg, data.graph, viewport);
+  if (geo) renderScaleBar(svg, data.graph);
 
   state.routeGraphics.forEach((graphic) => {
     const first = graphic.segments[0];
@@ -1015,11 +919,6 @@ function renderDiffusionGraph() {
   const data = state.pathData;
   const svg = $("#graph");
   svg.innerHTML = "";
-  // 路径视图可能把 viewBox 收紧过（自适应视野）；扩散视图必须复位，
-  // 否则它的 caption / 节点会落到可视区之外。
-  svg.setAttribute("viewBox", `0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`);
-  state.viewScale = 1;
-  state.viewBox = null;
   const coordinates = graphCoordinates(data);
   svg._diffusionCoordinates = coordinates;
 
@@ -1455,7 +1354,6 @@ function bindEvents() {
     renderGraph();
     drawAnimation(state.duration * keep);
   };
-  $("#zoom-mode").addEventListener("change", redrawKeepingProgress);
   $("#node-mode").addEventListener("change", redrawKeepingProgress);
   $("#show-gt").addEventListener("change", () => { const gt = $("#gt-path"); if (gt) gt.hidden = !$("#show-gt").checked; });
   $("#view-path").addEventListener("click", () => setGraphView("path"));

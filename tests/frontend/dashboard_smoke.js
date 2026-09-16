@@ -277,48 +277,7 @@ function runScenario(scenario) {
           elementFor("#path-status").textContent);
     vm.runInContext("document.querySelector('#anim-mode').value = 'length';", context);
 
-    // ---- 7) 自适应视野 -----------------------------------------------------
-    // corridor 有上千节点、路线只走几十个；全图铺满时路线只占几个像素。
-    // viewBox 要收紧到路线包围盒上，同时文字按 1/scale 缩回保持屏幕字号。
-    stage = "autoZoom";
-    vm.runInContext(`
-      document.querySelector('#zoom-mode').value = 'full';
-      renderGraph();
-    `, context);
-    const fullBox = vm.runInContext(
-      "document.querySelector('#graph').getAttribute('viewBox').split(' ').map(Number)", context);
-    check("全图模式 = 整幅画布",
-          fullBox[0] === 0 && fullBox[1] === 0 && fullBox[2] === 1000 && fullBox[3] === 620,
-          fullBox.join(" "));
-
-    // 直接喂一个已知的小包围盒：60×40 的点集 -> 长宽比归一后仍远小于画布，
-    // 所以应该撞到 6 倍上限；这是与 fixture 规模无关的精确断言。
-    // 注意必须先切到 fit —— applyViewport 读的就是 #zoom-mode。
-    const fit = JSON.parse(vm.runInContext(`
-      document.querySelector('#zoom-mode').value = 'fit';
-      const svg = document.querySelector('#graph');
-      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-      applyViewport(svg, [{x: 400, y: 300}, {x: 460, y: 340}],
-                    [{element: label, base: 10, y: 300, dy: 13}]);
-      JSON.stringify({box: svg.getAttribute('viewBox'), scale: state.viewScale,
-                      font: label.style.fontSize, labelY: label.getAttribute('y')});
-    `, context));
-    const fitWidth = Number(fit.box.split(" ")[2]);
-    check("自适应视野把画面收到包围盒上", fitWidth > 0 && fitWidth < 1000, fit.box);
-    check("放大倍率夹在 6 倍以内", Math.abs(fit.scale - 6) < 0.01, String(fit.scale));
-    check("文字按 1/scale 缩回保持屏幕字号",
-          Math.abs(parseFloat(fit.font) - 10 / 6) < 0.05, fit.font);
-    check("标签偏移同样按 1/scale 缩回（否则放大后会飘离节点）",
-          Math.abs(parseFloat(fit.labelY) - (300 - 13 / 6)) < 0.05, fit.labelY);
-
-    vm.runInContext(`
-      document.querySelector('#zoom-mode').value = 'fit';
-      setGraphView('path');
-    `, context);
-    const liveScale = vm.runInContext("state.viewScale", context);
-    check("真实样本上自适应视野不小于 1 倍（不会比全图还小）", liveScale >= 1, String(liveScale));
-
-    // ---- 8) 节点显示：默认"仅路线" -----------------------------------------
+    // ---- 7) 节点显示 -----------------------------------------
     // 真实 corridor 上千个节点全画成小圆会糊成一片白点，把路线和路网都盖住。
     stage = "nodeDisplay";
     const countNodeCircles = () => vm.runInContext(`
@@ -351,7 +310,7 @@ function runScenario(scenario) {
     check("「全关」一个节点圆点都不画", noNodeCircles === 0, String(noNodeCircles));
     vm.runInContext("document.querySelector('#node-mode').value = 'route'; renderGraph();", context);
 
-    // ---- 9) 切回路径视图 -------------------------------------------------
+    // ---- 8) 切回路径视图 -------------------------------------------------
     stage = "backToPath";
     vm.runInContext("setGraphView('path');", context);
     check("setGraphView('path') 不抛异常", true);

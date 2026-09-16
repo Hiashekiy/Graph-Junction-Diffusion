@@ -130,7 +130,7 @@ label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; co
 .forced-edge { stroke: var(--accent-2); stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; opacity: .8; }
 .diffusion-caption { fill: var(--text); font-size: 12px; }
 .diffusion-caption.muted { fill: var(--muted); font-size: 10px; }
-.node { stroke: #090b10; stroke-width: 2; fill: #6f7688; }
+.node { stroke: #090b10; stroke-width: 1.4; fill: #6f7688; }
 .node.decision { fill: #111520; stroke: #aab1c2; stroke-width: 2.2; }
 /* Decision field: a fork that answers NULL is doing nothing this step, so it is
    dimmed; only forks that committed to a Branch light up in the mode colour. */
