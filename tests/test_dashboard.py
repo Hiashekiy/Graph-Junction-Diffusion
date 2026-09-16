@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 from dashboard.server import (
     DashboardService,
     GeoLayout,
@@ -81,6 +83,49 @@ def test_catalog_exposes_dataset_group_for_the_picker(tmp_path: Path) -> None:
     assert entry["group"] == "unweighted"
     assert entry["relative"] == "data/unweighted/unweighted_train.pkl"
     assert entry["label"] == "unweighted train"
+
+
+def test_route_payload_carries_the_search_depth() -> None:
+    """``depth`` 必须进 payload —— 面板的 rank 是**概率序**，不是到达顺序。
+
+    strict 束搜索按深度逐层展开，``PathCandidate.num_branches`` 就是"搜索第几步
+    完成"。少了这个字段，图例里的 ``#1`` 就只能被读成"最先到达"。
+    """
+    graph = _TinyGraph([(5, 8), (8, 13)])
+    candidate = SimpleNamespace(
+        nodes=[5, 8, 13], status="goal", reason="", log_prob=-1.5,
+        num_branches=7, path_cost=12.0, cost=2,
+    )
+    payload = _route_payload(candidate, 1, graph)
+    assert payload["depth"] == 7
+
+    # 单路径解码（decode_flat）没有 num_branches -> None，前端据此退回"按长度"播放
+    flat = SimpleNamespace(path=[5, 8, 13], status="goal", reason="")
+    assert _route_payload(flat, 1, graph)["depth"] is None
+
+
+def test_annotate_found_order_sorts_by_depth_not_by_rank() -> None:
+    """``found_index`` = 完成先后（depth 升序），与概率序的 ``rank`` 无关。
+
+    同 depth 的多条路线是**同一轮**毕业的，按 rank 稳定排序（谁概率高谁在前）。
+    """
+    from dashboard.server import annotate_found_order
+
+    routes = [
+        {"rank": 1, "depth": 40},
+        {"rank": 2, "depth": 12},
+        {"rank": 3, "depth": 40},
+        {"rank": 4, "depth": 12},
+    ]
+    span = annotate_found_order(routes)
+
+    assert [route["found_index"] for route in routes] == [3, 1, 4, 2]
+    assert span == {"first_found_depth": 12, "last_found_depth": 40}
+
+    # 单路径解码：depth 全 None -> 不标注、范围为空
+    flat = [{"rank": 1, "depth": None}]
+    assert annotate_found_order(flat) == {"first_found_depth": None, "last_found_depth": None}
+    assert "found_index" not in flat[0]
 
 
 def test_route_payload_uses_and_validates_physical_edges() -> None:
@@ -560,3 +605,177 @@ def test_frontend_defaults_use_the_current_names() -> None:
         assert stale not in script, stale
     assert "controlled_unweighted" in script
     assert "unweighted_test.pkl" in script
+
+
+# ---------------------------------------------------------------------------
+# 多分支解码口径：面板默认必须复现"评测标尺"
+# ---------------------------------------------------------------------------
+def test_panel_ruler_defaults_match_evaluate_script() -> None:
+    """面板的"评测标尺"默认值必须与 ``scripts/evaluate.py`` 逐键一致。
+
+    面板存在的意义就是**复现评测口径**（验证 / 选 best.pt / 最终测试共用的那套）。
+    两份常量一旦漂移，面板就变成第四把尺子 —— 而这次改动之前的默认值（历史 2/64）
+    正是这么来的。这条测试让"改了一边忘了另一边"直接失败。
+    """
+    import sys as _sys
+
+    scripts = PROJECT_ROOT / "scripts"
+    if str(scripts) not in _sys.path:
+        _sys.path.insert(0, str(scripts))
+    import evaluate  # noqa: PLC0415
+
+    import dashboard.server as server  # noqa: PLC0415
+
+    assert server.RULER_DEFAULTS == evaluate._DECODE_RULER_DEFAULTS
+
+
+def _ruler_run(**ruler):
+    """造一个只带 ruler 的 RunInfo（resolve_multi_decode 是纯函数）。"""
+    from dashboard.server import DecodeRuler, RunInfo
+
+    return RunInfo(
+        id="r", label="r", path=Path("."), checkpoint=Path("best.pt"),
+        ruler=DecodeRuler(**ruler),
+    )
+
+
+def test_ruler_mode_pins_the_decoder_but_lets_the_budget_be_tuned() -> None:
+    """解码语义固定（strict 三池），**搜索预算可调**。
+
+    面板只保留评测标尺这一套口径；能动的只有 top_k / beam_width。改了之后 note
+    必须写明"手动覆盖"以及标尺原值 —— 否则又会变成"对着一个不是评测口径的数字下结论"。
+    """
+    from dashboard.server import resolve_multi_decode
+
+    run = _ruler_run(decode="multi", strict=True, top_k=2, beam_width=3,
+                     null_policy="stop", declared=True, source="configs/didi_chengdu.yaml")
+
+    # ① 请求没给 -> 用标尺值，note 说清来源
+    same = resolve_multi_decode({"ruler": "ruler"}, run)
+    assert same["mode"] == "ruler"
+    assert same["strict"] is True
+    assert (same["top_k"], same["beam_width"]) == (2, 3)
+    assert same["null_policy"] == "stop"
+    assert same["filter_dead_branches"] is False
+    assert "strict 2/3" in same["note"]
+    assert "手动覆盖" not in same["note"]
+
+    # ② 请求给了就用请求的；strict / null_policy / filter 仍由标尺钉死
+    tuned = resolve_multi_decode(
+        {"ruler": "ruler", "top_k": 4, "beam_width": 16, "null_policy": "skip",
+         "filter_dead_branches": True},
+        run,
+    )
+    assert tuned["strict"] is True                  # 口径不可改
+    assert (tuned["top_k"], tuned["beam_width"]) == (4, 16)
+    assert tuned["null_policy"] == "stop"           # 标尺值优先
+    assert tuned["filter_dead_branches"] is False   # 标尺值优先
+    assert "手动覆盖" in tuned["note"]
+    assert "2/3" in tuned["note"]                   # 标尺原值可查
+
+
+def test_historical_mode_is_gone() -> None:
+    """历史（存活路径表）口径已从面板移除：请求它必须**报错**，而不是被静默接受。
+
+    两个口径在同一份 best.pt 上 GoalHit 差 66 个百分点（0.336 vs 0.996），
+    留着只会让面板变成第四把尺子。
+    """
+    from dashboard.server import resolve_multi_decode
+
+    run = _ruler_run(decode="multi", strict=True, top_k=2, beam_width=3)
+    with pytest.raises(ValueError, match="历史口径已移除"):
+        resolve_multi_decode({"ruler": "historical", "top_k": 4}, run)
+
+
+def test_run_without_a_multi_ruler_falls_back_to_strict_defaults() -> None:
+    """两个 controlled run 的 config 没写 evaluation.decode，标尺是 single。
+
+    这时用 evaluate.py 的兜底默认值，但**仍然是 strict** —— 面板只有一套解码语义，
+    不能因为 config 没写就偷偷退回历史口径（那正是旧面板的问题），
+    只能在 note 里说明"该 run 没有多分支标尺"。
+    """
+    from dashboard.server import resolve_multi_decode
+
+    run = _ruler_run(decode="single", declared=False)
+    options = resolve_multi_decode({"ruler": "ruler"}, run)
+
+    assert options["mode"] == "ruler"
+    assert options["strict"] is True
+    assert (options["top_k"], options["beam_width"]) == (2, 64)
+    assert "没有多分支标尺" in options["note"]
+
+
+def test_multi_decode_options_are_clamped_and_validated() -> None:
+    from dashboard.server import resolve_multi_decode
+
+    run = _ruler_run(decode="multi", strict=True, top_k=2, beam_width=3)
+    assert resolve_multi_decode({"ruler": "ruler", "top_k": 999}, run)["top_k"] == 6
+    assert resolve_multi_decode({"ruler": "ruler", "beam_width": 0}, run)["beam_width"] == 1
+    assert resolve_multi_decode({"ruler": "ruler", "display_paths": 999}, run)["display_paths"] == 24
+    # 标尺本身的值也要夹（config 里写了个离谱的 beam 不能把面板拖死）
+    huge = _ruler_run(decode="multi", strict=True, top_k=2, beam_width=100000)
+    assert resolve_multi_decode({"ruler": "ruler"}, huge)["beam_width"] == 256
+
+    with pytest.raises(ValueError, match="ruler 必须是"):
+        resolve_multi_decode({"ruler": "nope"}, run)
+
+
+def test_ruler_is_parsed_from_the_live_config(tmp_path: Path) -> None:
+    """``evaluation.*`` → DecodeRuler；没写的键落到 evaluate.py 的默认值。"""
+    _write_run(
+        tmp_path,
+        "didi_chengdu",
+        {"paths": {"data_dir": "data/didi/graph/chengdu"}, "data": {"source": "didi_chengdu"}},
+        live_config=(
+            "data:\n"
+            "  source: didi_chengdu\n"
+            "evaluation:\n"
+            "  decode: multi\n"
+            "  strict_decode: true\n"
+            "  top_k: 2\n"
+            "  beam_width: 3\n"
+            "paths:\n"
+            "  data_dir: data/didi/graph/chengdu\n"
+        ),
+    )
+    ruler = discover_runs(tmp_path)["didi_chengdu"].ruler
+
+    assert ruler.decode == "multi"
+    assert ruler.strict is True
+    assert (ruler.top_k, ruler.beam_width) == (2, 3)
+    assert ruler.declared is True
+    assert ruler.is_multi is True
+    assert ruler.label == "strict 2/3"
+    # null_policy / filter_dead_branches 没写 -> 落到默认值
+    assert ruler.null_policy == "stop"
+    assert ruler.filter_dead_branches is False
+
+
+def test_ruler_reports_single_when_the_config_declares_nothing(tmp_path: Path) -> None:
+    _write_run(
+        tmp_path,
+        "controlled_unweighted",
+        {"paths": {"data_dir": "data/unweighted"}, "data": {}, "model": {}},
+        live_config="paths:\n  data_dir: data/unweighted\n",
+    )
+    ruler = discover_runs(tmp_path)["controlled_unweighted"].ruler
+
+    assert ruler.decode == "single"
+    assert ruler.declared is False
+    assert ruler.is_multi is False
+    assert "single" in ruler.label
+
+
+def test_catalog_exposes_the_ruler_for_the_picker() -> None:
+    """面板靠 catalog 里的 ruler 决定"评测标尺"选项能不能选。"""
+    catalog = DashboardService(PROJECT_ROOT).catalog()
+    for model in catalog["models"]:
+        ruler = model["ruler"]
+        assert set(ruler) >= {"decode", "strict", "top_k", "beam_width", "multi", "label"}
+
+    if "didi_chengdu" in {model["id"] for model in catalog["models"]}:
+        didi = next(m for m in catalog["models"] if m["id"] == "didi_chengdu")
+        # 真实数据的标尺就是 README 里那个 "Strict 2/3"
+        assert didi["ruler"]["multi"] is True
+        assert didi["ruler"]["strict"] is True
+        assert (didi["ruler"]["top_k"], didi["ruler"]["beam_width"]) == (2, 3)

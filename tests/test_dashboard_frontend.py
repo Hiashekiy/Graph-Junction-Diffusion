@@ -290,7 +290,32 @@ def frontend_payload(sample):
         },
         "diffusion": _diffusion_payload(sample, trace, batch.candidate_owner),
         "contrast": None,
+        "ruler": {"mode": "ruler", "strict": True, "top_k": 2, "beam_width": 3,
+                  "note": "评测标尺 strict 2/3（configs/didi_chengdu.yaml）"},
     }
+
+
+#: 两种模型口径各一份：有 strict 多分支标尺的滴滴，和只有 single 兜底的合成模型
+MULTI_RULER_CATALOG = {
+    "models": [{
+        "id": "didi_chengdu", "label": "didi_chengdu", "kind": "didi",
+        "ruler": {"decode": "multi", "strict": True, "top_k": 2, "beam_width": 3,
+                  "declared": True, "multi": True, "source": "configs/didi_chengdu.yaml",
+                  "label": "strict 2/3"},
+    }],
+    "datasets": [], "reports": [],
+}
+
+SINGLE_RULER_CATALOG = {
+    "models": [{
+        "id": "controlled_unweighted", "label": "controlled_unweighted",
+        "kind": "unweighted",
+        "ruler": {"decode": "single", "strict": False, "top_k": 2, "beam_width": 64,
+                  "declared": False, "multi": False, "source": "configs/controlled_unweighted.yaml",
+                  "label": "single（该 run 没有多分支标尺）"},
+    }],
+    "datasets": [], "reports": [],
+}
 
 
 def geo_variant(payload: dict) -> dict:
@@ -333,8 +358,9 @@ def test_diffusion_view_autoplays_in_a_real_js_runtime(manual_sample, tmp_path: 
     base = frontend_payload(manual_sample)
     assert len(base["diffusion"]["frames"]) > 2, "帧数太少，测不出前进"
     scenarios = [
-        {"name": "合成图", "payload": base},
-        {"name": "地理模式", "payload": geo_variant(base)},
+        {"name": "合成图", "payload": base, "catalog": MULTI_RULER_CATALOG},
+        {"name": "地理模式", "payload": geo_variant(base), "catalog": MULTI_RULER_CATALOG},
+        {"name": "单路径标尺的 run", "payload": base, "catalog": SINGLE_RULER_CATALOG},
     ]
 
     payload_path = tmp_path / "payloads.json"
@@ -363,5 +389,8 @@ def test_diffusion_view_autoplays_in_a_real_js_runtime(manual_sample, tmp_path: 
         [f"error={result['error']}"]
         + [f"  x {item['name']} {item['detail']}" for item in failed]
     )
-    # 两个场景都要真的跑过（防止 harness 悄悄少跑一个）
-    assert {item["name"] for item in result["scenarios"]} == {"合成图", "地理模式"}
+    # 三个场景都要真的跑过（防止 harness 悄悄少跑一个）
+    assert {item["name"] for item in result["scenarios"]} == {
+        "合成图", "地理模式", "单路径标尺的 run",
+    }
+

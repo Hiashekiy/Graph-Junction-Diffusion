@@ -15,6 +15,13 @@ const state = {
   duration: 6000,
   paused: false,
   routeGraphics: [],
+  //: 按"完成步数"分组的路线下标（strict 束搜索的时序），供"按搜索顺序"播放用。
+  searchGroups: [],
+  //: 自适应视野：当前 viewBox / 屏幕像素与用户单位的比值（1 = 全图）。
+  viewBox: null,
+  viewScale: 1,
+  //: 上一次画到的进度，改视野/玩家切换后用来原位重画，而不是从零重播。
+  lastProgress: 0,
   view: "path",
   diffusionMode: "clean",
   diffusionFrame: 0,
@@ -137,6 +144,77 @@ function preferred(items, needle) {
   return items.find((item) => item.id.includes(needle))?.id || items[0]?.id || "";
 }
 
+//: 被解码器**接管**的控件：strict 下 NULL 永远不合法、必死 branch 恒被剔除，
+//: 所以这两个永远置灰。"每次分叉 / 路径表上限"是**可调的搜索预算**，不置灰。
+const RULER_LOCKED_CONTROLS = ["#null-policy", "#filter-dead"];
+
+/** 当前模型有没有多分支标尺。 */
+function currentModelRuler() {
+  return modelById($("#path-model").value)?.ruler || null;
+}
+
+/**
+ * 该 run 的评测标尺给出的搜索预算（top_k / beam_width）与来源说明。
+ *
+ * 没有多分支标尺的 run（两个 controlled 的 config 没写 ``evaluation.decode``）落到
+ * evaluate.py 的兜底默认值 —— 但**仍然是 strict**：面板只有一套解码语义，
+ * 不会因为 config 没写就偷偷换一把尺子。
+ */
+function rulerBudget() {
+  const ruler = currentModelRuler();
+  if (ruler && ruler.multi) {
+    return {
+      top_k: Number(ruler.top_k),
+      beam_width: Number(ruler.beam_width),
+      source: `${ruler.declared ? "config" : "默认"}${ruler.source ? " · " + ruler.source : ""}`,
+      multi: true
+    };
+  }
+  return {top_k: 2, beam_width: 64, source: "", multi: false};
+}
+
+/**
+ * 把「每次分叉 / 路径表上限」铺成该 run 的评测标尺值。
+ *
+ * 只在**换模型**和初始化时调用 —— 放进入 refreshRulerControls 会把用户手调的数字
+ * 每次刷新都抹掉，那就等于没得调。
+ */
+function applyRulerDefaults() {
+  const budget = rulerBudget();
+  $("#top-k").value = String(budget.top_k);
+  $("#beam-width").value = String(budget.beam_width);
+  refreshRulerControls();
+}
+
+/**
+ * 刷新口径提示。
+ *
+ * 面板只有一套解码语义（strict 三池），所以这里不再有"切口径"这回事，只报告
+ * **实际会用的**分叉/路径表上限，以及它是否还等于该 run 的评测标尺。
+ * 面板/报告/评测口径不一致是踩过的坑：调整过就必须写在脸上，不能让人对着图猜。
+ */
+function refreshRulerControls() {
+  const note = $("#ruler-note");
+  RULER_LOCKED_CONTROLS.forEach((selector) => { $(selector).disabled = true; });
+  const budget = rulerBudget();
+  const topK = Number($("#top-k").value);
+  const beam = Number($("#beam-width").value);
+  let text = `strict ${topK}/${beam}`;
+  if (topK !== budget.top_k || beam !== budget.beam_width) {
+    text += `（手动覆盖；该 run 标尺 ${budget.top_k}/${budget.beam_width}）`;
+  } else if (budget.multi) {
+    text += `（${budget.source}）`;
+  } else {
+    text += "（该 run 没有多分支标尺，用默认值）";
+  }
+  note.textContent = text;
+  note.title = budget.multi
+    ? `固定 strict 三池解码：NULL / loop / dead-end 在 top-k 之前 mask、失败路径淘汰。`
+      + `分叉/路径表上限默认取 ${budget.source} 的 ${budget.top_k}/${budget.beam_width}，`
+      + "手动改过就不再等于该 run 的评测标尺。"
+    : "固定 strict 三池解码。该 run 的 config 没写 evaluation.decode，按默认 strict 2/64 跑。";
+}
+
 function modelById(id) {
   return state.catalog.models.find((model) => model.id === id) || null;
 }
@@ -188,6 +266,7 @@ async function initialize() {
     $("#path-dataset").value =
       datasetForModel(modelById($("#path-model").value)) ||
       preferred(state.catalog.datasets, "unweighted_test.pkl");
+    applyRulerDefaults();
     await updateDatasetInfo();
   } catch (error) {
     $("#connection span").textContent = "连接失败";
@@ -265,6 +344,9 @@ async function generatePath() {
       display_paths: Number($("#display-paths").value),
       null_policy: $("#null-policy").value,
       filter_dead_branches: $("#filter-dead").checked,
+      // 面板固定 strict 三池口径（历史口径已移除）；top_k / beam_width 可手动覆盖，
+      // 后端会照用并按 MULTI_LIMITS 夹取，note 里会标注是否偏离该 run 的评测标尺。
+      ruler: "ruler",
       deterministic: $("#deterministic").checked,
       seed: 0,
       include_diffusion: true
@@ -356,7 +438,12 @@ function renderPathInfo() {
     const costText = route.weighted
       ? `${route.cost} 跳 / cost ${Number(route.path_cost).toFixed(1)}`
       : `${route.cost} 跳`;
-    item.innerHTML = `<i style="background:${routeColor(index)}"></i><span>#${route.rank} · ${label} · ${costText}</span>`;
+    // rank 是**概率序**（success 池最后按 log_prob 重排过），不是到达顺序；
+    // 搜索时序必须单独标出来，否则"#1"会被读成"最先到达"。
+    const timing = route.depth != null
+      ? ` · 第 ${route.found_index ?? "?"} 个完成（搜索第 ${route.depth} 步）`
+      : "";
+    item.innerHTML = `<i style="background:${routeColor(index)}"></i><span>#${route.rank} · ${label} · ${costText}${timing}</span>`;
     legend.append(item);
   });
   const reached = data.routes.filter((route) => route.status === "goal").length;
@@ -367,6 +454,8 @@ function renderPathInfo() {
   ];
   if (isReal) bits.push(`corridor rho=${sample.rho ?? "—"}`);
   if (sample.order_id) bits.push(`order ${String(sample.order_id).slice(0, 8)}`);
+  // 这张图到底是按哪把尺子解出来的 —— 面板/报告/评测口径不一致是踩过的坑
+  if (data.ruler && data.ruler.note) bits.push(`口径 ${data.ruler.note}`);
   $("#path-status").textContent = bits.join(" · ");
 }
 
@@ -395,6 +484,79 @@ function graphCoordinates(data) {
 
 function graphIsGeo() {
   return state.pathData?.graph?.geo === true;
+}
+
+//: 自适应视野最多放大到几倍 —— 再大就只剩一条线，看不出路网上下文。
+const MAX_FIT_ZOOM = 6;
+
+/**
+ * 让文字保持**屏幕尺寸不变**：字号按 1/scale 缩回。
+ *
+ * 必须写 inline style：CSS 规则的优先级高于 SVG 表现属性，而 `.node-label` 的
+ * font-size 正是 CSS 规则，直接 setAttribute 会被它盖掉。
+ */
+function scaleText(element, base) {
+  if (!element) return;
+  const scale = state.viewScale > 0 ? state.viewScale : 1;
+  element.style.fontSize = `${(base / scale).toFixed(2)}px`;
+}
+
+/**
+ * 自适应视野：把 viewBox 收到「显示出来的路线 + GT」的包围盒上。
+ *
+ * 为什么需要：真实 corridor 有 900~2900 个节点，而一条路线只走过其中几十个 ——
+ * 全图铺满画布时路线只占几个像素、节点糊成一片白点，越密越没法看。
+ * 收紧 viewBox 之后 SVG **按比例放大一切**：节点圆点、路线线宽、并行车道间距
+ * 一起变大（这正是想要的效果）。只有两样要单独交代：
+ *
+ * * 文字：按 1/scale 缩回，保持屏幕字号（否则放大 5 倍后标签会盖满画面）；
+ * * 真实路网底图：`.street-edge` 已经是 `vector-effect: non-scaling-stroke`，
+ *   放大后仍是细线，不会把画面压死。
+ *
+ * `mode = full` 时恢复整幅画布，与改动前逐位一致。
+ */
+function applyViewport(svg, points, texts) {
+  const mode = $("#zoom-mode") ? $("#zoom-mode").value : "full";
+  let box = {x: 0, y: 0, width: GRAPH_WIDTH, height: GRAPH_HEIGHT};
+  if (mode === "fit" && points.length > 1) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    points.forEach((point) => {
+      minX = Math.min(minX, point.x);
+      maxX = Math.max(maxX, point.x);
+      minY = Math.min(minY, point.y);
+      maxY = Math.max(maxY, point.y);
+    });
+    // 留白：线宽和圆点都在包围盒外沿，贴边会看不全
+    const padX = Math.max(16, (maxX - minX) * 0.10);
+    const padY = Math.max(16, (maxY - minY) * 0.10);
+    let width = (maxX - minX) + padX * 2;
+    let height = (maxY - minY) + padY * 2;
+    // 必须保持画布长宽比，否则 preserveAspectRatio 会再叠一层留白
+    const aspect = GRAPH_WIDTH / GRAPH_HEIGHT;
+    if (width / height < aspect) width = height * aspect; else height = width / aspect;
+    const scale = Math.max(1, Math.min(GRAPH_WIDTH / width, MAX_FIT_ZOOM));
+    width = GRAPH_WIDTH / scale;
+    height = GRAPH_HEIGHT / scale;
+    box = {
+      x: (minX + maxX) / 2 - width / 2,
+      y: (minY + maxY) / 2 - height / 2,
+      width,
+      height
+    };
+  }
+  svg.setAttribute("viewBox",
+    `${box.x.toFixed(2)} ${box.y.toFixed(2)} ${box.width.toFixed(2)} ${box.height.toFixed(2)}`);
+  state.viewBox = box;
+  state.viewScale = GRAPH_WIDTH / box.width;
+  (texts || []).forEach((entry) => {
+    scaleText(entry.element, entry.base);
+    // 标签的**偏移**同样是用户单位：不按 1/scale 缩回的话，放大 6 倍后标签会飘到
+    // 节点上方 78px，和它标注的节点对不上号。
+    if (entry.y != null && entry.dy != null) {
+      entry.element.setAttribute("y", (entry.y - entry.dy / state.viewScale).toFixed(2));
+    }
+  });
+  return box;
 }
 
 /**
@@ -436,26 +598,36 @@ function renderStreetBasemap(layer, graph) {
  *
  * 没有它的话，"真实经纬度底图"就只是一堆灰线 —— 看不出这段路是 300 米还是 3 公里。
  */
-function renderScaleBar(svg, geo) {
+function renderScaleBar(svg, geo, box) {
   const kmPerUnit = geo.km_per_x_unit / INNER_WIDTH;
   if (!(kmPerUnit > 0)) return;
+  // 自适应视野下"可视区"不等于整幅画布，比例尺必须跟着可视区走，
+  // 否则一收紧 viewBox 它就跑到画面外了。
+  const view = box && box.width > 0
+    ? box
+    : {x: 0, y: 0, width: GRAPH_WIDTH, height: GRAPH_HEIGHT};
+  const scale = GRAPH_WIDTH / view.width;   // 屏幕像素 / 用户单位
+  const full = view.width >= GRAPH_WIDTH;
   const NICE_KM = [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 20, 50, 100];
-  const target = 150;                       // 想要的比例尺长度（用户单位）
+  const target = 150 / scale;               // 想在**屏幕上**占约 150px
   let km = NICE_KM[NICE_KM.length - 1];
   for (const candidate of NICE_KM) {
     if (candidate / kmPerUnit <= target * 1.35) { km = candidate; break; }
   }
   const length = km / kmPerUnit;
-  if (!(length > 8 && length < INNER_WIDTH)) return;
-  const x = GRAPH_MARGIN + 8;
-  const y = GRAPH_HEIGHT - GRAPH_MARGIN + 18;
+  if (!(length > 8 / scale && length < view.width * 0.6)) return;
+  const tick = 5 / scale;
+  // 全图模式下与改动前逐位一致；自适应模式下贴在可视区左下角
+  const x = view.x + (full ? GRAPH_MARGIN : 0) + 8 / scale;
+  const y = full ? GRAPH_HEIGHT - GRAPH_MARGIN + 18 : view.y + view.height - 18 / scale;
   const group = svgEl("g", {class: "scale-bar", "aria-hidden": "true"});
   group.append(svgEl("line", {x1: x, y1: y, x2: x + length, y2: y}));
-  group.append(svgEl("line", {x1: x, y1: y - 5, x2: x, y2: y + 5}));
-  group.append(svgEl("line", {x1: x + length, y1: y - 5, x2: x + length, y2: y + 5}));
-  const label = svgEl("text", {x: x + length / 2, y: y - 9, "text-anchor": "middle"});
+  group.append(svgEl("line", {x1: x, y1: y - tick, x2: x, y2: y + tick}));
+  group.append(svgEl("line", {x1: x + length, y1: y - tick, x2: x + length, y2: y + tick}));
+  const label = svgEl("text", {x: x + length / 2, y: y - 9 / scale, "text-anchor": "middle"});
   label.textContent = km >= 1 ? `${km} km` : `${Math.round(km * 1000)} m`;
   group.append(label);
+  scaleText(label, 11);
   svg.append(group);
 }
 
@@ -652,6 +824,8 @@ function renderGraph() {
   const data = state.pathData;
   const svg = $("#graph");
   svg.innerHTML = "";
+  // 自适应视野下需要按 1/scale 缩回字号的文字元素（节点标签 / 比例尺）
+  const focusTexts = [];
   const geo = data.graph.geo === true;
   const coordinates = graphCoordinates(data);
 
@@ -681,11 +855,16 @@ function renderGraph() {
     const point = coordinates.get(node.id);
     const label = svgEl("text", {x: point.x, y: point.y - 13, class: "node-label"});
     label.textContent = nodeLabelText(node.kind, node.id);
+    // 自适应视野下字号与偏移都要按 1/scale 缩回，先把基准值记下来
+    focusTexts.push({element: label, base: 10, y: point.y, dy: 13});
     return label;
   };
+  // 背景节点圆点：真实 corridor 有 900~2900 个节点，全画成小圆会糊成一片白点，
+  // 把路线和路网底图都盖住。默认只画**显示出来的路线经过的节点**（+ S/G）。
+  const nodeMode = $("#node-mode") ? $("#node-mode").value : "all";
   const backgroundNodes = svgEl("g", {"aria-hidden": "true"});
   data.graph.nodes.forEach((node) => {
-    if (nodeRadius(node.kind) > 0) backgroundNodes.append(nodeCircle(node));
+    if (nodeMode === "all" && nodeRadius(node.kind) > 0) backgroundNodes.append(nodeCircle(node));
     if (shouldLabelNode(node.kind)) backgroundNodes.append(nodeLabel(node));
   });
   svg.append(backgroundNodes);
@@ -701,6 +880,18 @@ function renderGraph() {
   const usage = buildEdgeUsage(data.routes);
   const activeNodeIds = new Set(data.routes.flatMap((route) => route.nodes));
   state.routeGraphics = [];
+  // 搜索时序分组：strict 束搜索按深度逐层展开，route.depth 就是"第几轮被找到"，
+  // **同一个 depth 的多条路线是同一轮同时毕业的**。没有 depth（单路径解码 /
+  // 历史口径的残骸）就留空，前端自动退回"按长度"播放。
+  const byDepth = new Map();
+  data.routes.forEach((route, index) => {
+    if (route.depth == null) return;
+    if (!byDepth.has(route.depth)) byDepth.set(route.depth, []);
+    byDepth.get(route.depth).push(index);
+  });
+  state.searchGroups = [...byDepth.keys()]
+    .sort((left, right) => left - right)
+    .map((depth) => ({depth, members: byDepth.get(depth)}));
   svg.append(casingLayer);
   svg.append(routeLayer);
   data.routes.forEach((route, index) => {
@@ -751,14 +942,22 @@ function renderGraph() {
 
   data.graph.nodes.forEach((node) => {
     if (activeNodeIds.has(node.id)) {
-      activeNodeLayer.append(nodeCircle(node, true));
+      if (nodeMode !== "none") activeNodeLayer.append(nodeCircle(node, true));
       if (shouldLabelNode(node.kind)) labelLayer.append(nodeLabel(node));
     }
   });
   svg.append(activeNodeLayer);
   svg.append(labelLayer);
   svg.append(headLayer);
-  if (geo) renderScaleBar(svg, data.graph);
+  // 视野必须在画比例尺**之前**定下来：比例尺要贴在可视区左下角，而不是整幅画布
+  const focusPoints = [];
+  data.routes.forEach((route) => route.nodes.forEach((id) => {
+    const point = coordinates.get(id);
+    if (point) focusPoints.push(point);
+  }));
+  if ($("#show-gt").checked) gtPoints.forEach((point) => focusPoints.push(point));
+  const viewport = applyViewport(svg, focusPoints, focusTexts);
+  if (geo) renderScaleBar(svg, data.graph, viewport);
 
   state.routeGraphics.forEach((graphic) => {
     const first = graphic.segments[0];
@@ -816,6 +1015,11 @@ function renderDiffusionGraph() {
   const data = state.pathData;
   const svg = $("#graph");
   svg.innerHTML = "";
+  // 路径视图可能把 viewBox 收紧过（自适应视野）；扩散视图必须复位，
+  // 否则它的 caption / 节点会落到可视区之外。
+  svg.setAttribute("viewBox", `0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`);
+  state.viewScale = 1;
+  state.viewBox = null;
   const coordinates = graphCoordinates(data);
   svg._diffusionCoordinates = coordinates;
 
@@ -1038,28 +1242,71 @@ function stopAnimation() {
   state.animation = null;
 }
 
+//: "按搜索顺序"播放时，每一组在自己的时间片里长出来的比例（剩下的是停留展示）
+const SEARCH_RAMP = 0.55;
+
+/** 把一条路线画到 `own` 这么长的弧距；没开始画的路线连"笔尖"一起藏起来。 */
+function paintRoute(graphic, own) {
+  let point = graphic.startNode;
+  graphic.segments.forEach((segment) => {
+    const local = Math.max(0, Math.min(segment.sample.total, own - segment.start));
+    const head = sweepSegment(segment, local);
+    if (local > 0) point = head;
+  });
+  graphic.head.setAttribute("cx", point.x);
+  graphic.head.setAttribute("cy", point.y);
+  // 未开始的路线如果把笔尖留在起点，8 条路线会在起点堆出一排圆点
+  graphic.head.style.display = own > 0 ? "" : "none";
+}
+
+/**
+ * 两种播放口径 —— **画的是同一批结果，区别只在"什么时候出现"**：
+ *
+ * * `length`（默认）：所有路线**按几何弧长同步**推进。这是"最终结果"的画法，
+ *   看不出搜索过程。
+ * * `search`：按 strict 束搜索的**完成步数**分组、一组一组出现。同一个 depth 的
+ *   多条路线是同一轮里同时毕业的，所以只有这个模式才看得出
+ *   "同时只有 beam 条在走、到一条毕业一条"。
+ *   没有 depth（单路径解码）时自动退回 length。
+ *
+ * ⚠️ `rank`（图例里的 #1..#N）是**概率序**，不是到达顺序；到达顺序看 `depth`。
+ */
 function drawAnimation(elapsed) {
   const speed = Number($("#speed").value);
   const adjusted = elapsed * speed;
   const progress = Math.min(adjusted / state.duration, 1);
-  const maxLength = Math.max(1, ...state.routeGraphics.map((graphic) => graphic.length));
-  const traveled = maxLength * progress;
-  state.routeGraphics.forEach((graphic) => {
-    const own = Math.min(graphic.length, traveled);
-    let point = graphic.startNode;
-    graphic.segments.forEach((segment) => {
-      const local = Math.max(0, Math.min(segment.sample.total, own - segment.start));
-      const head = sweepSegment(segment, local);
-      if (local > 0) point = head;
+  const groups = state.searchGroups;
+  const searchMode = $("#anim-mode").value === "search" && groups.length > 0;
+  if (searchMode) {
+    const slot = progress * groups.length;
+    state.routeGraphics.forEach((graphic) => paintRoute(graphic, 0));
+    groups.forEach((group, groupIndex) => {
+      const local = Math.max(0, Math.min(1, (slot - groupIndex) / SEARCH_RAMP));
+      group.members.forEach((index) => {
+        const graphic = state.routeGraphics[index];
+        if (graphic) paintRoute(graphic, graphic.length * local);
+      });
     });
-    graphic.head.setAttribute("cx", point.x);
-    graphic.head.setAttribute("cy", point.y);
-  });
+    const shown = Math.min(groups.length, Math.max(1, Math.floor(slot) + 1));
+    const active = groups[shown - 1];
+    $("#path-status").textContent =
+      `按搜索顺序播放：第 ${shown}/${groups.length} 组 · 搜索第 ${active.depth} 步完成` +
+      `（该组 ${active.members.length} 条）`;
+  } else {
+    const maxLength = Math.max(1, ...state.routeGraphics.map((graphic) => graphic.length));
+    const traveled = maxLength * progress;
+    state.routeGraphics.forEach((graphic) => {
+      paintRoute(graphic, Math.min(graphic.length, traveled));
+    });
+  }
+  state.lastProgress = progress;
   $("#timeline-progress").style.width = `${progress * 100}%`;
   if (progress >= 1) {
     stopAnimation();
     state.paused = false;
     $("#play-pause").textContent = "重播";
+    // 播放时状态行被"第几组"占用了，播完恢复成常规摘要
+    if (searchMode && state.pathData) renderPathInfo();
   }
   return progress;
 }
@@ -1188,12 +1435,28 @@ function bindEvents() {
   }));
   $("#decode-mode").addEventListener("change", () => { $("#multi-controls").hidden = $("#decode-mode").value !== "multi"; });
   $("#path-dataset").addEventListener("change", updateDatasetInfo);
-  $("#path-model").addEventListener("change", () => syncDatasetToModel());
+  $("#path-model").addEventListener("change", () => {
+    syncDatasetToModel();
+    applyRulerDefaults();
+  });
+  $("#top-k").addEventListener("change", refreshRulerControls);
+  $("#beam-width").addEventListener("change", refreshRulerControls);
+  $("#ruler-reset").addEventListener("click", applyRulerDefaults);
   $("#generate").addEventListener("click", generatePath);
   $("#random-sample").addEventListener("click", pickRandomSample);
   $("#replay").addEventListener("click", () => startAnimation(true));
   $("#play-pause").addEventListener("click", toggleAnimation);
   $("#speed").addEventListener("change", () => { if (state.routeGraphics.length) startAnimation(true); });
+  $("#anim-mode").addEventListener("change", () => { if (state.routeGraphics.length) startAnimation(true); });
+  // 换视野 / 换节点显示都不重播：先记下当前进度，重画完再原位填回去
+  const redrawKeepingProgress = () => {
+    if (!state.pathData || state.view !== "path") return;
+    const keep = state.lastProgress > 0 ? state.lastProgress : 1;
+    renderGraph();
+    drawAnimation(state.duration * keep);
+  };
+  $("#zoom-mode").addEventListener("change", redrawKeepingProgress);
+  $("#node-mode").addEventListener("change", redrawKeepingProgress);
   $("#show-gt").addEventListener("change", () => { const gt = $("#gt-path"); if (gt) gt.hidden = !$("#show-gt").checked; });
   $("#view-path").addEventListener("click", () => setGraphView("path"));
   $("#view-diffusion").addEventListener("click", () => setGraphView("diffusion"));

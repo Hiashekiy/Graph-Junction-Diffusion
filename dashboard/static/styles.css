@@ -78,6 +78,13 @@ dd { margin: 5px 0 0; font-size: 14px; }
 .playback button { min-height: 34px; padding: 0 13px; }
 .playback label { grid-template-columns: auto 70px; align-items: center; }
 .playback select { min-height: 34px; }
+.advanced label:has(select:disabled), .advanced label:has(input:disabled) { opacity: .45; }
+.advanced input:disabled, .advanced select:disabled { cursor: not-allowed; }
+.ruler-note { align-self: center; color: var(--muted); font-size: 11px; }
+/* 解码口径不再是可选项（历史口径已移除），所以用静态徽标而不是 select */
+.ruler-badge { align-self: center; padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px;
+  background: rgba(21,25,37,.6); color: var(--muted); font-size: 11px; letter-spacing: .04em; cursor: help; }
+#ruler-reset { min-height: 32px; padding: 0 12px; font-size: 11px; color: var(--muted); }
 .diffusion-scrubber select { min-height: 34px; }
 label.inline { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
 .switch { display: flex; align-items: center; gap: 8px; cursor: pointer; }

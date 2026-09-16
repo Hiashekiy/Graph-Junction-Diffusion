@@ -1,0 +1,434 @@
+# Graph-Junction-Diffusion V2：DiDi 成都**长轨迹 / 大图**变体（泛化测试集）
+#
+# 这份配置由 configs/didi_chengdu.yaml **逐字复制**而来，只改了 5 个数据口径参数
+# （见文件内所有标着 【LONG】 的地方），模型 / loss / eval 段落与主数据集保持一致，
+# 这样两个数据集上的实验可以直接对照。
+#
+# 目的：造一批"图更大、路径更长"的评测数据，用来测**规模泛化**。
+#
+# 主数据集（chengdu）实测：gt_length 中位数 22（junction 跳数），
+# corridor 节点数中位数 353 / 均值 429；而 150 万行原始数据里只读了每个日期
+# 文件的前 8000 行（共 8 万行，占 5.3%）。
+#
+# 本变体把长度窗口整体搬到"长尾"上：
+#     min_road_segments: 10 -> 59      （开区间，等价于 junction_len >= 60）
+#     max_road_segments: 100 -> 200    （原始数据最长 ~107，等于上限取消）
+# 为什么是 60：主数据集 gt_length 中位数是 22，两倍是 44；但 44~60 这一段占了
+# 长尾池子的 88%（36,795 / 41,548），把窗口设到 44 只会得到"2 倍"，
+# 而 60 段 = 主数据集中位数的 2.7 倍、均值约 72（3.3 倍），才是真正的规模泛化。
+#
+# 全量扫描 1,502,878 行原始 CSV 后确认（junction_len 分布，simple 且连续）：
+#     >= 44 : 39,225     >= 60 : 4,753     >= 62 : 3,416
+#     >= 64 :  2,430     >= 70 :   925     （最长一条 107）
+# 池子在 60~64 之间陡降（60-64 占了一半），所以 60 是"路径够长"与"样本够多"
+# 的分界点：选 64 的话总量只剩 ~2,000 条，test_1000 就得把 test split 提到 50%。
+#
+# 实测口径（全量 150 万行跑完 prepare 后的真实数字，不是估计）：
+#
+#     池子（去重后）        3,832 条
+#     junction_len          均值 66.6 / 中位 65 / 最大 107   （主数据集 23.1 / 22 / 66）
+#     corridor 节点         均值 1,765 / 中位 1,772         （主数据集 429 / 353）
+#     decision              均值 1,508                      （主数据集 350）
+#     GT containment@1.5    0.818  ->  最终建出约 3,135 条   （主数据集 0.812）
+#
+# 即路径长度 ~2.9x、图规模 ~4.1x（中位数 5.0x），满足"至少大一倍"。
+#
+# 代价与配套改动：
+#   * 长 OD 的 rho=1.5 corridor 天然更大，所以 max_corridor_nodes 1200 -> 0（不裁剪），
+#     否则 83% 的长样本会被整批丢掉；
+#   * 必须读全量 CSV（每日期 12~17 万行）才能把只占 0.27% 的长尾捞干净，
+#     因此 max_rows_per_file 8000 -> 0（= 不限）；
+#   * 单个样本 pickle 后约为原来的 4 倍（~530KB），所以 split 改成 55/10/35，
+#     让 test split 仍然撑得起固定 test_1000。落地总大小约 2.6GB。
+#
+# 【LONG】标记处就是与主数据集的全部差异。
+#
+# 这是一份**新增的独立配置**，configs/controlled_unweighted.yaml 与
+# configs/controlled_weighted.yaml 的默认行为一个字节都没改。
+#
+# 与 synthetic weighted 配置的三处本质差别：
+#
+#   1. data.source: didi_chengdu   -> 固定真实成都路网 + 真实车辆历史路径当 GT
+#      （GT **不是** Dijkstra 最短路；实测 GT/Dijkstra cost ratio 中位数 1.11）
+#   2. split.split_by_graph: false -> 真实数据是一张固定城市图，必须按 path 划分
+#      沿用 split_by_graph=true 只会得到"整张图都进 train 或都进 test"
+#   3. model.flow_steps: 1         -> 真实 corridor 图明显更大，先用 1 控制训练时间；
+#      注意推理必须与训练同轮数，**不能**训练 1 轮、推理 3 轮
+#
+# loss 第四版（当前）：在第三版基础上加**多轨迹集合损失**，并把局部 NULL 从
+# 无界 NLL 换成**饱和式** NULL：
+#
+#     L = L_PathNLL + 0.10 * L_NULL-sat + 0.50 * L_traj
+#     L_traj = 1.0 * L_succ + 1.0 * L_sim + 0.50 * L_fail
+#
+# 第一版的 L = CE + 0.1 * SoftGoal 已废弃：真实 corridor 里 93.6% 的 decision
+# 标签是 NULL，而旧 CE 对每个 decision 等权平均，"全押 NULL"就是它的平凡最优解
+# （实测 5 epoch 就卡死在 x0_acc = 0.933 ≈ NULL 占比、goal_hit 恒为 0）。
+# 第三版 L = L_path + 0.3 * L_null 解决了 collapse，但局部 NULL 项无上界，
+# 模型会一路把 pred_active_rate 压低；第四版把 NULL 目标改成"达到 0.60 就停"，
+# 同时用 L_traj 直接惩罚 loop / dead-end / NULL 这些**具体的失败轨迹**。
+# 详见 README §24.13 与本 config 里的 loss 段；soft goal 仍整段关闭
+# （goal_reach_weight: 0.0）。
+#
+# 仍然**没有**引入 cost-minimization loss：真实 GT 是司机的历史选择而不是最优解，
+# 直接加"最短路径"式监督会把模型拉回只追最短路，改变研究任务本身（方案第 11 节）。
+# 道路长度只是作为输入特征进入模型（见下面 model.use_edge_cost）。
+
+seed: 0
+
+data:
+  source: didi_chengdu
+
+  # 原始数据根目录（相对项目根）。里面是 20161010~19.csv / dicts.pkl /
+  # edge_features.csv / line_graph_edge_idx.npy。
+  # 2026-09-16：从下载包 data/DiDiChengduXian/ 里提取到这里，那个包已删除。
+  root: data/didi/raw/chengdu
+
+  dicts_file: dicts.pkl
+  edge_features_file: edge_features.csv
+  line_graph_file: line_graph_edge_idx.npy
+  trajectory_glob: "201610*.csv"
+
+  # OSMnx 导出的路网（`crs = epsg:4326`，节点带 x=经度 / y=纬度，节点 id 与
+  # dicts.pkl 的 (u, v) 同一套）。**不是** data.root 下的文件，所以单独给全路径。
+  # 用途：真实地理底图可视化（tools/visualize_didi_samples.py）与 km-based DTW。
+  # 该文件是可选依赖：缺了只影响画图和 DTW，不影响训练。
+  # 注意它配的是它自带的那份 dicts.pkl（2848 节点），对我们这张 2891 节点的图
+  # 覆盖率是 96.2%，其余用邻居坐标填充。
+  coords_file: data/didi/raw/chengdu/ChengDu.pkl
+
+  # **必须显式确认，代码绝不猜**（方案第 3.2 节）。
+  # 已用 `prepare_didi.py --scan-only` 核实：edge_features.csv 的列名是
+  #   road_id, oneway, lanes, highway, length, bridge, tunnel,
+  #   highway_id, length_id, road_speed, traj_speed
+  # 道路长度就是 length（单位：米）。填 null 会让 prepare 直接报错，
+  # 而不是静默退化成 weight=1。
+  length_column: length
+
+  # 边权真的进入任务：GT 是真实路径，模型输入是道路长度
+  weighted: true
+  edge_weight:
+    distribution: uniform
+    range: [1.0, 10.0]
+
+  # ---- 轨迹清洗（方案第 4.3 节，工程初始值，不是论文标准）------------------
+  # 【LONG】长度窗口搬到长尾。区间是**开区间**：min < n < max，
+  # 所以 59 等价于 raw_road_len >= 60 = 主数据集中位长度(22) 的 2.7 倍。
+  # max 设 200 只是为了"有个数"：原始数据里最长的一条是 106 个 road 段，
+  # 实际上限已经被数据本身卡住了。
+  min_road_segments: 59
+  max_road_segments: 200
+  require_simple_gt: true
+
+  # ---- OD corridor（方案第 6 节）----------------------------------------
+  corridor:
+    # 由 `prepare_didi.py --scan-corridor` 在 train split 上选出，然后**冻结**。
+    # 选定口径：能让 train GT containment 达标的最小 rho。
+    #
+    # 【实测结论，别照抄方案里的 0.98】
+    # 成都路网折叠后只有 2891 节点 / 4403 边，其中 2466 个节点度 >= 3，是一张
+    # 很密的城市图。方案第 6.3 节的"等距椭球" rho 与 containment / 规模的关系
+    # （train split 4320 条候选实测，weighted 距离口径，见 scan_corridor.json）：
+    #
+    #     rho   containment   mean corridor nodes   mean decisions
+    #     1.1      0.479              151                  114
+    #     1.2      0.686              263                  210
+    #     1.3      0.804              362                  296
+    #     1.4      0.868              456                  375
+    #     1.5      0.912              545                  452      <- 第一版选它
+    #     1.8      0.966              790                  663
+    #     2.0      0.979              940                  792
+    #     2.5      0.994             1276                 1081      (44% 的整张城图)
+    #
+    # 也就是说 **98% 的 train containment 在这张网上只有 rho >= 2.4 才拿得到，
+    # 而那时 corridor 已经吞掉半座城市、每个样本 1000 个 decision**，"走廊"这个
+    # 设计本身就失效了。因此第一版取 rho = 1.5：
+    #   * corridor 只保留 ~19% 的城市节点（545 / 2891），median 305 个 decision；
+    #   * train GT containment 0.91，剩下 9% 按方案第 6.3 节记 corridor_miss 并
+    #     **单独报告 corridor retention**，不混进模型指标。
+    # 想更接近方案的 98% 就把 rho 改成 1.8（retention 0.97，但 decision 数 +47%），
+    # 训练成本与样本体积也按比例上升。
+    rho: 1.5
+    rho_candidates: [1.1, 1.2, 1.3, 1.4, 1.5, 1.8, 2.0, 2.5]
+    # 方案原文写的是 target=0.98，实测在这张网上只有 rho >= 2.4 才够，而那时
+    # corridor 已经吞掉 43% 的城市节点、每个样本 1000+ decision，"走廊"设计失效。
+    # 所以第一版把口径改成"train containment >= 0.91 的最小 rho"，得到 1.5。
+    # 这个数只由 train split 决定，选定后冻结；val/test 不得重新按 GT 调整。
+    target_gt_containment: 0.91
+    # corridor 超过这个规模就丢弃该样本（防止长 OD 的尾巴把显存和 NULL 比例打爆）。
+    # rho=1.5 时 p95 约 1650，1200 大约丢掉 8~10% 的尾巴。
+    #
+    # 【LONG】0 = 不裁剪。本变体专门要"大图"，而 1200 会把 85% 的长样本丢掉，
+    # 数据集就退化成"和主数据集一样大"了。实测 junction_len>=60 在 rho=1.5 下的
+    # 超限比例：>1200 → 85%，>1800 → 49%，>2200 → 23%，>2600 → 10%。
+    # 长尾池子总共只有 4,753 条，再按 2600 砍掉 10% 是纯浪费；而整张城图只有
+    # 2891 个节点，corridor 本来就被全局图卡死，不存在"失控样本"。
+    # （注意：这一条也是 shuffled_od 能凑满 1000 的前提 —— 随机重配的长 OD
+    #   距离普遍比原 OD 更长，任何 cap 都会在那里大量 reject_corridor。）
+    max_corridor_nodes: 0
+
+  # ---- 数据准备规模（prepare_didi.py）-------------------------------------
+  # 每个 CSV 最多读多少行。**每个日期文件读同样多行**，这样 10 天都进数据集
+  # （OD / 时段有多样性），而不是被前几个文件垄断。
+  #
+  # 【LONG】0 = 不限，即 10 个文件全读（约 150 万行，解析约 1.5~3 分钟）。
+  # 必须全读的原因：junction_len>=60 只占 0.32%，8000 行/文件只能捞到约 20 条。
+  # 注意这**不会**偏向早读到的日期 —— 长度过滤发生在 append 之前，
+  # 而 max_candidates=60000 远大于长尾候选总数（约 3.9 万），不会触发提前 break。
+  max_rows_per_file: 0
+  # 清洗后候选轨迹的硬上限（解析期的内存/时间闸门）
+  max_candidates: 60000
+  # **最终数据集规模**（去重之后、划分之前抽多少条）。
+  #
+  # 为什么要和 max_candidates 分开：真实 corridor 样本比 synthetic 大两个量级
+  # （一个 ~300 decision 的样本 pickle 之后约 110KB，其中 segments + field 占大头），
+  # 8000 条候选落地大约 train 570MB + val 60MB + test 150MB。
+  # 候选读满 10 个文件再均匀抽样，既有多样性又能控制体积。8000 条按 72/8/20
+  # 划分、corridor retention ~0.81 之后：train ~4700 / val ~520 / test ~1290，
+  # test 足够撑起 GDP 风格的固定 test_1000。
+  # 【LONG】5000：单个样本的 corridor 约 1.8k 节点 / 1.5k decision（主数据集是
+  # 429 / 350），pickle 后约 530KB。长尾池子（去重后约 4.4k）本来就小于 5000，
+  # 所以这一项实际是"全池子都用上"，写 5000 是为了把 requested/selected 记进 metadata。
+  # 落地总大小约 2.5~3GB。
+  max_dataset_samples: 5000
+  # 扫描阶段每个文件读多少行（--scan-only）
+  scan_rows_per_file: 3000
+  # 缓存候选轨迹；同一份配置重跑 --scan-corridor / --build 不必重新解析 CSV
+  use_cache: true
+  refresh_cache: false
+
+split:
+  # 主实验：与 DiffPath 接近的 path-level split（原 80% training 再取 10% 做 val）
+  #
+  # 【LONG】0.72/0.08/0.20 -> 0.55/0.10/0.35。原因：长尾池子去重后只有 3,832 条，
+  # rho=1.5 的 GT containment 实测 0.818，所以最终只能建出约 3,135 条样本。
+  # 按 20% 切 test 只有 627 条、按 30% 只有 941 条，都撑不起固定 test_1000
+  # （strict_shuffled_size 下 test_1000 不够会直接报错）。取 35% 后
+  # test ≈ 1,097 条，既够 test_1000=1000（留 ~10% 余量），train 还有约 1.7k
+  # 条大图样本可以拿来做微调。
+  train: 0.55
+  val: 0.10
+  test: 0.35
+  seed: 0
+  # 真实城市是**一张固定图**，不能沿用 synthetic 的按图划分
+  split_by_graph: false
+
+  # GDP 风格固定子集（方案第 7.4 / 7.5 节）
+  test_subset_size: 1000
+  shuffled_od_size: 1000
+  # shuffled OD **必须**凑满 shuffled_od_size，否则直接报错。
+  # 理由：论文主表要固定 test_1000 = 1000 且 shuffled_od_1000 = 1000，
+  # 一次 991、一次 1000 会让两组实验的 shuffled-OD 口径不可比。
+  # 接受不足 1000 条就把它设成 false（那时 metadata 里会记 reached_target=false）。
+  strict_shuffled_size: true
+
+model:
+  d_model: 128
+  node_types: 4
+  edge_states: 2
+  ffn_hidden: 256
+  dropout: 0.0
+
+  # 本轮明确改回 1（工程预算，不是理论变化）
+  flow_steps: 1
+  flow_slot_embedding: true
+  flow_slot_scale: 1.0
+
+  # 道路长度进入模型（方案第 8 节）：graph_mean 归一化 + 连续 cost 编码器
+  use_edge_cost: true
+  edge_cost:
+    normalization: graph_mean
+    hidden_dim: 128
+
+time:
+  encoding: sinusoidal
+  d_time: 128
+  conditioning: adaln
+
+diffusion:
+  T: 50
+  schedule: linear
+  beta_start: 0.02
+  beta_end: 0.20
+  base_noise: uniform
+
+training:
+  optimizer: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  amp: true
+
+  # 真实 corridor 图比 controlled graph 大得多（median ~305 decisions/sample），
+  # 所以 batch 从 4 起步测显存，再按 4 -> 8 -> 16 往上试，**能上多少上多少**；
+  # 反过来 OOM 就 4 -> 2 -> 1。降 batch 而不是先降模型维度。
+  # 【LONG】大图默认 1：corridor 约 1.5k 节点，是主数据集的 3 倍。
+  batch_size: 1
+  epochs: 100
+  max_bptt_steps: 0
+  log_every: 10
+  eval_every: 5
+  device: auto
+
+  # 真实数据上 GoalHit 会较早饱和，而路径相似度还在改善，所以 best.pt 改用
+  # path_similarity_score（未到 goal 记 0）。默认仍是 goal_hit_rate，旧实验不变。
+  selection_metric: path_similarity_score
+  selection_mode: max
+
+loss:
+  # ===== 主训练目标：Path NLL + Saturating NULL + Trajectory Set ==========
+  #
+  #     L = L_path + lambda_null_local * L_NULL-sat + lambda_T * L_traj
+  #
+  #     L_path       = -1/N_A * sum_{i in active} log p_i(b_i^GT)
+  #     L_NULL-sat   =  1/K   * sum_{j in S_N} max(0, log(rho_null) - log p_j(NULL))
+  #     L_traj       = lambda_s*L_succ + lambda_g*L_sim + lambda_f*L_fail
+  #
+  # 注意 L_NULL-sat **没有前导负号**：饱和项本身恒 >= 0（clamp 到 [0, inf)），
+  # p_j(NULL) >= rho_null 时它恰好为 0。写成 -1/K * sum max(0, ...) 会把它变成
+  # 非正的"奖励"项，与代码 saturating_null_loss（只 clamp、不取负）正好相反。
+  #
+  # 为什么换掉旧 CE：真实 corridor 里 93.6% 的 decision 标签是 NULL，而旧 CE 对
+  # **每个 decision 等权平均**，于是"全押 NULL"就是 CE 的平凡最优解 —— 实测 5 epoch
+  # 就卡在 x0_acc = 0.933 ≈ NULL 占比、loss 不再下降、goal_hit 恒为 0。
+  #
+  # 新目标把 active 当主监督、NULL 只做**下采样**的辅助约束：
+  #   * 平均顺序 decision 内 -> sample 内 -> batch（每条真实轨迹等权，
+  #     否则 30 个 active 的样本会比 8 个的贡献大 3.75 倍）；
+  #   * NULL 不再全量监督，每条轨迹随机采 K = min(N_N, ceil(ratio*N_A), max_per_sample)，
+  #     且每个 batch 重新采；
+  #   * 第一版纯随机采样，**不做 hard negative mining**（先回答"降 NULL 冗余本身
+  #     能不能解决 collapse"，混入 hard negative 就没法归因）。
+  type: path_nll_sampled_null
+
+  null_sampling:
+    enabled: true
+    ratio: 1.0              # K = min(N_N, ceil(ratio * N_A), max_per_sample)
+    max_per_sample: 32      # 超长路径的上限
+    resample_each_batch: true
+
+  # ---- 局部 NULL：饱和式（Saturating NULL）--------------------------------
+  #
+  # 第三版用普通 NLL，p_j(NULL) 越接近 1 越继续奖励，模型于是系统性**过度抑制**
+  # 激活（pred_active_rate 收敛到 0.609，而监督比例只有约 0.34，loop_rate 0.62~0.90）。
+  # 饱和式把目标从"尽量高"改成"**够用就行**"：
+  #     p_j(NULL) >= rho_null  ->  该 decision 的 loss 恒为 0，不再有梯度
+  #     p_j(NULL) <  rho_null  ->  仍按 NLL 拉，但因为已经下采样过，量级可控
+  # 所以 lambda_null_local 可以从 0.30 降到 0.10 —— 不是削弱约束，而是这个约束
+  # 本身不再需要靠"拉得够久"来生效（方案第 9 / 11 节）。
+  null_loss_type: saturating_nll
+  # rho_null。0.50 -> 仍有少量 loss；0.60 -> 恰好为 0；0.80 / 0.99 过于激进。
+  null_target_prob: 0.60
+  # lambda_null_local：NULL 的平衡旋钮。**采样条数 K 不影响 L_NULL-sat 的量级**
+  # （它是 mean），所以调平衡只能调这个，不能调 ratio。
+  null_loss_weight: 0.10
+
+  # ---- 多轨迹集合损失（方案第 12~16 节）-----------------------------------
+  #
+  # 局部 loss 只看单个 decision，看不见"整条轨迹是不是废的"。L_traj 把**一整组
+  # 候选轨迹**当成一个集合来打分：
+  #   * 用历史多轨迹 decoder（strict=False）在 detach 后的概率上采候选，
+  #     分成 success / NULL / loop / dead-end / broken；
+  #   * 候选池 = GT + <=4 success + <=4 failure，用**未 detach** 的
+  #     candidate_log_prob 重算每条轨迹的 S(P) = mean_ℓ log p(c_ℓ)；
+  #   * 集合 softmax pi = softmax(S/tau)，
+  #       L_succ = -log(sum_{success} pi)               把质量推向"任何到达 goal 的"
+  #       L_sim  = -sum q log(pi_hat)，q = softmax(beta * nLCS)  只在 success 内部
+  #       L_fail = sum pi * cost，NULL 终止代价 1.5 > loop / dead-end / broken 1.0
+  #
+  # **必须用 strict=False 的历史 decoder**：strict 会在 top-k 之前就把
+  # NULL / loop / dead-end 全部 mask 掉，miner 根本看不到失败轨迹。
+  # **S(P) 必须是 mean 而不是 sum**：sum 会偏向短轨迹，越短的"尸体"分数越高 ——
+  # 这正是历史 best readout 里那个 bug。
+  trajectory:
+    enabled: true
+
+    # 训练轨迹采集（与推理 planner 的 strict 2/3 是**两套参数**，不要混）
+    top_k: 2
+    beam_width: 8
+    null_policy: stop
+    filter_dead_branches: false
+    strict: false
+
+    # 进入 loss 的候选数（先每类各一条，再按分数补满）
+    max_success: 4
+    max_failure: 4
+
+    # 轨迹集合 softmax 温度
+    temperature: 1.0
+
+    # GT 相似度（nLCS = 归一化最长公共子序列）
+    similarity: nlcs
+    similarity_beta: 3.0
+
+    # 整个 trajectory loss 的权重 lambda_T
+    weight: 0.50
+
+    success_weight: 1.0
+    similarity_weight: 1.0
+    failure_weight: 0.50
+
+    # 失败类型代价
+    failure_cost:
+      null: 1.50
+      loop: 1.00
+      dead_end: 1.00
+      broken: 1.00
+
+    # 只在最后一个 reverse step 算（early timestep 噪声大，且 miner 是
+    # 离散 CPU 搜索，每步都跑会让训练时间爆掉）
+    timestep: 1
+
+  # ---- 旧 CE 口径的字段（type=ce 时才用；这里保留只为向后兼容）----------
+  x0_ce: 1.0
+  null_weight: 1.0
+  active_weight: 1.0
+
+  # ---- Soft Goal Reachability：本轮关闭 --------------------------------
+  # 设成 0 后代码会**整段跳过** soft_goal_reachability（不是算完再乘 0），
+  # loss 严格不含 goal 项。它是一个 Python for-loop 的 value iteration，每个
+  # reverse step 迭代 min(decision 数, cap) 轮，profile 实测在真实 corridor 上占
+  # 单步训练耗时 60%+，关掉约 2.2× 加速。
+  goal_reach_weight: 0.0
+  goal_reach_eps: 1.0e-8
+  goal_timestep_weighting: alpha_bar
+  # 仅在 goal_reach_weight > 0 时才有意义（现在没用到）
+  goal_horizon_cap: 24
+
+evaluation:
+  # 【LONG】评测 batch 同样降一档（8 -> 2）：图大 3 倍，评测不反传但仍吃显存。
+  # ===== 验证 / 选 best.pt / 最终评测：**同一把尺子** ======================
+  #
+  # 以前这里只有下面三行，Trainer.validate() 走的是 evaluate_dataset() 的默认形参
+  # （decode=single、非 strict、beam=64），而脚本评测用的是 strict 多分支 ——
+  # 于是 best.pt 是按 single 的 PathSim 挑的，挑出来的却不是 strict 下最好的那轮。
+  # 实测过这种分叉：single PathSim 后期变差（0.35 -> 0.31）而 strict 还在涨
+  # （0.43 -> 0.46），旧口径会选中更早、更差的 checkpoint。
+  #
+  # 现在这些键由 Trainer.validate() 与 scripts/evaluate.py **共同**读取，
+  # 训练期验证 / 选 best / 最终测试三者不可能再漂。
+  #
+  # 口径 = "Strict 2/3"（方案第 24 节的最终推理配置）：
+  #   * strict：NULL / loop / dead-end 在 top-k **之前**就被 mask、失败路径直接淘汰，
+  #     最终候选集只有完整走到 Goal 的路径（三池语义，见 strict_beam_decoder）；
+  #   * top_k=2 / beam_width=3：比训练 miner 的 2/8 窄得多 —— 训练要看得见失败，
+  #     评测只要"能不能到终点"；
+  #   * stochastic_sampling=false：等价于 evaluate.py 的 --deterministic，
+  #     保证同一份 checkpoint 的 val 与最终测试是同一个数。
+  stochastic_sampling: false
+  batch_size: 2
+  max_steps: 0
+
+  decode: multi
+  strict_decode: true
+  top_k: 2
+  beam_width: 3
+  null_policy: stop
+  # strict 下恒为真（NULL 永远不合法），这里显式写出来只为让两边配置对得上
+  filter_dead_branches: false
+
+paths:
+  # 【LONG】新的独立目录，主数据集一个字节都不动
+  data_dir: data/didi/graph/chengdu_long
+  output_dir: outputs/runs
+  run_name: didi_chengdu_long

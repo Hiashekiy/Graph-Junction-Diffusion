@@ -104,10 +104,33 @@ z_t  ->  E_t = Psi(z_t)  ->  H_{t-1} = F_theta(H_t, E_t, tau_t)  ->  p_theta(z_0
 | `graph_global.pkl` | 全局无向有权成都路网 | 2891 节点 / 4403 边 | 建图复现与可视化 |
 | `split_manifest.csv` / `metadata.json` / `stats.json` | 逐样本清单 / 建图与 rho 元数据 / 清洗漏斗与各 split 摘要 | — | 可复现性与数据质量 |
 
-GT 是 CSV 里真实车辆走过的路径（93.7% 都不是最短路，cost ratio 中位数 1.12），
+GT 是 CSV 里真实车辆走过的路径（non-optimal：train 93.4% / val 92.4% / test 94.4%，
+cost ratio 中位数 1.12），
 corridor 用 rho=1.5 的 OD 椭球。生成命令与全部实测结论见**第 24 节**。
 
-**I. 配置文件 —— `configs/` 下三份，和上面三个数据集一一对应**
+**J. DiDi 成都长轨迹 / 大图泛化测试集 —— `data/didi/graph/chengdu_long/`（第 24.15 节）**
+
+和上面 H 是**同一张路网、同一套流程、同一份原始 CSV**（`graph_global.pkl` 与 H 逐位相同，
+md5 一致），唯一的差别是**轨迹长度窗口**：`data.min_road_segments` 10 → 59
+（开区间，即 `junction_len >= 60`），并配套放开 corridor 上限与读取行数。
+用途是**规模泛化**：主数据集 gt_length 中位 22 / corridor 中位 353 节点，这份是 65 / 1852 节点。
+
+| 文件 | 是什么 | 规模 | 用途 |
+|---|---|---|---|
+| `train.pkl` / `val.pkl` | 长轨迹 OD 训练/验证集 | 1693 / 314 条 | 在长图上微调（可选） |
+| `test.pkl` | 完整测试集 | 1103 条 | 全量 test 指标 |
+| `test_1000.pkl` | 固定子集 | 1000 条 | **规模泛化主表** |
+| `shuffled_od_1000.pkl` | OD 打乱重配，**无真实 GT** | 1000 条 | 只测 GoalHit/Loop/Broken/CostRatio/时间 |
+| `graph_global.pkl` | 全局无向有权成都路网（与 H 逐位相同） | 2891 节点 / 4403 边 | 建图复现 |
+| `split_manifest.csv` / `metadata.json` / `stats.json` | 逐样本清单 / 建图元数据 / 清洗漏斗与各 split 摘要 | — | 可复现性与数据质量 |
+
+实测相对主数据集（test_1000 口径）：**gt_length 均值 2.88×（中位 3.00×）、corridor 节点 4.63×
+（中位 5.69×）、decision 4.85×、单样本体积 4.98×**；而且**每一条样本的 gt_length 都 ≥ 60**，
+即主数据集中位长度（22）的 2.7 倍。GT 同样是真实车辆历史路径（`gt_source=observed`），
+但它同时**更绕**：cost ratio 中位 1.357 vs 主数据集 1.120，100% 非最短路（主数据集 93.4%）。
+配置是 `configs/didi_chengdu_long.yaml`，生成命令与全部实测结论见**第 24.15 节**。
+
+**I. 配置文件 —— `configs/` 下四份，和上面的数据集一一对应**
 
 > **2026-09-16 改名。** 旧名是 `graph_flow.yaml` / `graph_flow_weighted.yaml` /
 > `graph_flow_didi_weighted.yaml` —— `graph_flow` 是**模型名**，三份配置用的都是同一个模型，
@@ -119,13 +142,18 @@ corridor 用 rho=1.5 的 OD 椭球。生成命令与全部实测结论见**第 2
 |---|---|---|---|---|
 | `configs/controlled_unweighted.yaml` | `data/unweighted/` | **无**（`weighted: false`） | `L = CE + 0.1·SoftGoal` | `controlled_unweighted` |
 | `configs/controlled_weighted.yaml` | `data/weighted/` | **有**，`w ~ U(1,10)`，开 `model.use_edge_cost` | 同上 | `controlled_weighted` |
-| `configs/didi_chengdu.yaml` | `data/didi/graph/chengdu/` | **有**，用 `edge_features.csv` 的 `length`（米） | **`L = L_path + 0.3·L_null`**（Path NLL + 下采样 NULL），soft goal **关闭** | `didi_chengdu` |
+| `configs/didi_chengdu.yaml` | `data/didi/graph/chengdu/` | **有**，用 `edge_features.csv` 的 `length`（米） | **`L = L_path + 0.10·L_NULL-sat + 0.50·L_traj`**（Path NLL + 饱和 NULL + 多轨迹集合），soft goal **关闭** | `didi_chengdu` |
+| `configs/didi_chengdu_long.yaml` | `data/didi/graph/chengdu_long/`（第 0.1 J / 24.15 节） | 同上 | **与 `didi_chengdu.yaml` 的 loss 段逐字相同** | `didi_chengdu_long` |
 
-三份配置的 `paths.data_dir` 和 `paths.run_name` 都已经指向现存的数据集与 run，所以
+四份配置的 `paths.data_dir` 和 `paths.run_name` 都已经指向现存的数据集与 run，所以
 **不带 `--name` / `--data` 直接跑 `scripts/train.py --config configs/<X>.yaml` 就是对的**。
 
-唯一的例外是 DiDi：它的数据必须先用 `scripts/prepare_didi.py` 生成（`data.source: didi_chengdu`
-时 `src/training/setup.py` 会明确拒绝"现场生成"），见第 24 节。
+唯一的例外是两份 DiDi 配置：它们的数据必须先用 `scripts/prepare_didi.py` 生成
+（`data.source: didi_chengdu` 时 `src/training/setup.py` 会明确拒绝"现场生成"），见第 24 节。
+`didi_chengdu_long.yaml` 与 `didi_chengdu.yaml` 的差异**只有 5 个数据口径参数**
+（`min_road_segments` / `max_corridor_nodes` / `max_rows_per_file` /
+`max_dataset_samples` / `split.*`）以及两处 `batch_size`，其余逐字相同 ——
+这样两个数据集上的实验可以直接对照。
 
 ### 0.2 训练好的模型（`outputs/runs/`，checkpoint 不进版本库）
 
@@ -194,6 +222,8 @@ corridor 用 rho=1.5 的 OD 椭球。生成命令与全部实测结论见**第 2
 "出门两步折返回 start"（`v2_rev2_longmix` 在 `oldv1_test` 上占 50%，混入旧数据后归零）。
 
 ### 0.4 全部指令（单行，可直接粘贴）
+
+新模型评测的完整检查单见 **`docs/EVAL_GUIDE.md`**。
 
 **训练**
 
@@ -486,6 +516,9 @@ E:/CondaEnvData/envs/GGMPC/python.exe -m pytest tests -q
 真正决定路径的是**非 NULL（active）决策**的准确率。
 
 完整指标清单（含每个指标的确切含义）见 **第 0.3 节**。
+
+> **新模型训完之后该测什么、按什么顺序、看哪几个数、哪些数不能跨配置比** ——
+> 见 **`docs/EVAL_GUIDE.md`**（含报告模板与红旗清单）。
 
 ## 8. 已验证的落地状态
 
@@ -1772,7 +1805,7 @@ E:/CondaEnvData/envs/GGMPC/python.exe dashboard/server.py --no-browser --device 
 | 数据集下拉 | 按**相对 `data/` 的目录**分组：`unweighted` / `weighted` / `didi/graph/chengdu`；title 带相对路径与体积 |
 | 数据集过滤 | 排除 `data/didi/raw/**`（`dicts.pkl` / `ChengDu.pkl` 是**输入**不是数据集）、`_` 前缀的 prepare 缓存、`graph_global.pkl`；这三类用 `GraphQueryDataset.load` 打开会直接抛异常 |
 | 模型↔数据集 | 切模型时若当前数据集不在该模型 `data_dir` 下，自动切到最合适的 split（优先 `test_1000`，再退 `test`），并弹一条**中性**提示条。手动改数据集不会被覆盖 |
-| 路径页 · 多分支 | 控制条有 **必死 branch 预筛选** 开关（透传 `filter_dead_branches`），summary 里显示剔除数量 |
+| 路径页 · 多分支 | **解码口径**选择器（评测标尺 / 历史，默认标尺，见 §22.6）；标尺模式下 `top_k` / `beam` / `NULL 策略` / `必死 branch 预筛选` 被置灰并由 config 接管 |
 | 路径页 · 带权图 | 每条路线同时显示 **跳数** 与 **真实 cost**（`_route_payload` 的 `path_cost` / `weighted`） |
 | 路径页 · 真实数据 | 滴滴样本左侧显示"真实车辆路径 · 绕行 ×N"（`gt_cost_ratio`）、GT 跳数/公里数、`corridor rho` 与 order id —— 真实数据没有 `difficulty` / `mode`，那是合成图生成器的标签 |
 
@@ -1843,14 +1876,43 @@ Markdown 原样返回（前端内置小渲染器画标题/表格/列表/代码�
 `docs/REPORT_multipath_and_weighted.md` 已从清单移除（留一个恒 `exists:false` 的条目
 只会多一个死链接）。
 
-### 22.6 API 一览
+### 22.6 多分支解码口径：面板默认复现「评测标尺」
+
+面板的多分支解码有两个口径，控制条上的 **解码口径** 选择器切换：
+
+| 口径 | 解码器 | top_k / beam | 说明 |
+|---|---|---|---|
+| **评测标尺**（默认） | strict 三池 / 历史，由 config 决定 | 由 config 决定 | 复现"验证 / 选 best.pt / 最终测试"共用的那套 —— 读该 run **当前** `configs/<run>.yaml` 的 `evaluation.*` |
+| **历史（存活路径表）** | 历史 | 手动控件 | 旧口径，`strict=False`，几个手动控件生效 |
+
+为什么默认要跟评测标尺走：面板曾经默认是**历史 2/64**，而评测标尺是 **strict 2/3**，
+同一份 checkpoint 在同一个样本上会给出完全相反的结论 —— 实测 `test_1000` 第 0 条：
+标尺下 6 条路线**全部到达**（9 finished / 9 goal），历史 2/64 下 6 条**全部 broken**
+（591 finished / 83 goal，best 仍是 broken）。拿面板截图去对照 §21/§24 的表会得出错误结论。
+
+标尺模式下 `top_k` / `路径表上限` / `NULL 策略` / `必死 branch 预筛选` 会被**置灰并忽略**
+（前端置灰、后端也直接不读请求里的这几个键），否则面板又变成第四把尺子。
+`显示路线数` 不在其中 —— 它只决定画几条出来，不改变解码结果。
+
+两个 `controlled_*` run 的 config 没写 `evaluation.decode`，按 `scripts/evaluate.py` 的默认
+就是 `single` —— 面板会把「评测标尺」选项**禁用**并写明原因，多分支退回历史口径，
+而不是悄悄按另一套参数跑完还声称对齐了评测。
+
+那份默认值在 `dashboard/server.py::RULER_DEFAULTS`，与 `scripts/evaluate.py::
+_DECODE_RULER_DEFAULTS` **必须逐键一致**；`tests/test_dashboard.py::
+test_panel_ruler_defaults_match_evaluate_script` 静态比对着两份常量。
+
+`POST /api/path` 的响应里带一个 `ruler` 字段（实际生效的 strict / top_k / beam / note），
+面板把它印在状态行上，所以任何时候都能看出这张图是按哪把尺子解出来的。
+
+### 22.7 API 一览
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/catalog` | 模型（`kind` / `weighted` / `use_edge_cost` / `flow_steps` / `source` / `geo` / `data_dir` / `live_config`）、数据集、报告清单 |
 | GET | `/api/datasets/<id>` | 数据集规模 |
 | GET | `/api/reports/<id>` | 报告内容（Markdown 文本 / JSON 对象） |
-| POST | `/api/path` | 一次真实反向扩散 + 单路径/多分支解码；返回 `graph`（含 `geo` / `street_edges` / `crop_km` / `km_per_x_unit`）、`routes`（含 `path_cost`）、`sample`（带真实数据元信息）、`diffusion`、`contrast` |
+| POST | `/api/path` | 一次真实反向扩散 + 单路径/多分支解码；返回 `graph`（含 `geo` / `street_edges` / `crop_km` / `km_per_x_unit`）、`routes`（含 `path_cost`）、`sample`（带真实数据元信息）、`diffusion`、`contrast`、`ruler`（实际生效的解码口径） |
 
 `/api/catalog` **不再有 `metrics` 字段**。
 
@@ -1952,8 +2014,9 @@ sampled z0 = [2, 5, 10, 16, 19]   -> broken  16 跳 / cost  92.35   NULL selecte
 | GT | Dijkstra 最小 cost 路径 | **真实司机历史路线** |
 | Dijkstra 的角色 | 生成 GT | 只当 `C*` 标尺（CostRatio 的分母） |
 
-实测成都数据 **93.7% 的 GT 都不是最短路**，GT/Dijkstra cost ratio 中位数 1.12、
-max 2.24。所以 `Optimal Path Rate` 在真实数据上不再是"模型对不对"的判据 —— 它必须
+实测成都数据 **93.4%～94.5% 的 GT 都不是最短路**（按 split：train 93.4% / val 92.4% /
+test 94.4% / test_1000 94.5%），GT/Dijkstra cost ratio 中位数 1.12、test p95 1.53、
+max 2.35。所以 `Optimal Path Rate` 在真实数据上不再是"模型对不对"的判据 —— 它必须
 降级成 secondary metric，主指标换成路径相似度（见 24.6）。
 
 ### 24.2 原始文件与语义
@@ -2897,3 +2960,99 @@ step 跑一次。DiDi corridor 的 median 是 ~305 decision / ~1500 candidate，
 实测 2 个 13-decision 的小样本在 CPU 上单步 0.1s；真实训练里这一项会成为
 数据加载之外的主要 CPU 开销，**如果训练时间明显变长，先降 `beam_width`（8 → 4）
 而不是关掉整个项** —— 关掉就退回第三版的过度抑制问题。
+
+### 24.15 长轨迹 / 大图泛化测试集（`data/didi/graph/chengdu_long/`）
+
+#### 为什么要单独造一份
+
+主数据集的长度窗口把两头都砍掉了：`min_road_segments: 10` 砍短轨迹、
+`max_road_segments: 100` 砍长轨迹，再加上 `max_rows_per_file: 8000` 只读了每个日期
+文件的前 8000 行 —— 也就是 **80,000 / 1,502,878 = 5.3% 的原始数据**。结果就是主数据集里
+gt_length 中位 22 / p95 39 / 最大 66、corridor 中位 353 节点，模型**从来没在长 OD 上训过
+也没测过**。这份变体专门补这块：测"换一个规模量级的输入，模型还灵不灵"。
+
+#### 口径：只动 5 个数据参数（+ 2 个 batch_size）
+
+| 参数 | `chengdu` | `chengdu_long` | 为什么 |
+|---|---|---|---|
+| `data.min_road_segments` | 10 | **59** | 区间是**开区间**（`min < n < max`），59 ⇒ `raw_road_len ≥ 60` |
+| `data.max_road_segments` | 100 | **200** | 原始数据最长 106 段，等于取消上限 |
+| `data.corridor.max_corridor_nodes` | 1200 | **0（不裁剪）** | 长 OD 的 rho=1.5 corridor 均值 1,765 节点，1200 会丢掉 83% 的样本 |
+| `data.max_rows_per_file` | 8000 | **0（全读）** | `junction_len≥60` 只占 0.32%，前 8000 行只能捞到约 20 条 |
+| `data.max_dataset_samples` | 8000 | **5000** | 长尾池子去重后只有 3,832 条，实际是"全池子都用上" |
+| `split.{train,val,test}` | 0.72/0.08/0.20 | **0.55/0.10/0.35** | 池子小，20% 切出来的 test 撑不起固定 test_1000（strict 下会直接报错） |
+| `training/evaluation.batch_size` | 4 / 8 | **1 / 2** | 图大 4~5 倍，不降必 OOM |
+
+模型 / loss / 解码段落**逐字未改**，所以两个数据集上的实验可以直接对照。
+
+#### 池子有多大（全量扫描 1,502,878 行）
+
+| 长度窗口 | 可用轨迹（连续 + simple） | 说明 |
+|---|---:|---|
+| ≥ 44（= 主数据集中位 22 的 2 倍） | 39,225 | 88% 都挤在 44~64 之间，只能算"2 倍" |
+| **≥ 60（本项目选它）** | **4,753** | 按 `raw_road_len` 口径 4,039 条；路径均值 66.6 = 主数据集的 2.9 倍 |
+| ≥ 64 | 2,430 | 总量只剩 ~2,000，test_1000 就得把 test split 提到 50% |
+| ≥ 70 | 925 | 样本太少，统计噪声大 |
+
+分布是**陡降**的（60~64 这一段就占了一半），所以 60 是"路径够长"与"样本够多"的分界点。
+
+#### 实测规模对照（`test_1000` 口径，两份数据用同一把尺子量）
+
+| 指标 | `chengdu` | `chengdu_long` | 倍数 |
+|---|---:|---:|---:|
+| 样本数 | 1000 | 1000 | — |
+| gt_length 均值 / 中位 | 22.7 / 22 | **65.3 / 66** | **2.88× / 3.00×** |
+| corridor 节点 均值 / 中位 | 412 / 330 | **1909 / 1881** | **4.63× / 5.69×** |
+| corridor 边 均值 | 623 | 2929 | 4.70× |
+| decision 均值 | 336 | 1631 | 4.85× |
+| candidate 均值 | 1461 | 7073 | 4.84× |
+| 单样本 pkl 体积 | 114 KB | 567 KB | 4.98× |
+
+长数据集里**每一条样本的 `gt_length` 都 ≥ 60**（min 60 / max 106），也就是主数据集中位
+长度的 2.7 倍起。GT 仍然是真实车辆历史路径（`gt_source=observed`），不是 Dijkstra。
+
+#### 生成（约 16 分钟，不需要 torch）
+
+```bash
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/didi_chengdu_long.yaml --build
+E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi/graph/chengdu_long
+```
+
+只跑 `--build`：**rho 沿用主数据集冻结的 1.5，没有重新扫**。重扫等于"用新数据调参"，
+会把泛化结论污染掉；`data.corridor.rho_candidates` 这一段是照抄主配置的、并未使用。
+候选缓存 `_didi_candidates.pkl` 落在新目录，改配置会自动失效重采。
+产出 2.72 GB（train 970 MB / test 638 MB / test_1000 581 MB / shuffled_od 347 MB / val 178 MB）。
+
+#### 评测：拿主数据集的模型直接测新规模
+
+```bash
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py \
+  --checkpoint outputs/runs/didi_chengdu/best.pt \
+  --config configs/didi_chengdu.yaml \
+  --data data/didi/graph/chengdu_long/test_1000.pkl
+```
+
+`--config` 仍用**主数据集**的配置（模型/解码口径必须一致），只把 `--data` 换掉 ——
+这就是跨规模泛化的对照方式；两份配置的 `evaluation` 段本来就一致，所以指标同名可比。
+
+#### 四个必须知道的事
+
+1. **retention 0.80~0.82**（train 0.803 / val 0.820 / test 0.823），丢的基本都是
+   `corridor_miss`（train 415/2108）。rho 没动过，所以不是新引入的偏差，但和主数据集一样
+   存在"绕得越远越容易被丢"的已知偏差：`stats.json` 的
+   `corridor_analysis.retention_by_gt_cost_ratio` 显示 ratio<1.5 保留率 1.000、
+   1.50~2.00 是 0.712、≥2.00 是 0.128（主数据集同两个桶是 0.484 / 0.060，
+   即这份数据对**极端绕路**的保留率反而略高，但对 1.5~2.0 段更低）。
+   跨规模比较指标时要记住两边都不是无偏采样。
+2. **"corridor" 在这里接近"全图"**：不裁剪之后最大的样本就是 2,886 节点（整城 2,891），
+   所以这份数据里 corridor 的"局部性"设计基本失效 —— 它的作用是**压力测试**，
+   不是复现主数据集的 corridor 语义。做 RD / 可视化 / 报"用图比例"时要按这个口径解释。
+3. **`shuffled_od_1000` 凑满了 1000 条**（2 轮 / 1082 次尝试，主数据集是 1430 次），
+   原因同样是不裁剪：随机重配的长 OD（起点取 A、终点取 B）距离普遍更长，任何 cap 都会
+   在那里大量 `reject_corridor`。它的 `gt_source=dijkstra_placeholder`，
+   **只能看 GoalHit / Loop / Broken / CostRatio / 时间**。
+4. **它不只是"更大"，GT 还系统性更绕**：GT/Dijkstra cost ratio 均值 **1.178 → 1.395**、
+   中位 **1.120 → 1.357**、p95 1.543 → 1.842，而且 **100% 的 GT 都不是最短路**
+   （主数据集是 93.4%）。这是长度本身的必然结果（路走得越长，绕一点的概率越高），
+   但它意味着跨规模比较时**同时**发生了两个分布偏移：**图更大 + 司机行为更绕**。
+   想把这两者拆开归因，必须另外造一份"长度不变、只放大图"的对照集（本变体做不到这件事）。

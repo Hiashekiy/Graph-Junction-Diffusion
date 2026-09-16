@@ -42,8 +42,15 @@
       </div>
 
       <div class="advanced" id="multi-controls" hidden>
-        <label>每次分叉 <select id="top-k"><option>2</option><option>3</option><option>4</option></select></label>
-        <label>路径表上限 <input id="beam-width" type="number" min="1" max="256" value="64"></label>
+        <span class="ruler-badge" id="decode-ruler-label" title="面板固定使用评测标尺的 strict 三池解码：NULL / loop / dead-end 在 top-k 之前就被 mask，失败路径直接淘汰，最终候选集只有完整走到 Goal 的路径。历史（存活路径表）口径已移除。">评测标尺</span>
+        <span class="ruler-note" id="ruler-note">—</span>
+        <label title="每个 decision 保留几条 branch。默认取该 run 的评测标尺值；改了就注明「手动覆盖」。">每次分叉
+          <select id="top-k"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option></select>
+        </label>
+        <label title="存活路径表上限（strict 束搜索的 beam_width）。默认取该 run 的评测标尺值；改了就注明「手动覆盖」。">路径表上限
+          <input id="beam-width" type="number" min="1" max="256" value="64">
+        </label>
+        <button id="ruler-reset" type="button" title="把「每次分叉 / 路径表上限」恢复成该 run 的评测标尺值">↺ 标尺值</button>
         <label>显示路线数 <input id="display-paths" type="number" min="1" max="24" value="8"></label>
         <label>NULL 策略 <select id="null-policy"><option value="stop">停止</option><option value="skip">跳过</option></select></label>
         <label class="switch" id="filter-dead-switch" title="top-k 之前剔除终点既不是 Goal 也不是 decision 的必死 branch">
@@ -77,6 +84,9 @@
               <button id="replay" aria-label="重新播放" disabled>↺</button>
               <button id="play-pause" disabled>暂停</button>
               <label>速度 <select id="speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option></select></label>
+              <label title="按长度：所有路线按几何长度同步画完（默认，画的是"最终结果"）。按搜索顺序：按 strict 束搜索里的**完成步数**一组一组地出现 —— 同一个 depth 的多条路线算同一轮毕业，所以能看到"同时只有 beam 条在走、到一条毕业一条"。">播放 <select id="anim-mode"><option value="length" selected>按长度</option><option value="search">按搜索顺序</option></select></label>
+              <label title="仅路线（默认）：只画「显示出来的路线经过的节点」+ S/G —— 真实 corridor 有上千个节点，全画成小圆会糊成一片白点，把路线和路网都盖住。全部：原来的画法（画所有 decision 节点）。全关：一个节点圆点都不画，只留线。">节点 <select id="node-mode"><option value="route" selected>仅路线</option><option value="all">全部</option><option value="none">全关</option></select></label>
+              <label title="自适应：把画面收到「显示出来的路线 + GT」的包围盒上 —— 真实 corridor 有上千个节点，路线只经过几十个，全图铺满时路线只有几个像素、节点糊成一片白点。节点和路线会按比例放大，真实路网底图仍是细线，文字保持屏幕字号（最多放大 6 倍）。全图：回到整幅画布。">视野 <select id="zoom-mode"><option value="fit" selected>自适应</option><option value="full">全图</option></select></label>
             </div>
             <label class="switch" id="gt-switch"><input id="show-gt" type="checkbox" checked><span></span>GT 最短路</label>
           </div>

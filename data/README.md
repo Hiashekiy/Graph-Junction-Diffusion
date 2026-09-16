@@ -110,6 +110,42 @@ E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/d
 E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi/graph/chengdu
 ```
 
+## didi/graph/chengdu_long/ —— 同一张路网的**长轨迹 / 大图**泛化测试集（README 第 24.15 节）
+
+和上面 `chengdu/` **同一张路网、同一份原始 CSV、同一套流程**（`graph_global.pkl` 逐位相同，
+md5 `c5eed820…`），只把轨迹长度窗口从 `(10,100)` 搬到 `(59,200)`：每一条样本的
+`gt_length ≥ 60`，是主数据集中位长度（22）的 2.7 倍起。用途是**规模泛化**，不是替代主数据集。
+
+| 文件 | 大小 | 规模 | 用途 |
+|---|---|---|---|
+| `graph_global.pkl` | 227 KB | 2891 节点 / 4403 边 | 折叠后的全局无向有权成都路网（与 `chengdu/` 相同） |
+| `train.pkl` / `val.pkl` | 970 MB / 178 MB | 1693 / 314 条 | 在长图上微调（可选） |
+| `test.pkl` | 638 MB | 1103 条 | 完整 test 指标 |
+| `test_1000.pkl` | 581 MB | 1000 条 | **规模泛化主表** |
+| `shuffled_od_1000.pkl` | 347 MB | 1000 条 | OD 打乱重配，**无真实 GT**（`dijkstra_placeholder`） |
+| `split_manifest.csv` | 463 KB | 3110 行 | 逐样本 order_id / split / gt_cost / gt_cost_ratio |
+| `metadata.json` | 2 KB | — | 建图统计、rho、过滤条件、划分 |
+| `stats.json` | 17 KB | — | 清洗漏斗 + corridor retention + 各 split 摘要 |
+| `_didi_candidates.pkl` | 2 MB | 4039 条 | 候选缓存（换配置自动失效） |
+
+规模对照（`test_1000`）：corridor 节点 1909 vs 412（**4.63×**）、gt_length 65.3 vs 22.7
+（**2.88×**）、decision 1631 vs 336（4.85×）、单样本 567 KB vs 114 KB（4.98×）。
+
+```bash
+# 只跑 --build：rho 沿用主数据集冻结的 1.5，不重扫（重扫=用新数据调参，会污染泛化结论）
+# 全量读 150 万行，约 16 分钟，产出 2.72 GB
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/prepare_didi.py --config configs/didi_chengdu_long.yaml --build
+E:/CondaEnvData/envs/GGMPC/python.exe tools/verify_didi_pipeline.py --data data/didi/graph/chengdu_long
+
+# 拿主数据集的模型直接测新规模（--config 保持主数据集，只换 --data）
+E:/CondaEnvData/envs/GGMPC/python.exe scripts/evaluate.py --checkpoint outputs/runs/didi_chengdu/best.pt --config configs/didi_chengdu.yaml --data data/didi/graph/chengdu_long/test_1000.pkl
+```
+
+⚠️ 两点解读前提：① corridor 在这里**不裁剪**（`max_corridor_nodes: 0`），最大样本 = 2,886 节点，
+接近整城 2,891，走廊的局部性已失效，它是压力测试而不是 corridor 语义的复现；② retention 0.80~0.82，
+且和主数据集一样存在高绕路 GT 更容易被丢的偏差（1.50~2.00 桶 0.712、≥2.00 桶 0.128），
+跨规模比较时两边都不是无偏采样。详见 README 第 24.15 节。
+
 ## processed/v1/ —— V1 原始数据（本机未保留）
 
 `data/processed/v1/{train,val,test,ood_size}.pt` + `manifest.json` / `*_meta.json` 是 V1 时代

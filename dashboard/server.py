@@ -16,7 +16,7 @@ import sys
 import threading
 import traceback
 import webbrowser
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -27,6 +27,70 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+#: 面板"评测标尺"模式的默认值。**必须与 ``scripts/evaluate.py`` 的
+#: ``_DECODE_RULER_DEFAULTS`` 逐键一致** —— 面板存在的意义就是把评测口径复现出来，
+#: 两份常量一旦漂移，面板就变成第四把尺子。
+#: ``tests/test_dashboard_frontend.py::test_panel_ruler_defaults_match_evaluate_script``
+#: 会静态比对这两份，改了一边而忘了另一边会直接测试失败。
+RULER_DEFAULTS: Dict[str, Any] = {
+    "decode": "single",
+    "top_k": 2,
+    "beam_width": 64,
+    "null_policy": "stop",
+    "filter_dead_branches": False,
+    "strict_decode": False,
+}
+
+#: 面板手动控件在服务端的夹取范围（别让请求里的离谱数字把 beam search 拖死）。
+MULTI_LIMITS: Dict[str, Tuple[int, int]] = {
+    "top_k": (1, 6),
+    "beam_width": (1, 256),
+    "display_paths": (1, 24),
+}
+
+#: ``POST /api/path`` 里 ``ruler`` 的合法取值。
+#:
+#: 2026-09-16：**只剩 ruler**。"历史（存活路径表）"口径已从面板移除 —— 它把
+#: goal / NULL / loop / dead-end 放进同一个池子按累计 log 概率排序，于是"最早被打断的
+#: 残骸"因为负数加得少而当选（DiDi test_1000 实测 `multi.best` 平均 6.89 跳，真正走到
+#: 终点的那条平均 18.5 跳）。同一份 best.pt：历史 2/3 是 GoalHit 0.336 / DTW 1.15 km，
+#: 标尺 strict 2/3 是 GoalHit 0.996 / DTW 0.27 km。两把尺子同时摆在面板里，
+#: 只会让人对着图猜"到底哪个数才算数"——所以直接删掉一把。
+RULER_MODES = ("ruler",)
+
+
+@dataclass(frozen=True)
+class DecodeRuler:
+    """一个 run 的**评测标尺**：验证 / 选 best.pt / 最终测试三处共用的那套解码口径。
+
+    来源是**当前** ``configs/<run>.yaml`` 的 ``evaluation.*``（不是训练快照，理由同
+    :func:`_live_run_settings`）。没写这些键的旧 config 落到 :data:`RULER_DEFAULTS`，
+    与 ``scripts/evaluate.py`` 的 CLI 默认逐位一致。
+    """
+
+    decode: str = "single"
+    strict: bool = False
+    top_k: int = 2
+    beam_width: int = 64
+    null_policy: str = "stop"
+    filter_dead_branches: bool = False
+    #: config 里是否**真的写了** ``evaluation.decode``。没写说明这个 run 的标尺是
+    #: 兜底默认值（``single``），面板不该声称"对齐了评测"。
+    declared: bool = False
+    source: str = ""
+
+    @property
+    def is_multi(self) -> bool:
+        return self.decode == "multi"
+
+    @property
+    def label(self) -> str:
+        if not self.is_multi:
+            return "single（该 run 没有多分支标尺）"
+        head = "strict" if self.strict else "历史"
+        return f"{head} {self.top_k}/{self.beam_width}"
 
 
 @dataclass(frozen=True)
@@ -52,6 +116,8 @@ class RunInfo:
     coords_file: str = ""
     #: 解析到的 live config（相对仓库根的路径），给面板显示来源用。
     live_config: str = ""
+    #: 该 run 的评测标尺（验证 / 选 best / 最终测试共用），面板默认按它解码
+    ruler: DecodeRuler = field(default_factory=DecodeRuler)
 
     @property
     def is_geo(self) -> bool:
@@ -116,8 +182,16 @@ def _read_live_config(root: Path, name: str) -> Dict[str, Any]:
         return {}
     data_cfg = payload.get("data") if isinstance(payload.get("data"), Mapping) else {}
     paths_cfg = payload.get("paths") if isinstance(payload.get("paths"), Mapping) else {}
+    eval_cfg = (
+        payload.get("evaluation") if isinstance(payload.get("evaluation"), Mapping) else {}
+    )
     source = data_cfg.get("source")
     coords = data_cfg.get("coords_file")
+    ruler = {}
+    for key, fallback in RULER_DEFAULTS.items():
+        value = eval_cfg.get(key, None)
+        ruler[key] = fallback if value is None else value
+    ruler["declared"] = "decode" in eval_cfg
     return {
         "live_config": f"configs/{name}.yaml",
         "run_name": str(paths_cfg.get("run_name", "") or ""),
@@ -126,7 +200,29 @@ def _read_live_config(root: Path, name: str) -> Dict[str, Any]:
         # 真正的"数据来源"标记
         "source": source if isinstance(source, str) else "",
         "coords_file": str(coords) if coords else "",
+        "ruler": ruler,
     }
+
+
+def _ruler_from_settings(live: Mapping[str, Any], run_name: str) -> DecodeRuler:
+    """把 live config 的 ``evaluation.*`` 变成一个 :class:`DecodeRuler`。"""
+    raw = live.get("ruler")
+    raw = raw if isinstance(raw, Mapping) else {}
+
+    def pick(key: str) -> Any:
+        value = raw.get(key, None)
+        return RULER_DEFAULTS[key] if value is None else value
+
+    return DecodeRuler(
+        decode=str(pick("decode")).lower(),
+        strict=bool(pick("strict_decode")),
+        top_k=int(pick("top_k")),
+        beam_width=int(pick("beam_width")),
+        null_policy=str(pick("null_policy")),
+        filter_dead_branches=bool(pick("filter_dead_branches")),
+        declared=bool(raw.get("declared", False)),
+        source=str(live.get("live_config", "") or ""),
+    )
 
 
 def _live_run_settings(root: Path, names: Iterable[str]) -> Dict[str, Any]:
@@ -223,6 +319,7 @@ def discover_runs(root: Path = PROJECT_ROOT) -> Dict[str, RunInfo]:
             source=str(live.get("source") or snapshot_source),
             coords_file=_existing_relative(root, str(live.get("coords_file", ""))),
             live_config=str(live.get("live_config", "")),
+            ruler=_ruler_from_settings(live, run_id),
         )
     return found
 
@@ -290,6 +387,85 @@ def _finite(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_finite(item) for item in value]
     return value
+
+
+def resolve_multi_decode(
+    request: Mapping[str, Any], run: Optional[RunInfo]
+) -> Dict[str, Any]:
+    """把「面板请求 + run 的评测标尺」解析成 ``decode_multi_path`` 的实参。
+
+    面板现在**只有一套解码语义**：strict 三池
+    （``src.evaluation.strict_beam_decoder``）—— NULL / loop / dead-end 在 top-k
+    之前就被 mask、失败路径直接淘汰，最终候选集只有完整走到 Goal 的路径。
+    这一点**不可配置**（历史口径已移除，见 :data:`RULER_MODES`）。
+
+    可配置的只有**搜索预算**：
+
+    * ``top_k``（每次分叉）与 ``beam_width``（路径表上限）：默认取该 run 的评测标尺，
+      请求里给了就用请求里的（仍按 :data:`MULTI_LIMITS` 夹取）。一旦改了，
+      面板就**不再等于**该 run 的评测标尺 —— ``note`` 会写明"手动覆盖"和标尺原值，
+      避免对着一个不是评测口径的数字下结论。
+    * ``null_policy`` / ``filter_dead_branches``：strict 下由解码器接管，恒取标尺值。
+
+    run 没有多分支标尺时（``controlled_unweighted`` / ``controlled_weighted`` 的
+    config 没写 ``evaluation.decode``）用 :data:`RULER_DEFAULTS` 的 top_k/beam_width
+    兜底，并在 ``note`` 里说明 —— 而不是悄悄按另一套参数跑完还声称对齐了评测。
+
+    这是纯函数（不碰 dataset / model），所以可以直接单测。
+    """
+    mode = str(request.get("ruler", "ruler")).lower()
+    if mode not in RULER_MODES:
+        raise ValueError(
+            f"ruler 必须是 {' | '.join(RULER_MODES)}，收到 {mode!r}"
+            "（历史口径已移除：它与评测标尺在 DiDi test_1000 上 GoalHit 差 66 个百分点）"
+        )
+
+    def clamp(key: str, value: Any) -> int:
+        low, high = MULTI_LIMITS[key]
+        return max(low, min(int(value), high))
+
+    display_paths = clamp("display_paths", request.get("display_paths", 8))
+
+    ruler = run.ruler if run is not None else None
+    if ruler is not None and ruler.is_multi:
+        base_top_k = clamp("top_k", ruler.top_k)
+        base_beam = clamp("beam_width", ruler.beam_width)
+        null_policy = ruler.null_policy
+        filter_dead_branches = bool(ruler.filter_dead_branches)
+        declared = bool(ruler.declared)
+        source = ruler.source
+    else:
+        # 该 run 没有多分支标尺：用 evaluate.py 的兜底默认，但**仍然走 strict**
+        # —— 面板只有一套解码语义，不因为 config 没写就偷偷换一把尺子。
+        base_top_k = clamp("top_k", RULER_DEFAULTS["top_k"])
+        base_beam = clamp("beam_width", RULER_DEFAULTS["beam_width"])
+        null_policy = str(RULER_DEFAULTS["null_policy"])
+        filter_dead_branches = bool(RULER_DEFAULTS["filter_dead_branches"])
+        declared = False
+        source = ""
+
+    top_k = clamp("top_k", request.get("top_k", base_top_k))
+    beam_width = clamp("beam_width", request.get("beam_width", base_beam))
+
+    note = f"strict {top_k}/{beam_width}"
+    if (top_k, beam_width) != (base_top_k, base_beam):
+        note += f"（手动覆盖；该 run 标尺 {base_top_k}/{base_beam}）"
+    elif ruler is not None and ruler.is_multi:
+        note += f"（{'config' if declared else '默认'}{' · ' + source if source else ''}）"
+    else:
+        note += "（该 run 没有多分支标尺，用默认值）"
+
+    return {
+        "mode": "ruler",
+        "strict": True,
+        "top_k": top_k,
+        "beam_width": beam_width,
+        # strict 下 decoder 会接管这两个：NULL 永远不合法、必死 branch 恒被剔除
+        "null_policy": null_policy,
+        "filter_dead_branches": filter_dead_branches,
+        "display_paths": display_paths,
+        "note": note,
+    }
 
 
 #: 面板要展示的报告 / 汇总产物。(id, 标题, 仓库内相对路径)
@@ -612,6 +788,34 @@ def _weights_cost(graph: Any, edges: Iterable[Any], fallback: float) -> float:
         return float(fallback)
 
 
+def annotate_found_order(routes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """给路线补上`found_index`（第几个完成），并返回完成步数的范围。
+
+    为什么需要：strict 束搜索是**按深度逐层展开**的，所以 `depth` 就等于
+    "搜索第几步完成"，而同一个 depth 的多条路线是**同一轮里同时毕业**的 ——
+    "发现顺序"= depth 升序（同 depth 内保持概率序，`sorted` 本来就稳定）。
+    面板图例里的 `rank` 是 success 池最后按 log_prob 重排出来的**概率序**，
+    两者必须分开，否则 `#1` 会被读成"最先到达"。
+
+    `depth` 全为 None（单路径解码）时不做任何标注，返回空范围。
+    """
+    depths = [route["depth"] for route in routes if route["depth"] is not None]
+    if not depths:
+        # 一个 depth 都没有（单路径解码）-> 不编造顺序，前端退回"按长度"播放
+        return {"first_found_depth": None, "last_found_depth": None}
+    order = sorted(
+        range(len(routes)),
+        key=lambda index: (routes[index]["depth"], index),
+    )
+    for found, position in enumerate(order, start=1):
+        routes[position]["found_index"] = found
+    ordered = [routes[index]["depth"] for index in order]
+    return {
+        "first_found_depth": int(min(ordered)),
+        "last_found_depth": int(max(ordered)),
+    }
+
+
 def _route_payload(path: Any, rank: int, graph: Any) -> Dict[str, Any]:
     if hasattr(path, "nodes"):
         nodes = path.nodes
@@ -635,6 +839,12 @@ def _route_payload(path: Any, rank: int, graph: Any) -> Dict[str, Any]:
     path_cost = getattr(path, "path_cost", None)
     if path_cost is None:
         path_cost = _weights_cost(graph, edges, fallback=float(cost))
+    # 这条路线**在第几轮扩展里被找到**。strict 束搜索是**按深度逐层展开**的
+    # （第 k 轮把深度 k 的 alive 全部展开成 k+1），所以 PathCandidate.num_branches
+    # 就是"搜索第几步完成" —— 面板要回答"谁先到达"靠的就是它。
+    # rank 是**概率序**（success 池最后按 log_prob 重排过），两者不是一回事。
+    # decode_flat 的单路径没有这个量 -> None（前端就退回按长度播放）。
+    depth = getattr(path, "num_branches", None)
     return _finite(
         {
             "rank": rank,
@@ -646,6 +856,7 @@ def _route_payload(path: Any, rank: int, graph: Any) -> Dict[str, Any]:
             "path_cost": float(path_cost),
             "weighted": _has_edge_weights(graph),
             "log_prob": log_prob,
+            "depth": None if depth is None else int(depth),
         }
     )
 
@@ -834,6 +1045,19 @@ class DashboardService:
                     "geo": item.is_geo,
                     "coords_file": item.coords_file,
                     "live_config": item.live_config,
+                    # 该 run 的评测标尺：面板默认按它解码，并在标尺不是多分支时
+                    # 禁用"评测标尺"选项（而不是悄悄退回另一套口径）
+                    "ruler": {
+                        "decode": item.ruler.decode,
+                        "strict": item.ruler.strict,
+                        "top_k": item.ruler.top_k,
+                        "beam_width": item.ruler.beam_width,
+                        "null_policy": item.ruler.null_policy,
+                        "filter_dead_branches": item.ruler.filter_dead_branches,
+                        "declared": item.ruler.declared,
+                        "multi": item.ruler.is_multi,
+                        "label": item.ruler.label,
+                    },
                 }
                 for item in self.runs.values()
             ],
@@ -982,24 +1206,25 @@ class DashboardService:
                     "num_filtered_dead_branches": 0,
                 }
             else:
-                top_k = max(1, min(int(request.get("top_k", 2)), 6))
-                beam_width = max(1, min(int(request.get("beam_width", 64)), 256))
-                display_paths = max(1, min(int(request.get("display_paths", 8)), 24))
-                null_policy = str(request.get("null_policy", "stop"))
-                filter_dead_branches = bool(request.get("filter_dead_branches", False))
+                options = resolve_multi_decode(request, self.runs.get(run_id))
                 decoded = decode_multi_path(
                     sample,
                     candidate_prob,
-                    top_k=top_k,
-                    beam_width=beam_width,
-                    null_policy=null_policy,
-                    filter_dead_branches=filter_dead_branches,
+                    top_k=options["top_k"],
+                    beam_width=options["beam_width"],
+                    null_policy=options["null_policy"],
+                    filter_dead_branches=options["filter_dead_branches"],
+                    strict=options["strict"],
                 )
                 routes = [
                     _route_payload(path, rank + 1, sample.graph)
-                    for rank, path in enumerate(decoded.finished[:display_paths])
+                    for rank, path in enumerate(
+                        decoded.finished[: options["display_paths"]]
+                    )
                 ]
                 summary = decoded.summary()
+                # 搜索时序：面板要回答"谁先到达"，光有概率序的 rank 不够。
+                summary.update(annotate_found_order(routes))
 
             response = {
                     "model": run_id,
@@ -1038,6 +1263,16 @@ class DashboardService:
                     ),
                     "routes": routes,
                     "summary": summary,
+                    # 这张图到底是按哪把尺子解出来的。面板直接把它印在状态行上 ——
+                    # 面板/报告/评测三处口径不一致是踩过的坑，这里不留给用户猜。
+                    "ruler": (
+                        options
+                        if decode == "multi"
+                        else {
+                            "mode": "single",
+                            "note": "单路径 readout（最终 candidate_prob 组内 argmax）",
+                        }
+                    ),
                 }
             if include_diffusion:
                 response["diffusion"] = _diffusion_payload(

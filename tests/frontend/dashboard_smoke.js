@@ -121,7 +121,14 @@ function runScenario(scenario) {
     check("app.js 加载", true);
 
     sandbox.__payload = payload;
+    sandbox.__catalog = scenario.catalog;
     vm.runInContext("state.pathData = __payload;", context);
+    if (scenario.catalog) {
+      vm.runInContext(
+        "state.catalog = __catalog; document.querySelector('#path-model').value = __catalog.models[0].id;",
+        context
+      );
+    }
 
     // ---- 1) 路径视图 -----------------------------------------------------
     stage = "renderGraph";
@@ -184,10 +191,175 @@ function runScenario(scenario) {
           vm.runInContext("state.diffusionFrame", context) === frames - 1,
           vm.runInContext("state.diffusionFrame", context));
 
-    // ---- 5) 切回路径视图 -------------------------------------------------
+    // ---- 5) 解码口径：只剩 strict 标尺，分叉 / 路径表上限可调 ----------------
+    // 历史（存活路径表）口径已移除；"每次分叉 / 路径表上限"默认铺成该 run 的评测标尺值，
+    // 但**不置灰** —— 调过之后提示必须写明"手动覆盖"，否则又会变成对着一个
+    // 不是评测口径的数字下结论。被解码器接管的两个控件（NULL 策略 / 必死预筛选）仍置灰。
+    if (scenario.catalog) {
+      stage = "rulerControls";
+      vm.runInContext("applyRulerDefaults();", context);
+      const ruler = scenario.catalog.models[0].ruler;
+      if (ruler.multi) {
+        check("分叉 / 路径表上限铺成标尺值",
+              elementFor("#top-k").value === String(ruler.top_k)
+              && elementFor("#beam-width").value === String(ruler.beam_width),
+              `${elementFor("#top-k").value}/${elementFor("#beam-width").value}`);
+        check("分叉 / 路径表上限可编辑",
+              elementFor("#top-k").disabled === false
+              && elementFor("#beam-width").disabled === false);
+        check("被解码器接管的两个控件仍置灰",
+              elementFor("#null-policy").disabled === true
+              && elementFor("#filter-dead").disabled === true);
+        check("提示写清了标尺来源",
+              elementFor("#ruler-note").textContent.includes(String(ruler.beam_width)),
+              elementFor("#ruler-note").textContent);
+        const before = elementFor("#ruler-note").textContent;
+        elementFor("#beam-width").value = String(Number(ruler.beam_width) + 5);
+        vm.runInContext("__fire('#beam-width', 'change');", context);
+        check("手改后提示写明「手动覆盖」",
+              elementFor("#ruler-note").textContent.includes("手动覆盖"),
+              elementFor("#ruler-note").textContent);
+        check("手改确实改了提示（不是死值）",
+              elementFor("#ruler-note").textContent !== before,
+              elementFor("#ruler-note").textContent);
+        vm.runInContext("applyRulerDefaults();", context);
+        check("「↺ 标尺值」把预算恢复成标尺值",
+              elementFor("#beam-width").value === String(ruler.beam_width)
+              && !elementFor("#ruler-note").textContent.includes("手动覆盖"),
+              elementFor("#ruler-note").textContent);
+      } else {
+        check("该 run 没有多分支标尺时用默认 strict 值",
+              elementFor("#top-k").value === "2"
+              && elementFor("#beam-width").value === "64",
+              `${elementFor("#top-k").value}/${elementFor("#beam-width").value}`);
+        check("并说明原因",
+              elementFor("#ruler-note").textContent.includes("没有多分支标尺"),
+              elementFor("#ruler-note").textContent);
+      }
+    }
+
+    // ---- 6) 按搜索顺序播放 -------------------------------------------------
+    // rank 是**概率序**、不是到达顺序；"谁先到达"看 depth（strict 束搜索按深度逐层
+    // 展开，所以 depth 就是"搜索第几步完成"）。这个模式必须真的按 depth 分组
+    // 一组一组出现，而不是所有路线一起长完。
+    stage = "searchPlayback";
+    vm.runInContext(`
+      const template = state.pathData.routes[0];
+      state.pathData.routes = [
+        {...template, depth: 10, found_index: 1},
+        {...template, depth: 13, found_index: 2},
+        {...template, depth: 16, found_index: 3},
+      ];
+      setGraphView('path');
+      document.querySelector('#anim-mode').value = 'search';
+      // 桩元素的 value 默认是空串 -> Number('') = 0 -> progress 永远 0，必须先钉住速度
+      document.querySelector('#speed').value = '1';
+    `, context);
+    // 图例项是 **children**（桩元素的 innerHTML 不会被解析），所以读 children 的 innerHTML
+    const legendHtml = vm.runInContext(
+      "document.querySelector('#path-legend').children.map((item) => item.innerHTML).join(' | ')",
+      context);
+    check("图例标注了完成顺序（rank 是概率序，不是到达序）",
+          legendHtml.includes("个完成（搜索第"), legendHtml.slice(0, 90));
+    vm.runInContext("drawAnimation(0);", context);
+    check("还没开始的路线连笔尖都不画",
+          vm.runInContext("state.routeGraphics.every((g) => g.head.style.display === 'none')", context));
+    vm.runInContext("drawAnimation(state.duration * 0.5);", context);
+    const revealed = vm.runInContext(
+      "state.routeGraphics.filter((g) => g.head.style.display !== 'none').length", context);
+    check("只画到当前组，后面的组还没出现", revealed === 2, `${revealed}/3`);
+    check("状态行写明第几组",
+          elementFor("#path-status").textContent.includes("按搜索顺序播放"),
+          elementFor("#path-status").textContent);
+    vm.runInContext("drawAnimation(state.duration);", context);
+    check("播完恢复常规摘要",
+          !elementFor("#path-status").textContent.includes("按搜索顺序播放"),
+          elementFor("#path-status").textContent);
+    vm.runInContext("document.querySelector('#anim-mode').value = 'length';", context);
+
+    // ---- 7) 自适应视野 -----------------------------------------------------
+    // corridor 有上千节点、路线只走几十个；全图铺满时路线只占几个像素。
+    // viewBox 要收紧到路线包围盒上，同时文字按 1/scale 缩回保持屏幕字号。
+    stage = "autoZoom";
+    vm.runInContext(`
+      document.querySelector('#zoom-mode').value = 'full';
+      renderGraph();
+    `, context);
+    const fullBox = vm.runInContext(
+      "document.querySelector('#graph').getAttribute('viewBox').split(' ').map(Number)", context);
+    check("全图模式 = 整幅画布",
+          fullBox[0] === 0 && fullBox[1] === 0 && fullBox[2] === 1000 && fullBox[3] === 620,
+          fullBox.join(" "));
+
+    // 直接喂一个已知的小包围盒：60×40 的点集 -> 长宽比归一后仍远小于画布，
+    // 所以应该撞到 6 倍上限；这是与 fixture 规模无关的精确断言。
+    // 注意必须先切到 fit —— applyViewport 读的就是 #zoom-mode。
+    const fit = JSON.parse(vm.runInContext(`
+      document.querySelector('#zoom-mode').value = 'fit';
+      const svg = document.querySelector('#graph');
+      const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      applyViewport(svg, [{x: 400, y: 300}, {x: 460, y: 340}],
+                    [{element: label, base: 10, y: 300, dy: 13}]);
+      JSON.stringify({box: svg.getAttribute('viewBox'), scale: state.viewScale,
+                      font: label.style.fontSize, labelY: label.getAttribute('y')});
+    `, context));
+    const fitWidth = Number(fit.box.split(" ")[2]);
+    check("自适应视野把画面收到包围盒上", fitWidth > 0 && fitWidth < 1000, fit.box);
+    check("放大倍率夹在 6 倍以内", Math.abs(fit.scale - 6) < 0.01, String(fit.scale));
+    check("文字按 1/scale 缩回保持屏幕字号",
+          Math.abs(parseFloat(fit.font) - 10 / 6) < 0.05, fit.font);
+    check("标签偏移同样按 1/scale 缩回（否则放大后会飘离节点）",
+          Math.abs(parseFloat(fit.labelY) - (300 - 13 / 6)) < 0.05, fit.labelY);
+
+    vm.runInContext(`
+      document.querySelector('#zoom-mode').value = 'fit';
+      setGraphView('path');
+    `, context);
+    const liveScale = vm.runInContext("state.viewScale", context);
+    check("真实样本上自适应视野不小于 1 倍（不会比全图还小）", liveScale >= 1, String(liveScale));
+
+    // ---- 8) 节点显示：默认"仅路线" -----------------------------------------
+    // 真实 corridor 上千个节点全画成小圆会糊成一片白点，把路线和路网都盖住。
+    stage = "nodeDisplay";
+    const countNodeCircles = () => vm.runInContext(`
+      (() => {
+        let total = 0;
+        const walk = (node) => {
+          const cls = node.attributes && node.attributes.class ? String(node.attributes.class) : "";
+          if (node.tagName === "circle" && cls.split(" ")[0] === "node") total += 1;
+          (node.children || []).forEach(walk);
+        };
+        walk(document.querySelector("#graph"));
+        return total;
+      })()
+    `, context);
+    // 桩元素的 innerHTML = "" 不会清空 children（浏览器会），所以每次渲染前手动清一遍，
+    // 否则三次渲染的圆点是**累加**的，数出来的数字没有意义。
+    const renderWithNodeMode = (mode) => vm.runInContext(
+      `document.querySelector('#graph').children.length = 0;
+       document.querySelector('#node-mode').value = '${mode}';
+       renderGraph();`, context);
+    renderWithNodeMode("all");
+    const allNodeCircles = countNodeCircles();
+    renderWithNodeMode("route");
+    const routeNodeCircles = countNodeCircles();
+    renderWithNodeMode("none");
+    const noNodeCircles = countNodeCircles();
+    check("「仅路线」比「全部」少画节点（且不是全不画）",
+          routeNodeCircles > 0 && routeNodeCircles < allNodeCircles,
+          `route=${routeNodeCircles} all=${allNodeCircles}`);
+    check("「全关」一个节点圆点都不画", noNodeCircles === 0, String(noNodeCircles));
+    vm.runInContext("document.querySelector('#node-mode').value = 'route'; renderGraph();", context);
+
+    // ---- 9) 切回路径视图 -------------------------------------------------
     stage = "backToPath";
     vm.runInContext("setGraphView('path');", context);
     check("setGraphView('path') 不抛异常", true);
+    // 状态行必须印出实际口径 —— 面板/报告/评测口径不一致是踩过的坑，
+    // 不能让人对着图猜用的是哪把尺子
+    check("状态行印出了实际解码口径",
+          elementFor("#path-status").textContent.includes("口径"),
+          elementFor("#path-status").textContent);
   } catch (caught) {
     error = `${scenario.name}: ${stage}: ${caught && caught.message ? caught.message : caught}`;
   }
