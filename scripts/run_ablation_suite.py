@@ -1,24 +1,34 @@
 """四个结构消融实验的**一次性顺序执行器**（对应 docs/ABLATION_GUIDE.md）。
 
-做四件事，全部可断点续跑（已有产物自动跳过）：
+做三件事，全部可断点续跑：
 
     1. 依次训练 5 个 run（ab_full + 4 个消融），共享 configs/ablation_chengdu.yaml，
        差异全部通过 --set 注入，每个 run 的 run_config.json 都能自证是哪个变体；
     2. 每个 run 依次在 3 个测试集上评测（成都 normal / 成都 long / 西安），
        统一 strict multi top_k=2 beam=3 deterministic；
-    3. 汇总成一张对比表写 outputs/ablation/ABLATION_REPORT.md；
-    4. 打印验收结论。
+    3. 汇总成一张对比表写 outputs/ablation/ABLATION_REPORT.md。
 
 顺序是**串行**的：一张卡上并行跑会互相抢显存，而且耗时不可比。
+
+``train.py`` 的输出是**实时透传**到终端的（不是攒到结束才打），所以训练期间能直接
+看到 loss / 每轮验证指标。
+
+断点续跑的判定**不能只看 best.pt**：``best.pt`` 在第 1 个 epoch 之后就会被写出来，
+只看它会把"只训了 1 轮"的 run 当成已完成而静默跳过 —— 那样最后的消融表是错的，
+而且没有任何报错。所以这里按 ``history.json`` 里**已完成的 epoch 数**判断：
+
+    已完成 >= 目标 epoch        -> 跳过
+    0 < 已完成 < 目标 epoch     -> 从 last.pt 续训到目标 epoch
+    其余                        -> 从头训练
 
 用法::
 
     python scripts/run_ablation_suite.py                 # 全程：训练 + 评测 + 报告
     python scripts/run_ablation_suite.py --stage train   # 只训练
-    python scripts/run_ablation_suite.py --stage eval    # 只评测（训练完成后）
+    python scripts/run_ablation_suite.py --stage eval    # 只评测
     python scripts/run_ablation_suite.py --stage report  # 只出报告
     python scripts/run_ablation_suite.py --only ab_full ab_direct
-    python scripts/run_ablation_suite.py --force         # 已存在的也重跑
+    python scripts/run_ablation_suite.py --force         # 已完成的也重跑
     python scripts/run_ablation_suite.py --dry-run       # 只打印将执行什么
 """
 
@@ -37,10 +47,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.utils.config import load_config  # noqa: E402
+
 CONFIG = "configs/ablation_chengdu.yaml"
 TRAIN_DATA = "data/didi/graph/chengdu/train.pkl"
 VAL_DATA = "data/didi/graph/chengdu/val.pkl"
 OUT_DIR = PROJECT_ROOT / "outputs" / "ablation"
+RUNS_DIR = PROJECT_ROOT / "outputs" / "runs"
 
 #: (run 名, 该变体相对 Full 的 --set 覆盖, 中文说明)
 VARIANTS: List[Tuple[str, Dict[str, str], str]] = [
@@ -80,49 +93,96 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="run the four structural ablations")
     parser.add_argument("--stage", choices=("all", "train", "eval", "report"), default="all")
     parser.add_argument("--only", nargs="*", default=None, help="只跑指定 run")
-    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--force", action="store_true", help="已完成/已存在的也重跑")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--quiet", action="store_true", help="不透传子进程输出")
     return parser.parse_args()
 
 
-def run(cmd: List[str], dry: bool) -> int:
+def target_epochs() -> int:
+    return int(load_config(CONFIG, []).get("training.epochs", 20))
+
+
+def completed_epochs(name: str) -> int:
+    """history.json 里记了多少轮 —— 这是判断"训完了没有"的唯一可靠依据。"""
+    path = RUNS_DIR / name / "history.json"
+    if not path.exists():
+        return 0
+    try:
+        records = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return 0
+    return len(records) if isinstance(records, list) else 0
+
+
+def run(cmd: List[str], dry: bool, quiet: bool = False) -> int:
+    """跑一条子命令；输出**实时透传**，同时留一份给失败时打印尾部。"""
     child_env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
     print("    " + " ".join(cmd), flush=True)
     if dry:
         return 0
+
     started = time.time()
-    proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True,
-                          text=True, encoding="utf-8", errors="replace",
-                          env=child_env)
+    proc = subprocess.Popen(
+        cmd, cwd=str(PROJECT_ROOT), env=child_env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    )
+    tail: List[str] = []
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.rstrip()
+        if not line:
+            continue
+        tail.append(line)
+        if len(tail) > 60:
+            tail.pop(0)
+        if not quiet:
+            print(f"      | {line}", flush=True)
+    proc.wait()
     took = time.time() - started
+
     if proc.returncode == 0:
-        tail = [ln for ln in (proc.stdout or "").strip().splitlines() if ln.strip()][-2:]
-        print(f"    OK  {took:.0f}s" + (f"  |  {tail[-1].strip()}" if tail else ""), flush=True)
+        print(f"    OK  {took:.0f}s", flush=True)
     else:
         print(f"    FAILED rc={proc.returncode} ({took:.0f}s)", flush=True)
-        print(((proc.stderr or "") + (proc.stdout or ""))[-2000:], flush=True)
+        for line in tail[-25:]:
+            print(f"      ! {line}", flush=True)
     return proc.returncode
 
 
 # ---------------------------------------------------------------------------
 def train_variants(args, selected) -> int:
+    want = target_epochs()
     print("=" * 78)
-    print("阶段 1/3 · 训练（5 个 run，串行）")
+    print(f"阶段 1/3 · 训练（{len(selected)} 个 run，串行，每个 {want} epoch）")
     print("=" * 78)
     failures = 0
     for name, overrides, note in selected:
-        ckpt = PROJECT_ROOT / "outputs" / "runs" / name / "best.pt"
+        run_dir = RUNS_DIR / name
+        done = completed_epochs(name)
+        has_last = (run_dir / "last.pt").exists()
         print(f"\n[{name}] {note}")
-        if ckpt.exists() and not args.force:
-            print(f"    SKIP（已有 {ckpt.relative_to(PROJECT_ROOT)}）")
-            continue
+        print(f"    已完成 {done}/{want} epoch")
+
         cmd = [args.python, "scripts/train.py", "--config", CONFIG, "--name", name,
                "--data", TRAIN_DATA, "--val-data", VAL_DATA, "--device", args.device]
         for key, value in overrides.items():
             cmd += ["--set", f"{key}={value}"]
-        failures += run(cmd, args.dry_run) != 0
+
+        if done >= want and not args.force:
+            print("    SKIP（已达目标 epoch）")
+            continue
+        if 0 < done < want and has_last and not args.force:
+            # 中断续训：从 last.pt 接着跑，不是重头来
+            print(f"    续训 {want - done} 个 epoch（从 last.pt）")
+            cmd += ["--resume", str(run_dir / "last.pt"),
+                    "--extra-epochs", str(want - done)]
+            failures += run(cmd, args.dry_run, args.quiet) != 0
+        else:
+            failures += run(cmd, args.dry_run, args.quiet) != 0
     return failures
 
 
@@ -134,7 +194,7 @@ def eval_variants(args, selected) -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     failures = 0
     for name, _overrides, _note in selected:
-        ckpt = PROJECT_ROOT / "outputs" / "runs" / name / "best.pt"
+        ckpt = RUNS_DIR / name / "best.pt"
         if not ckpt.exists():
             print(f"\n[{name}] SKIP：没有 best.pt（先跑 --stage train）")
             failures += 1
@@ -148,7 +208,7 @@ def eval_variants(args, selected) -> int:
             cmd = [args.python, "scripts/evaluate.py", "--config", config,
                    "--checkpoint", str(ckpt), "--data", data, "--out", str(out),
                    "--beam-width", "3", "--device", args.device, "--no-progress"]
-            failures += run(cmd, args.dry_run) != 0
+            failures += run(cmd, args.dry_run, args.quiet) != 0
     return failures
 
 
@@ -233,8 +293,9 @@ def main() -> int:
     if not selected:
         raise SystemExit("no run selected; check --only")
 
-    print(f"消融套件：{len(selected)} 个 run x {len(EVAL_SETS)} 个测试集")
-    for name, overrides, note in selected:
+    print(f"消融套件：{len(selected)} 个 run x {len(EVAL_SETS)} 个测试集   "
+          f"目标 {target_epochs()} epoch/run")
+    for name, overrides, _note in selected:
         pretty = " ".join(f"--set {k}={v}" for k, v in overrides.items()) or "(无覆盖 = Full)"
         print(f"  {name:<18} {pretty}")
     print()
@@ -249,6 +310,8 @@ def main() -> int:
 
     print()
     print(f"完成。失败/缺失 {failures} 项。")
+    if failures == 0 and args.stage in ("all", "report"):
+        print("报告：outputs/ablation/ABLATION_REPORT.md")
     return 1 if failures else 0
 
 
