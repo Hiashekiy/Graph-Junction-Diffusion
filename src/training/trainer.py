@@ -38,7 +38,11 @@ from src.diffusion.categorical import CategoricalDiffusion
 from src.evaluation.evaluator import evaluate_dataset, records_to_dicts
 from src.models.denoiser import GraphFlowDenoiser
 from src.training.checkpoint import save_checkpoint
-from src.training.losses import LossWeights, recurrent_reverse_loss
+from src.training.losses import (
+    LossWeights,
+    direct_prediction_loss,
+    recurrent_reverse_loss,
+)
 
 #: Path NLL + Sampled NULL 的拆分日志字段（loss_type="ce" 时全是 NaN，会被跳过）
 SAMPLED_NULL_METRICS = (
@@ -304,15 +308,26 @@ class Trainer:
             # P2-2：training.amp 现在真的控制 autocast + GradScaler，
             # 不再是一个只被读取、不生效的配置项。
             with self._autocast():
-                out = recurrent_reverse_loss(
-                    self.model,
-                    self.diffusion,
-                    batch,
-                    weights=self.weights,
-                    generator=self.generator,
-                    max_steps=self.diffusion.T,
-                    truncate_every=self.max_bptt_steps,
-                )
+                # generation_mode=direct 的消融没有扩散链，只有一次前向；
+                # 两条路径用的是**同一套监督目标**（见 direct_prediction_loss）。
+                if getattr(self.model, "generation_mode", "diffusion") == "direct":
+                    out = direct_prediction_loss(
+                        self.model,
+                        self.diffusion,
+                        batch,
+                        weights=self.weights,
+                        generator=self.generator,
+                    )
+                else:
+                    out = recurrent_reverse_loss(
+                        self.model,
+                        self.diffusion,
+                        batch,
+                        weights=self.weights,
+                        generator=self.generator,
+                        max_steps=self.diffusion.T,
+                        truncate_every=self.max_bptt_steps,
+                    )
             self.optimizer.zero_grad(set_to_none=True)
             if self.scaler is not None:
                 self.scaler.scale(out.loss).backward()

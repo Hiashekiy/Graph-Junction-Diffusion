@@ -638,8 +638,11 @@ def recurrent_reverse_loss(
         max_steps=steps,
     )
 
-    # 2) 只初始化一次
-    H_t = model.init_nodes(batch)
+    # 2) 只初始化一次。persistent_state=false 的消融里，下面每个 timestep 都会
+    #    重新用 H_init，而不是上一轮的 H_next（注意：这**不是** detach ——
+    #    detach 保留上一轮数值、只切梯度；reset 是连数值都不要）。
+    H_init = model.init_nodes(batch)
+    H_t = H_init
 
     # Path NLL + Sampled NULL：每个 batch 采一次，整条 reverse chain 复用同一批
     # NULL（方案第 9 节的 S_b 没有 timestep 下标）。下个 batch 会重新采。
@@ -766,8 +769,13 @@ def recurrent_reverse_loss(
             for key, value in traj_metrics.items():
                 traj_metric_accum.setdefault(key, []).append(float(value))
 
-        # 3) persistent state 直接进下一步
-        H_t = out.H_next
+        # 3) persistent state 直接进下一步；消融时回到 H_init。
+        #    注意下面紧跟着的 truncate_every 是**另一件事**（截断 BPTT 的梯度，
+        #    数值照常传递），不要和 reset 混为一谈。
+        if getattr(model, "persistent_state", True):
+            H_t = out.H_next
+        else:
+            H_t = H_init
         if truncate_every and steps_done % truncate_every == 0 and t > 1:
             H_t = H_t.detach()
 
@@ -826,6 +834,144 @@ def recurrent_reverse_loss(
         trajectory_loss=(
             float(torch.stack(traj_accum).sum().detach()) if traj_accum else float("nan")
         ),
+    )
+
+
+def direct_prediction_loss(
+    model: GraphFlowDenoiser,
+    diffusion: CategoricalDiffusion,
+    batch,
+    weights: Optional[LossWeights] = None,
+    generator: Optional[torch.Generator] = None,
+    record: bool = False,
+) -> RecurrentLossOutput:
+    """``model.generation_mode="direct"`` 的训练损失：一次前向 + **同一套**监督目标。
+
+    与 :func:`recurrent_reverse_loss` 的差别**只有时间展开**：
+
+        完整模型   z_T -> ... -> z_1 -> z_0，每个 timestep 都预测一次 z_0
+        Direct     G, s, g -> H -> p(z_0)，只预测这一次
+
+    监督目标完全不改（Path NLL + sampled saturating NULL + trajectory set），
+    因此两个模型之间唯一的差异就是"有没有迭代式扩散生成"。
+
+    **刻意不使用 diffusion**：本函数不调用 ``sample_forward_trajectory`` /
+    ``sample_xt_at_time`` / reverse posterior，也拿不到 ``z_t``；
+    唯一的前向入口 :meth:`GraphFlowDenoiser.direct_logits` 签名里就没有 z，
+    从结构上杜绝了"把 GT z_0 当输入"的 label leakage。
+
+    ``diffusion`` 参数保留只为与 recurrent 版签名一致（调用方可以直接替换），
+    函数体内不使用。
+    """
+    weights = weights or LossWeights()
+    weights.validate()
+
+    out = model.direct_logits(batch)
+
+    sampling = None
+    if weights.is_sampled_null:
+        sampling = sample_null_decisions(
+            batch.candidate_is_null[batch.target_candidate],
+            batch.decision_graph_id,
+            int(batch.num_graphs),
+            ratio=weights.null_sampling_ratio,
+            max_per_sample=weights.null_sampling_max,
+            enabled=weights.null_sampling_enabled,
+            generator=generator,
+        )
+
+    path_nll = float("nan")
+    null_nll = float("nan")
+    metric_accum: Dict[str, List[float]] = {}
+    if sampling is not None:
+        step_loss, step_path, step_null, step_metrics = path_nll_sampled_null_loss(
+            out.candidate_log_prob,
+            out.candidate_prob,
+            batch.target_candidate,
+            batch.candidate_owner,
+            batch.candidate_is_null,
+            batch.decision_graph_id,
+            batch.num_decisions,
+            batch.num_graphs,
+            weights,
+            sampling,
+        )
+        path_nll = float(step_path.detach())
+        null_nll = float(step_null.detach())
+        for metric_key, metric_value in step_metrics.items():
+            metric_accum.setdefault(metric_key, []).append(float(metric_value.detach()))
+    else:
+        step_loss = clean_state_loss(
+            out.candidate_log_prob,
+            batch.target_candidate,
+            batch.candidate_owner,
+            batch.candidate_is_null,
+            batch.num_decisions,
+            weights,
+        )
+    ce_loss = step_loss
+
+    if weights.goal_reach_weight > 0:
+        p_goal = soft_goal_reachability(
+            out.candidate_prob, batch, horizon_cap=weights.goal_horizon_cap
+        )
+        goal_loss = soft_goal_loss(p_goal, weights.goal_reach_eps)
+        soft_goal_mean = float(p_goal.mean().detach())
+    else:
+        goal_loss = ce_loss.new_zeros(())
+        soft_goal_mean = float("nan")
+
+    loss = ce_loss + float(weights.goal_reach_weight) * goal_loss
+
+    traj_accum: List[float] = []
+    traj_metric_accum: Dict[str, List[float]] = {}
+    trajectory_loss = float("nan")
+    if weights.trajectory.enabled:
+        traj_loss, traj_metrics = trajectory_set_loss(
+            out.candidate_log_prob, batch, weights.trajectory
+        )
+        # trajectory_set_loss 内部已经乘过 cfg.weight，这里不再重复乘
+        loss = loss + traj_loss
+        trajectory_loss = float(traj_loss.detach())
+        traj_accum.append(trajectory_loss)
+        for key, value in traj_metrics.items():
+            traj_metric_accum.setdefault(key, []).append(float(value))
+
+    final_accuracy = float(
+        accuracy(
+            out.candidate_log_prob,
+            batch.target_candidate,
+            batch.candidate_owner,
+            batch.num_decisions,
+        ).detach()
+    )
+
+    def _mean_or_nan(values: List[float]) -> float:
+        return float(sum(values) / len(values)) if values else float("nan")
+
+    return RecurrentLossOutput(
+        loss=loss,
+        ce_loss=ce_loss,
+        goal_loss=goal_loss,
+        soft_goal_mean=soft_goal_mean,
+        per_step_loss=[float(ce_loss.detach())] if record else [],
+        per_step_goal_loss=(
+            [float(goal_loss.detach())]
+            if record and weights.goal_reach_weight > 0
+            else []
+        ),
+        per_step_soft_goal=[soft_goal_mean] if record else [],
+        per_step_accuracy=[final_accuracy] if record else [],
+        final_log_prob=out.candidate_log_prob,
+        final_accuracy=final_accuracy,
+        path_nll=path_nll,
+        sampled_null_loss=null_nll,
+        **{key: _mean_or_nan(values) for key, values in metric_accum.items()},
+        **{
+            f"traj_{key}": _mean_or_nan(values)
+            for key, values in traj_metric_accum.items()
+        },
+        trajectory_loss=trajectory_loss,
     )
 
 

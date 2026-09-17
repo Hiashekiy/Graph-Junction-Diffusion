@@ -65,10 +65,18 @@ class BranchScorer(nn.Module):
         d_model: int = 128,
         hidden_dim: Optional[int] = None,
         dropout: float = 0.0,
+        readout: str = "mean_pool",
     ):
         super().__init__()
         self.d_model = int(d_model)
         hidden = int(hidden_dim or 2 * self.d_model)
+
+        if readout not in ("mean_pool", "first_node"):
+            raise ValueError(
+                f"model.branch_readout={readout!r} is not supported "
+                "(mean_pool | first_node)"
+            )
+        self.readout = readout
 
         # Linear(3d, 2d) -> SiLU -> Linear(2d, 1)
         self.branch_mlp = nn.Sequential(
@@ -86,6 +94,35 @@ class BranchScorer(nn.Module):
         )
 
     # ------------------------------------------------------------------
+    def branch_representation(self, H: Tensor, batch, is_branch: Tensor) -> Tensor:
+        """非 NULL candidate 的 branch 表示 [C_nonnull, d]。
+
+        ``mean_pool``（默认）：整条 branch 上除 owner 外所有节点取平均 ——
+        这是 Full model 的行为，逐位不变。
+
+        ``first_node``（消融）：只取 owner 之后的**第一个节点**。
+        候选集合、z_t 语义、edge state 展开、decoder 全部不变，**只改这个
+        表示怎么算**；拼接后仍是 3d，所以 Branch MLP 的结构与参数量完全不变
+        （消融不引入容量差异）。
+        """
+        if self.readout == "mean_pool":
+            return branch_mean_pool(
+                H,
+                batch.branch_node_ids,
+                batch.branch_node_lengths,
+                batch.num_candidates,
+            )[is_branch]
+
+        first_ids = batch.branch_node_ids[is_branch][:, 0]
+        lengths = batch.branch_node_lengths[is_branch]
+        if lengths.numel() and int(lengths.min()) < 1:
+            raise ValueError(
+                "branch_readout=first_node requires every non-NULL branch to have "
+                f"at least one node, got min length {int(lengths.min())}"
+            )
+        return H[first_ids]
+
+    # ------------------------------------------------------------------
     def branch_logits(
         self, H: Tensor, batch, tau_decisions: Tensor
     ) -> Tensor:
@@ -95,12 +132,7 @@ class BranchScorer(nn.Module):
             return H.new_zeros(0)
 
         owners = batch.candidate_owner[is_branch]
-        pooled = branch_mean_pool(
-            H,
-            batch.branch_node_ids,
-            batch.branch_node_lengths,
-            batch.num_candidates,
-        )[is_branch]
+        pooled = self.branch_representation(H, batch, is_branch)
         junction = H[batch.decision_node[owners]]
         features = torch.cat([junction, pooled, tau_decisions[owners]], dim=-1)
         return self.branch_mlp(features).squeeze(-1)

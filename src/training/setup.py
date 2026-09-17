@@ -81,6 +81,17 @@ def model_kwargs(config: Config) -> Dict[str, Any]:
         "edge_cost_hidden": int(
             edge_cost_cfg.get("hidden_dim", model_cfg.get("d_model", 128))
         ),
+        # ---- 消融开关（默认值 == 改造前的行为，逐位不变）---------------------
+        # persistent_state=false          每个 reverse timestep 重新 init_nodes
+        # use_edge_state_conditioning=false 切断 z_t -> edge state 的反馈
+        # branch_readout=first_node       只取 branch 第一个节点（不是 mean pool）
+        # generation_mode=direct          去掉扩散链，一次前向直接给 p(z_0)
+        "persistent_state": bool(model_cfg.get("persistent_state", True)),
+        "use_edge_state_conditioning": bool(
+            model_cfg.get("use_edge_state_conditioning", True)
+        ),
+        "branch_readout": str(model_cfg.get("branch_readout", "mean_pool")),
+        "generation_mode": str(model_cfg.get("generation_mode", "diffusion")),
     }
 
 

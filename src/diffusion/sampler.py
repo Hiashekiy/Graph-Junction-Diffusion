@@ -31,6 +31,7 @@ from torch import Tensor
 
 from src.diffusion.categorical import CategoricalDiffusion
 from src.models.denoiser import GraphFlowDenoiser
+from src.utils.segment_ops import segment_max
 
 
 @dataclass
@@ -163,6 +164,43 @@ def reverse_step(
 reverse_categorical_step = reverse_step
 
 
+def grouped_argmax_local(logits: Tensor, owner: Tensor, num_groups: int) -> Tensor:
+    """每个 decision 组内 logits 最大的 candidate（flat index）。
+
+    只用于 ``generation_mode=direct`` 的确定性 readout。并列时取下标最小的那个。
+    """
+    if logits.numel() == 0:
+        return torch.zeros(0, dtype=torch.long, device=logits.device)
+    best = segment_max(logits, owner, num_groups)
+    is_best = logits >= best[owner]
+    order = torch.arange(logits.numel(), device=logits.device)
+    sentinel = logits.numel()
+    candidate = torch.where(is_best, order, torch.full_like(order, sentinel))
+    start = torch.full((num_groups,), sentinel, dtype=torch.long, device=logits.device)
+    return start.scatter_reduce(0, owner, candidate, reduce="amin")
+
+
+@torch.no_grad()
+def direct_chain(model: GraphFlowDenoiser, batch, record: bool = False) -> Dict[str, Any]:
+    """``generation_mode="direct"`` 的"链"：一次前向就是最终 readout。
+
+    返回结构与 :func:`sample_reverse_chain` 完全一致，所以 evaluator / readout
+    不需要任何分支就能消费它（评测协议里两条模型走同一套 strict 2/3 解码）。
+    """
+    out = model.direct_logits(batch)
+    z0 = grouped_argmax_local(out.candidate_log_prob, batch.candidate_owner, batch.num_decisions)
+    trace = ReverseTrace()
+    if record:
+        trace.append(out.H_next, z0, out.candidate_log_prob)
+    return {
+        "z0": z0,
+        "H0": out.H_next,
+        "candidate_log_prob": out.candidate_log_prob,
+        "candidate_prob": out.candidate_prob,
+        "trace": trace if record else None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # full chain
 # ---------------------------------------------------------------------------
@@ -192,9 +230,17 @@ def sample_reverse_chain(
             "treat z_T as z_k, but q(z_k) != pi in general. Implement explicit "
             "timestep skipping if you need accelerated sampling."
         )
+    if getattr(model, "generation_mode", "diffusion") == "direct":
+        # 没有扩散链，也就没有 z_T ~ pi 这回事，max_steps 的检查对它无意义。
+        return direct_chain(model, batch, record=record)
+
     steps = int(diffusion.T)
 
-    H_t = model.init_nodes(batch)
+    # persistent_state=false 的消融：每个 reverse step 都回到 H_init，且这个
+    # H_init 只算一次（与训练侧的 losses.py 用同一个写法，保证两侧一致）。
+    persistent = bool(getattr(model, "persistent_state", True))
+    H_init = model.init_nodes(batch)
+    H_t = H_init
     if stochastic:
         z_t = sample_prior(
             diffusion, batch.candidate_owner, batch.num_decisions, generator
@@ -213,7 +259,7 @@ def sample_reverse_chain(
         step = reverse_step(
             diffusion, model, batch, H_t, z_t, t, generator, stochastic=stochastic
         )
-        H_t = step["H_next"]
+        H_t = step["H_next"] if persistent else H_init
         z_t = step["z_prev"]
         last_log_prob = step["candidate_log_prob"]
         # 最后一个 reverse step（t=1）的 clean-state 概率分布：评测时用它算

@@ -96,6 +96,48 @@ def expand_to_edge_state(
     return physical_state[msg_to_phys_edge]
 
 
+def static_edge_state_ids(
+    batch,
+    source_forced_edge_ids: Optional[Tensor] = None,
+) -> Tensor:
+    """``E_static`` [E_msg]：**与 z_t 完全无关**的边状态。
+
+    只有 ``source_forced_edge_ids``（单出口 Source 的被迫段）是 SELECTED，
+    其余物理边一律 UNSELECTED。
+
+    这是消融 ``model.use_edge_state_conditioning=false`` 与
+    ``model.generation_mode=direct`` 用的输入 —— 两者都必须**彻底切断**
+    ``z_t -> edge state -> GraphFlow`` 这条动态反馈通路。
+
+    与 :func:`expand_to_edge_state` 共用同一套编号与 source-forced 语义，
+    唯一差别就是不做第 2 步（叠加 z_t 选中的 branch）。
+    """
+    device = batch.msg_to_phys_edge.device
+    num_physical_edges = int(batch.num_physical_edges)
+
+    physical_state = torch.full(
+        (max(num_physical_edges, 1),),
+        UNSELECTED,
+        dtype=torch.long,
+        device=device,
+    )
+    forced = source_forced_edge_ids
+    if forced is None:
+        forced = getattr(batch, "source_forced_edge_ids", None)
+    if forced is not None and forced.numel():
+        forced = forced.to(device=device, dtype=torch.long)
+        if int(forced.max()) >= num_physical_edges or int(forced.min()) < 0:
+            raise IndexError(
+                f"source_forced_edge_ids out of range for "
+                f"num_physical_edges={num_physical_edges}"
+            )
+        physical_state[forced] = SELECTED
+
+    if num_physical_edges == 0:
+        return torch.zeros(0, dtype=torch.long, device=device)
+    return physical_state[batch.msg_to_phys_edge]
+
+
 class EdgeStateEncoder(nn.Module):
     """z_t -> edge features [E_msg, d]。"""
 
@@ -119,3 +161,11 @@ class EdgeStateEncoder(nn.Module):
 
     def forward(self, batch, z_t: Tensor) -> Tensor:
         return self.embedding(self.state_ids(batch, z_t))
+
+    def static_features(self, batch) -> Tensor:
+        """不依赖 z_t 的边特征（消融用，见 :func:`static_edge_state_ids`）。
+
+        **刻意不接受 z_t 参数**：这样调用方不可能"顺手"把 z_t 传进来，
+        也就不可能把 label 泄漏进 Direct / No-Edge-State 这两个消融里。
+        """
+        return self.embedding(static_edge_state_ids(batch))

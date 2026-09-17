@@ -69,6 +69,10 @@ class GraphFlowDenoiser(nn.Module):
         slot_scale: float = 1.0,
         use_edge_cost: bool = False,
         edge_cost_hidden: Optional[int] = None,
+        persistent_state: bool = True,
+        use_edge_state_conditioning: bool = True,
+        branch_readout: str = "mean_pool",
+        generation_mode: str = "diffusion",
     ):
         super().__init__()
         self.d_model = int(d_model)
@@ -80,6 +84,19 @@ class GraphFlowDenoiser(nn.Module):
         # 因此 weighted=false 的模型参数集合与改动前完全相同。
         self.use_edge_cost = bool(use_edge_cost)
         self.edge_cost_hidden = edge_cost_hidden
+
+        # ---- 消融开关（默认值 == 改动前的行为，逐位不变）--------------------
+        #: False = 每个 reverse timestep 重新 init_nodes（不继承上一轮的 H）
+        self.persistent_state = bool(persistent_state)
+        #: False = 切断 z_t -> edge state -> GraphFlow 这条动态反馈
+        self.use_edge_state_conditioning = bool(use_edge_state_conditioning)
+        #: generation_mode="direct" 时完全没有 z_t，因此**永远**用静态边状态
+        if generation_mode not in ("diffusion", "direct"):
+            raise ValueError(
+                f"model.generation_mode={generation_mode!r} is not supported "
+                "(diffusion | direct)"
+            )
+        self.generation_mode = str(generation_mode)
 
         # P2-2：这两个配置项现在就真的控制行为，选到未实现的取值会立刻报错，
         # 而不是被静默忽略。
@@ -114,7 +131,8 @@ class GraphFlowDenoiser(nn.Module):
         else:
             self.edge_cost_encoder = None
         self.branch_scorer = BranchScorer(
-            d_model=self.d_model, hidden_dim=branch_hidden, dropout=dropout
+            d_model=self.d_model, hidden_dim=branch_hidden, dropout=dropout,
+            readout=branch_readout,
         )
 
         # 一个 reverse step 内部要做多轮图信息交流时，用"第几轮"的 embedding 作为
@@ -198,27 +216,39 @@ class GraphFlowDenoiser(nn.Module):
         return tau
 
     # ------------------------------------------------------------------
-    def step(
+    def _edge_features(self, batch, z_t: Optional[Tensor]) -> Tensor:
+        """这一轮 GraphFlow 用的边特征。
+
+        Full：``embed(expand_to_edge_state(z_t))`` —— z_t 选中哪条 branch，
+        那条 branch 的**所有物理边**就变 SELECTED。
+
+        ``use_edge_state_conditioning=false``：改用与 z_t 无关的静态边状态
+        （只有 source-forced 边 selected）。注意这里**仍然保留 EdgeStateEncoder
+        的 embedding 与参数**，只是输入恒定 —— 这样 GraphFlow 的输入维度、
+        参数量都不变，被删掉的只有 ``z_t -> edge state`` 这条反馈通路。
+
+        ``z_t`` 允许为 None（direct 模式）：那时强制走静态边状态。
+        """
+        if self.generation_mode == "direct" or not self.use_edge_state_conditioning:
+            return self.edge_state_encoder.static_features(batch)
+        if z_t is None:
+            raise ValueError(
+                "z_t is required when use_edge_state_conditioning=true and "
+                "generation_mode=diffusion"
+            )
+        return self.edge_state_encoder(batch, z_t)
+
+    def _forward_core(
         self,
         batch,
         H_t: Tensor,
-        z_t: Tensor,
+        edge_feat_t: Tensor,
         t,
-        flow_steps: Optional[int] = None,
+        steps: int,
     ) -> DenoiserOutput:
-        """(H_t, z_t, t) -> (H_{t-1}, candidate distribution over z_0)。
-
-        ``flow_steps`` 给了就临时覆盖 ``self.flow_steps``（推理 ablation 用），
-        不给就用模型自己的设置 —— 训练路径永远走默认值，行为不变。
-        """
-        steps = self.flow_steps if flow_steps is None else int(flow_steps)
-        if steps < 1:
-            raise ValueError(f"flow_steps must be >= 1, got {steps}")
-
+        """一轮 (H_t, E_t, t) -> (H_{t-1}, p(z_0))。step / direct 共用。"""
         tau_graph = self.time_embedding(t, batch.num_graphs)
         tau_decisions = broadcast_time_to_decisions(tau_graph, batch.decision_graph_id)
-
-        edge_feat_t = self.edge_state_encoder(batch, z_t)
 
         # Weighted：把物理边 cost 广播到 message 方向，再过连续编码器。
         # 同一条物理边的两个方向共用同一个 cost（走 msg_to_phys_edge 映射），
@@ -256,6 +286,45 @@ class GraphFlowDenoiser(nn.Module):
             attn_per_slot=flow_out.get("attn_per_slot"),
             flow_steps=int(flow_out.get("flow_steps", 1)),
         )
+
+    # ------------------------------------------------------------------
+    def step(
+        self,
+        batch,
+        H_t: Tensor,
+        z_t: Tensor,
+        t,
+        flow_steps: Optional[int] = None,
+    ) -> DenoiserOutput:
+        """(H_t, z_t, t) -> (H_{t-1}, candidate distribution over z_0)。
+
+        ``flow_steps`` 给了就临时覆盖 ``self.flow_steps``（推理 ablation 用），
+        不给就用模型自己的设置 —— 训练路径永远走默认值，行为不变。
+        """
+        steps = self.flow_steps if flow_steps is None else int(flow_steps)
+        if steps < 1:
+            raise ValueError(f"flow_steps must be >= 1, got {steps}")
+
+        edge_feat_t = self._edge_features(batch, z_t)
+        return self._forward_core(batch, H_t, edge_feat_t, t, steps)
+
+    def direct_logits(self, batch) -> DenoiserOutput:
+        """``generation_mode="direct"``：一次前向直接给出 p(z_0)，**没有 z_t**。
+
+        与 :meth:`step` 的唯一差别：
+
+        * 没有反向扩散链，所以没有 z_t —— 边状态强制走静态（与
+          ``use_edge_state_conditioning=false`` 同一套输入）；
+        * 时间条件固定 ``t=0``，让 BranchScorer / AdaLN 的输入维度与 Full 一致，
+          不需要为 direct 另设一套 scorer（参数量因此完全不变）；
+        * 只跑一次 GraphFlow（``flow_steps`` 轮）。
+
+        这个函数**不接受 z_t 参数**，从签名上就杜绝了
+        "把 GT z_0 当输入" 这类 label leakage。
+        """
+        H_init = self.init_nodes(batch)
+        edge_feat = self.edge_state_encoder.static_features(batch)
+        return self._forward_core(batch, H_init, edge_feat, 0, self.flow_steps)
 
     # 兼容旧调用写法：forward == step
     def forward(
