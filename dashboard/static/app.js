@@ -322,6 +322,7 @@ function setLoading(loading) {
   const button = $("#generate");
   button.disabled = loading;
   $("#random-sample").disabled = loading;
+  $("#export-video").disabled = loading || !state.pathData;
   button.textContent = loading ? "正在运行反向扩散…" : "生成并播放";
   $("#path-status").textContent = loading ? "模型推理中；首次切换模型需要加载 checkpoint" : $("#path-status").textContent;
 }
@@ -354,6 +355,7 @@ async function generatePath() {
       body: JSON.stringify(payload)
     });
     state.diffusionFrame = 0;
+    $("#export-video").disabled = false;
     $("#view-diffusion").disabled = !state.pathData.diffusion;
     renderPathInfo();
     if (state.view === "diffusion" && state.pathData.diffusion) {
@@ -367,6 +369,176 @@ async function generatePath() {
     $("#path-status").textContent = "推理未完成";
     showError(error.message);
   } finally { setLoading(false); }
+}
+
+function sleep(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** 把同源 stylesheet 注入 SVG 副本；否则序列化后 class 对应的线宽/颜色会丢失。 */
+function embeddedSvgCss() {
+  const chunks = [];
+  [...document.styleSheets].forEach((sheet) => {
+    try {
+      [...sheet.cssRules].forEach((rule) => chunks.push(rule.cssText));
+    } catch (_) {
+      // 跨域 stylesheet 不能读 cssRules；本面板资源同源，正常不会走到这里。
+    }
+  });
+  return chunks.join("\n");
+}
+
+/** 将当前 SVG 快照画进录制 canvas。 */
+async function paintVideoFrame(canvas) {
+  const svg = $("#graph");
+  const clone = svg.cloneNode(true);
+  clone.setAttribute("xmlns", NS);
+  clone.setAttribute("width", "1000");
+  clone.setAttribute("height", "620");
+  const style = document.createElementNS(NS, "style");
+  style.textContent = embeddedSvgCss();
+  clone.insertBefore(style, clone.firstChild);
+  const source = new window.XMLSerializer().serializeToString(clone);
+  const blob = new window.Blob([source], {type: "image/svg+xml;charset=utf-8"});
+  const url = window.URL.createObjectURL(blob);
+  try {
+    const image = document.createElement("img");
+    image.src = url;
+    try {
+      await image.decode();
+    } catch {
+      throw new Error("无法把当前 SVG 渲染为视频帧");
+    }
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#0b0e15";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    const scale = Math.min(canvas.width / 1000, canvas.height / 620);
+    const width = 1000 * scale;
+    const height = 620 * scale;
+    context.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+  } finally {
+    window.URL.revokeObjectURL(url);
+  }
+}
+
+function videoEncoding() {
+  const candidates = [
+    {mime: "video/mp4;codecs=avc1.42E01E", extension: "mp4"},
+    {mime: "video/webm;codecs=vp9", extension: "webm"},
+    {mime: "video/webm;codecs=vp8", extension: "webm"},
+    {mime: "video/webm", extension: "webm"}
+  ];
+  return candidates.find((item) => window.MediaRecorder.isTypeSupported(item.mime)) || null;
+}
+
+function downloadVideo(blob, extension) {
+  const parts = [
+    state.pathData?.model || "model",
+    `sample-${state.pathData?.index ?? 0}`,
+    state.view === "diffusion" ? `diffusion-${state.diffusionMode}` : "path-generation"
+  ];
+  const filename = parts.join("_").replace(/[^A-Za-z0-9._-]+/g, "-") + `.${extension}`;
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => window.URL.revokeObjectURL(url), 1000);
+  return filename;
+}
+
+/**
+ * 导出**当前视图**：路径页尊重当前速度/播放口径，扩散页尊重 clean/noisy 与速度。
+ * 画的是 graph SVG 本身，不会把侧栏、工具条或鼠标录进视频。
+ */
+async function exportCurrentVideo() {
+  if (!state.pathData) {
+    showError("请先生成一条路径");
+    return;
+  }
+  if (!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream) {
+    showError("当前浏览器不支持 Canvas 视频录制；请使用最新版 Chrome 或 Edge");
+    return;
+  }
+  const encoding = videoEncoding();
+  if (!encoding) {
+    showError("当前浏览器没有可用的视频编码器");
+    return;
+  }
+
+  const button = $("#export-video");
+  const savedFrame = state.diffusionFrame;
+  const savedProgress = state.lastProgress;
+  const savedView = state.view;
+  button.disabled = true;
+  button.classList.add("exporting");
+  button.textContent = "正在导出…";
+  stopAnimation();
+  stopDiffusion();
+
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 1280;
+    canvas.height = 720;
+    const fps = 20;
+    const stream = canvas.captureStream(fps);
+    const recorder = new window.MediaRecorder(stream, {
+      mimeType: encoding.mime,
+      videoBitsPerSecond: 8_000_000
+    });
+    const chunks = [];
+    recorder.addEventListener("dataavailable", (event) => {
+      if (event.data && event.data.size) chunks.push(event.data);
+    });
+    const stopped = new Promise((resolve) => recorder.addEventListener("stop", resolve, {once: true}));
+
+    if (savedView === "diffusion") renderDiffusionFrame(0);
+    else drawAnimation(0);
+    await paintVideoFrame(canvas);
+    recorder.start(250);
+    await sleep(350);
+
+    if (savedView === "diffusion") {
+      const frames = state.pathData.diffusion?.frames || [];
+      const delay = Math.max(55, diffusionDelay());
+      for (let index = 0; index < frames.length; index += 1) {
+        renderDiffusionFrame(index);
+        await paintVideoFrame(canvas);
+        await sleep(delay);
+      }
+    } else {
+      const speed = Math.max(0.1, Number($("#speed").value) || 1);
+      const duration = state.duration / speed;
+      const frameCount = Math.max(2, Math.round(duration / 1000 * fps));
+      for (let index = 0; index < frameCount; index += 1) {
+        const progress = index / (frameCount - 1);
+        drawAnimation((state.duration * progress) / speed);
+        await paintVideoFrame(canvas);
+        await sleep(1000 / fps);
+      }
+    }
+    await sleep(650);
+    recorder.stop();
+    await stopped;
+    stream.getTracks().forEach((track) => track.stop());
+    const video = new window.Blob(chunks, {type: encoding.mime});
+    const filename = downloadVideo(video, encoding.extension);
+    showNotice(`视频已导出：${filename}`);
+  } catch (error) {
+    showError(`视频导出失败：${error.message}`);
+  } finally {
+    button.classList.remove("exporting");
+    button.textContent = "⇩ 导出视频";
+    button.disabled = !state.pathData;
+    if (savedView === "diffusion") {
+      renderDiffusionFrame(savedFrame);
+    } else {
+      const speed = Math.max(0.1, Number($("#speed").value) || 1);
+      drawAnimation((state.duration * savedProgress) / speed);
+    }
+  }
 }
 
 function statusText(status) {
@@ -1343,6 +1515,7 @@ function bindEvents() {
   $("#ruler-reset").addEventListener("click", applyRulerDefaults);
   $("#generate").addEventListener("click", generatePath);
   $("#random-sample").addEventListener("click", pickRandomSample);
+  $("#export-video").addEventListener("click", exportCurrentVideo);
   $("#replay").addEventListener("click", () => startAnimation(true));
   $("#play-pause").addEventListener("click", toggleAnimation);
   $("#speed").addEventListener("change", () => { if (state.routeGraphics.length) startAnimation(true); });

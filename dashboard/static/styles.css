@@ -78,6 +78,9 @@ dd { margin: 5px 0 0; font-size: 14px; }
 .playback button { min-height: 34px; padding: 0 13px; }
 .playback label { grid-template-columns: auto 70px; align-items: center; }
 .playback select { min-height: 34px; }
+.export-video { min-height: 34px; padding: 0 13px; white-space: nowrap; border-color: #34435a; color: #bfe3ff; }
+.export-video:hover:not(:disabled) { border-color: #73d7ff; color: #e9f8ff; }
+.export-video.exporting { border-color: var(--accent); color: var(--accent); cursor: progress; }
 .advanced label:has(select:disabled), .advanced label:has(input:disabled) { opacity: .45; }
 .advanced input:disabled, .advanced select:disabled { cursor: not-allowed; }
 .ruler-note { align-self: center; color: var(--muted); font-size: 11px; }

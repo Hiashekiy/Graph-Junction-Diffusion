@@ -210,6 +210,15 @@ def test_app_js_has_no_undefined_calls() -> None:
     )
 
 
+def test_video_export_controls_and_capture_pipeline_exist() -> None:
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    script = (STATIC / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="export-video"' in html
+    for token in ("exportCurrentVideo", "captureStream", "MediaRecorder", "paintVideoFrame"):
+        assert token in script
+
+
 # ---------------------------------------------------------------------------
 # 2) DOM id 交叉检查
 # ---------------------------------------------------------------------------

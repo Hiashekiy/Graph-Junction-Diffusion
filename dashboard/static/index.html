@@ -87,6 +87,7 @@
               <label title="按长度：所有路线按几何长度同步画完（默认，画的是"最终结果"）。按搜索顺序：按 strict 束搜索里的**完成步数**一组一组地出现 —— 同一个 depth 的多条路线算同一轮毕业，所以能看到"同时只有 beam 条在走、到一条毕业一条"。">播放 <select id="anim-mode"><option value="length" selected>按长度</option><option value="search">按搜索顺序</option></select></label>
               <label title="全部（默认）：画出所有 decision 节点（原来的画法）。仅路线：只画「显示出来的路线经过的节点」+ S/G，图密的时候看路线更清楚。全关：一个节点圆点都不画，只留线。">节点 <select id="node-mode"><option value="all" selected>全部</option><option value="route">仅路线</option><option value="none">全关</option></select></label>
             </div>
+            <button id="export-video" class="export-video" type="button" disabled title="把当前路径生成或扩散过程导出为视频">⇩ 导出视频</button>
             <label class="switch" id="gt-switch"><input id="show-gt" type="checkbox" checked><span></span>GT 最短路</label>
           </div>
           <div class="diffusion-toolbar" id="diffusion-toolbar" hidden>
