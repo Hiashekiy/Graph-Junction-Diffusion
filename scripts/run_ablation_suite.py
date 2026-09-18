@@ -89,6 +89,25 @@ METRICS = [
 ]
 
 
+def preflight(need_eval: bool) -> List[str]:
+    """开跑前检查数据/配置是否齐 —— 缺文件时给一条清楚的清单。
+
+    不做这一步的后果实测过：评测阶段会为每个 run x 每个数据集各抛一次
+    FileNotFoundError traceback，刷十几屏，很难一眼看出"只是少拷了数据集"。
+    """
+    problems: List[str] = []
+    for rel in (CONFIG, TRAIN_DATA, VAL_DATA):
+        if not (PROJECT_ROOT / rel).exists():
+            problems.append(f"缺少训练输入: {rel}")
+    if need_eval:
+        for short, data, config, cn, _ph in EVAL_SETS:
+            if not (PROJECT_ROOT / config).exists():
+                problems.append(f"缺少配置（{cn}）: {config}")
+            if not (PROJECT_ROOT / data).exists():
+                problems.append(f"缺少数据集（{cn}）: {data}")
+    return problems
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="run the four structural ablations")
     parser.add_argument("--stage", choices=("all", "train", "eval", "report"), default="all")
@@ -299,6 +318,21 @@ def main() -> int:
         pretty = " ".join(f"--set {k}={v}" for k, v in overrides.items()) or "(无覆盖 = Full)"
         print(f"  {name:<18} {pretty}")
     print()
+
+    problems = preflight(need_eval=args.stage in ("all", "eval"))
+    if problems:
+        print("！开跑前检查未通过：")
+        for line in problems:
+            print(f"    - {line}")
+        print()
+        print("评测需要 3 个测试集（缺少的可以从训练机拷过来）：")
+        print("    data/didi/graph/chengdu/{train,val,test_1000}.pkl")
+        print("    data/didi/graph/chengdu_long/{test_1000}.pkl  + graph_global.pkl")
+        print("    data/didi/graph/xian/{test_1000}.pkl          + graph_global.pkl")
+        print()
+        print("或者：只在这台机器上训练，把 outputs/runs/ab_*/ 拷到有数据的机器上评测")
+        print("      （python scripts/run_ablation_suite.py --stage eval）")
+        return 2
 
     failures = 0
     if args.stage in ("all", "train"):
